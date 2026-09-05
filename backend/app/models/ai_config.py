@@ -1,0 +1,84 @@
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+
+
+class AiConfig(Base):
+    __tablename__ = "ai_configs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    ai_name: Mapped[str] = mapped_column(String(100), default="Mônica")
+    system_prompt: Mapped[str] = mapped_column(
+        Text,
+        default="Você é a Mônica, assistente virtual de atendimento. Seja cordial, objetiva e útil.",
+    )
+    llm_provider: Mapped[str] = mapped_column(String(50), default="openai")
+    llm_model: Mapped[str] = mapped_column(String(100), default="gpt-4o-mini")
+    llm_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    temperature: Mapped[float] = mapped_column(Float, default=0.3)
+    operation_mode: Mapped[str] = mapped_column(String(50), default="auto")  # auto | suggest | off
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    company = relationship("Company", back_populates="ai_config")
+    rag_sources = relationship("RagSource", back_populates="ai_config", cascade="all, delete-orphan")
+    tools = relationship("Tool", back_populates="ai_config", cascade="all, delete-orphan")
+
+
+class RagSource(Base):
+    __tablename__ = "rag_sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), index=True
+    )
+    ai_config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ai_configs.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(50), default="knowledge")
+    webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_latency_ms: Mapped[float | None] = mapped_column(Float)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    ai_config = relationship("AiConfig", back_populates="rag_sources")
+
+
+class Tool(Base):
+    __tablename__ = "tools"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), index=True
+    )
+    ai_config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ai_configs.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Identificador estável enviado ao webhook e usado p/ efeitos internos
+    # (transferir_atendimento, encerrar_atendimento). Ferramentas customizadas
+    # usam um slug livre e são tratadas de forma 100% genérica.
+    tool_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    # Lista de parâmetros que a IA deve extrair da conversa e mandar no webhook:
+    # [{"name": "cpf", "type": "string", "description": "...", "required": true}, ...]
+    parameters: Mapped[list] = mapped_column(JSONB, default=list)
+    tool_type: Mapped[str] = mapped_column(String(50), default="webhook")  # webhook | native
+    webhook_url: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    ai_config = relationship("AiConfig", back_populates="tools")
