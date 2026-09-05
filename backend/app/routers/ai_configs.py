@@ -296,6 +296,10 @@ async def test_chat(
 
     conv.ai_enabled = True
     conv.last_message_at = datetime.now(timezone.utc)
+    # Deixa escolher qual integração simular (ou nenhuma = ferramentas
+    # globais) — sem isso, ferramentas cadastradas só pra uma integração
+    # específica nunca apareceriam pra IA aqui, mesmo estando corretas.
+    conv.integration_id = payload.integration_id
 
     inbound = NormalizedMessageEvent(
         event_type="message_inbound",

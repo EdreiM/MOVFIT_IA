@@ -22,6 +22,7 @@ from app.models import (
     Message,
     MetricsDaily,
     Number,
+    Plan,
     RagSource,
     Tool,
     Unit,
@@ -410,6 +411,17 @@ def _wants_image_explicitly(text: str) -> bool:
     return bool(_normalize_tokens(text) & _IMAGE_REQUEST_KEYWORDS)
 
 
+def _mentions_any_plan(text_tokens: set[str], plans: list[Plan]) -> bool:
+    """Verdadeiro quando o texto (tipicamente a própria resposta da IA) cita
+    o nome de algum plano por extenso — sinal confiável de que o assunto é
+    mesmo plano, sem depender do cliente ter digitado o nome da unidade."""
+    for plan in plans:
+        name_tokens = _normalize_tokens(plan.name)
+        if name_tokens and name_tokens <= text_tokens:
+            return True
+    return False
+
+
 def _tool_to_openai_schema(tool: Tool) -> dict:
     properties: dict = {}
     required: list[str] = []
@@ -533,6 +545,7 @@ async def _auto_send_plan_images(
     db: AsyncSession,
     conversation: Conversation,
     user_text: str,
+    assistant_text: str,
     tools_by_key: dict[str, Tool],
     touched_units: set[str],
 ) -> None:
@@ -551,8 +564,6 @@ async def _auto_send_plan_images(
         return
 
     text_tokens = _normalize_tokens(user_text)
-    if not text_tokens:
-        return
 
     result = await db.execute(
         select(Unit)
@@ -560,12 +571,26 @@ async def _auto_send_plan_images(
         .where(Unit.company_id == conversation.company_id, Unit.is_active.is_(True))
     )
     units = result.scalars().unique().all()
-    candidates = [(str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}")) for u in units]
-    matched_unit_id = _unique_match(candidates, text_tokens, threshold=0.4)
-    if not matched_unit_id:
-        return
+    units_with_images = [u for u in units if any(p.is_active and p.image_url for p in u.plans)]
 
-    unit = next((u for u in units if str(u.id) == matched_unit_id), None)
+    unit = None
+    if text_tokens:
+        candidates = [(str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}")) for u in units]
+        matched_unit_id = _unique_match(candidates, text_tokens, threshold=0.4)
+        if matched_unit_id:
+            unit = next((u for u in units if str(u.id) == matched_unit_id), None)
+
+    if not unit and len(units_with_images) == 1:
+        # Cliente não citou a unidade (ex: "me mostra os planos"), mas só
+        # existe uma cadastrada — sem ambiguidade nenhuma pra resolver. Só
+        # dispara se a resposta da IA realmente citar um plano por extenso,
+        # pra não mandar imagem sem pedir em mensagens sem nada a ver (tipo
+        # um simples "oi, tudo bem?").
+        candidate_unit = units_with_images[0]
+        combined_tokens = text_tokens | _normalize_tokens(assistant_text)
+        if _mentions_any_plan(combined_tokens, candidate_unit.plans):
+            unit = candidate_unit
+
     if not unit or unit.name in touched_units:
         return
     if not any(p.is_active and p.image_url for p in unit.plans):
@@ -751,8 +776,9 @@ async def generate_ai_reply(
             tools=tool_defs,
         )
 
-    await _auto_send_plan_images(db, conversation, user_text, tools_by_key, touched_units)
-    return assistant_message.get("content")
+    final_text = assistant_message.get("content") or ""
+    await _auto_send_plan_images(db, conversation, user_text, final_text, tools_by_key, touched_units)
+    return final_text
 
 
 async def send_outbound(

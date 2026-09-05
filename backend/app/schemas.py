@@ -309,6 +309,7 @@ class ToolOut(BaseModel):
 # Test chat (playground)
 class TestChatRequest(BaseModel):
     text: str
+    integration_id: UUID | None = None
 
 
 class TestChatResponse(BaseModel):

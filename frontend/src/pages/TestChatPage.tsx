@@ -17,6 +17,11 @@ type AiConfig = {
   ai_name: string;
 };
 
+type Integration = {
+  id: string;
+  name: string;
+};
+
 const POLL_INTERVAL_MS = 1200;
 const POLL_MAX_ATTEMPTS = 40; // ~48s: cobre o debounce (padrão 8s) + latência da LLM + follow-ups rápidos
 
@@ -28,6 +33,8 @@ export default function TestChatPage() {
   const { companyId } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [aiName, setAiName] = useState("a IA");
+  const [integrations, setIntegrations] = useState<Integration[]>([]);
+  const [integrationId, setIntegrationId] = useState("");
   const [text, setText] = useState("");
   const [posting, setPosting] = useState(false);
   const [awaitingReply, setAwaitingReply] = useState(false);
@@ -47,6 +54,9 @@ export default function TestChatPage() {
     load().catch((e) => setError(e.message));
     api<AiConfig>(`/ai-configs/${companyId}`)
       .then((cfg) => setAiName(cfg.ai_name || "a IA"))
+      .catch(() => {});
+    api<Integration[]>(`/integrations`)
+      .then(setIntegrations)
       .catch(() => {});
   }, [companyId]);
 
@@ -99,7 +109,7 @@ export default function TestChatPage() {
     try {
       await api(`/ai-configs/${companyId}/test-chat`, {
         method: "POST",
-        body: JSON.stringify({ text: outgoing }),
+        body: JSON.stringify({ text: outgoing, integration_id: integrationId || null }),
       });
       pollForReply();
     } catch (err) {
@@ -145,6 +155,28 @@ export default function TestChatPage() {
           Limpar conversa
         </button>
       </div>
+
+      <label className="block max-w-sm space-y-1">
+        <span className="text-sm text-sand/60">
+          Simular integração{" "}
+          <span className="text-sand/40">
+            (ferramentas cadastradas só pra uma integração específica só aparecem pra IA
+            aqui se você selecionar essa mesma integração)
+          </span>
+        </span>
+        <select
+          className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+          value={integrationId}
+          onChange={(e) => setIntegrationId(e.target.value)}
+        >
+          <option value="">Nenhuma (só ferramentas globais)</option>
+          {integrations.map((i) => (
+            <option key={i.id} value={i.id}>
+              {i.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <div className="flex h-[60vh] flex-col border border-white/10 bg-panel">
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
