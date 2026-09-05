@@ -35,7 +35,7 @@ services:
       AI_REPLY_DEBOUNCE_SECONDS: 8
       AI_BUBBLE_MAX_CHARS: 320
       AI_BUBBLE_DELAY_SECONDS: 1.2
-      PUBLIC_BASE_URL: https://movfit-api.mov.pro.br
+      PUBLIC_BASE_URL: https://movfit-ia.mov.pro.br
     depends_on:
       db:
         condition: service_healthy
