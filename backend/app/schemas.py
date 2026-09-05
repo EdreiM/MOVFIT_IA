@@ -206,6 +206,7 @@ class PlanCreate(BaseModel):
     payment_info: str | None = None
     benefits: list[str] = Field(default_factory=list)
     image_url: str | None = None
+    signup_url: str | None = None
 
 
 class PlanUpdate(BaseModel):
@@ -216,6 +217,7 @@ class PlanUpdate(BaseModel):
     payment_info: str | None = None
     benefits: list[str] | None = None
     image_url: str | None = None
+    signup_url: str | None = None
     is_active: bool | None = None
 
 
@@ -229,6 +231,7 @@ class PlanOut(BaseModel):
     payment_info: str | None
     benefits: list[str]
     image_url: str | None
+    signup_url: str | None
     is_active: bool
 
     model_config = {"from_attributes": True}

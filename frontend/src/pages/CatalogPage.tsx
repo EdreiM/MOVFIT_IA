@@ -12,6 +12,7 @@ type Plan = {
   payment_info: string | null;
   benefits: string[];
   image_url: string | null;
+  signup_url: string | null;
   is_active: boolean;
 };
 
@@ -119,6 +120,7 @@ function PlanForm({
   const [paymentInfo, setPaymentInfo] = useState(initial?.payment_info ?? "");
   const [benefitsText, setBenefitsText] = useState(initial?.benefits.join("\n") ?? "");
   const [imageUrl, setImageUrl] = useState(initial?.image_url ?? "");
+  const [signupUrl, setSignupUrl] = useState(initial?.signup_url ?? "");
   const [open, setOpen] = useState(!!initial);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -153,6 +155,7 @@ function PlanForm({
         .map((b) => b.trim())
         .filter(Boolean),
       image_url: imageUrl.trim() || null,
+      signup_url: signupUrl.trim() || null,
     });
     if (!initial) {
       setName("");
@@ -162,6 +165,7 @@ function PlanForm({
       setPaymentInfo("");
       setBenefitsText("");
       setImageUrl("");
+      setSignupUrl("");
       setOpen(false);
     }
   };
@@ -245,6 +249,12 @@ function PlanForm({
         )}
         {uploadError && <p className="text-xs text-ember">{uploadError}</p>}
       </div>
+      <input
+        className="rounded-md border border-white/15 bg-ink px-2 py-1.5 text-sm sm:col-span-2"
+        placeholder="Link de cadastro/matrícula (a IA envia quando o cliente escolher este plano)"
+        value={signupUrl}
+        onChange={(e) => setSignupUrl(e.target.value)}
+      />
       <div className="flex gap-2 sm:col-span-2">
         <button type="submit" className="rounded-md bg-leaf px-3 py-1.5 text-sm font-semibold text-white hover:bg-lime">
           {submitLabel}
@@ -488,6 +498,11 @@ export default function CatalogPage() {
                         </p>
                         {plan.benefits.length > 0 && (
                           <p className="text-xs text-sand/40">{plan.benefits.join(" · ")}</p>
+                        )}
+                        {plan.signup_url ? (
+                          <p className="break-all text-xs text-lime">🔗 {plan.signup_url}</p>
+                        ) : (
+                          <p className="text-xs text-ember/70">Sem link de cadastro cadastrado</p>
                         )}
                       </div>
                     </div>

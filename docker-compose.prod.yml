@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: monica
+      POSTGRES_PASSWORD: monica
+      POSTGRES_DB: monica
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monica -d monica"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: edreimp/movfit-ia-backend:latest
+    ports:
+      # host:container — 8001 no host pra não colidir com a porta 8000 que o
+      # próprio Portainer usa (Edge Agent). Dentro do container continua 8000.
+      - "8001:8000"
+    environment:
+      APP_NAME: Monica AI
+      APP_ENV: production
+      # TROQUE por uma string aleatória longa (ex: gerada com `openssl rand -hex 32`) — nunca use o valor de dev.
+      SECRET_KEY: TROQUE-POR-UM-SEGREDO-LONGO-E-ALEATORIO
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      REFRESH_TOKEN_EXPIRE_DAYS: 7
+      DATABASE_URL: postgresql+asyncpg://monica:monica@db:5432/monica
+      # TROQUE também — precisa ter exatamente 32 bytes, nunca use o valor de dev.
+      ENCRYPTION_KEY: TROQUE-POR-32-BYTES-ALEATORIOS!!
+      # Domínio(s) do frontend em produção, separados por vírgula (sem barra no final).
+      CORS_ORIGINS: https://TROQUE-PELO-DOMINIO-DO-FRONTEND
+      OPENAI_DEFAULT_MODEL: gpt-4o-mini
+      AI_REPLY_DEBOUNCE_SECONDS: 8
+      AI_BUBBLE_MAX_CHARS: 320
+      AI_BUBBLE_DELAY_SECONDS: 1.2
+      PUBLIC_BASE_URL: https://movfit-api.mov.pro.br
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - uploads:/app/uploads
+
+  frontend:
+    image: edreimp/movfit-ia-frontend:latest
+    ports:
+      - "5174:5174"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:

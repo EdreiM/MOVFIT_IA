@@ -13,4 +13,7 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Roda migrations + seed (idempotente — só cria dados na primeira vez) antes
+# de subir o servidor, pra imagem funcionar sozinha em produção sem depender
+# de um passo manual de migração.
+CMD ["sh", "-c", "alembic upgrade head && python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

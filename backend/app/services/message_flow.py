@@ -222,6 +222,8 @@ async def build_catalog_context(db: AsyncSession, company_id: UUID) -> str:
             lines.append(line)
             if p.benefits:
                 lines.append("  Benefícios: " + "; ".join(p.benefits))
+            if p.signup_url:
+                lines.append(f"  Link de cadastro: {p.signup_url}")
         blocks.append("\n".join(lines))
 
     return "\n\n".join(blocks)
@@ -530,7 +532,11 @@ async def generate_ai_reply(
                 "content": (
                     "[Planos]\n"
                     "Catálogo oficial de unidades e planos, sempre atualizado — use isso, "
-                    "não invente valores fora daqui:\n" + catalog_context
+                    "não invente valores fora daqui. Quando o cliente confirmar qual plano "
+                    "específico ele quer (não só a unidade), e esse plano tiver um \"Link de "
+                    "cadastro\", envie esse link exatamente como está aqui — não invente nem "
+                    "reproduza de memória. Se o plano não tiver link, avise que vai encaminhar "
+                    "para um atendente concluir a matrícula.\n" + catalog_context
                 ),
             }
         )

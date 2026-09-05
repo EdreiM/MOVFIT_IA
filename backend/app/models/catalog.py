@@ -48,6 +48,7 @@ class Plan(Base):
     payment_info: Mapped[str | None] = mapped_column(String(255))  # ex: "12x no cartão de crédito"
     benefits: Mapped[list] = mapped_column(JSONB, default=list)  # lista de strings
     image_url: Mapped[str | None] = mapped_column(Text)
+    signup_url: Mapped[str | None] = mapped_column(Text)  # link de cadastro/matrícula desse plano
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
