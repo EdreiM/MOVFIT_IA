@@ -110,6 +110,46 @@ export default function AiConfigPage() {
     return <p className="text-sand/60">Carregando configuração…</p>;
   }
 
+  type Warning = { level: "error" | "warning"; text: string };
+  const warnings: Warning[] = [];
+  if (!config.has_api_key) {
+    warnings.push({
+      level: "error",
+      text: "Sem API key da OpenAI configurada — a IA não vai gerar nenhuma resposta até isso ser preenchido.",
+    });
+  }
+  if (config.operation_mode === "off") {
+    warnings.push({
+      level: "error",
+      text: "Modo de operação está \"Desligado\" — a IA não vai responder automaticamente a nenhuma mensagem.",
+    });
+  }
+  if (!config.system_prompt.trim()) {
+    warnings.push({
+      level: "warning",
+      text: "Prompt do sistema está vazio — a IA vai responder sem nenhuma instrução de comportamento.",
+    });
+  }
+  if (config.system_prompt.trim() && !config.system_prompt.includes("{ai_name}")) {
+    warnings.push({
+      level: "warning",
+      text: 'Prompt não usa o placeholder "{ai_name}" — se trocar o nome da IA depois, o prompt não vai acompanhar automaticamente.',
+    });
+  }
+  if (config.operation_mode === "suggest") {
+    warnings.push({
+      level: "warning",
+      text: 'Modo "Só sugerir" está ativo — a IA não envia a resposta direto ao cliente, só deixa sugerida para aprovação humana.',
+    });
+  }
+  const activeRags = rags.filter((r) => r.is_active);
+  if (activeRags.length === 0 && rags.length > 0) {
+    warnings.push({
+      level: "warning",
+      text: "Todas as RAGs cadastradas estão inativas — a IA não vai consultar nenhuma base externa.",
+    });
+  }
+
   return (
     <div className="space-y-8">
       <div>
@@ -118,6 +158,24 @@ export default function AiConfigPage() {
           Prompt, provedor LLM, API key e RAGs via webhook n8n.
         </p>
       </div>
+
+      {warnings.length > 0 && (
+        <ul className="space-y-2">
+          {warnings.map((w, i) => (
+            <li
+              key={i}
+              className={`rounded-md border px-4 py-2.5 text-sm ${
+                w.level === "error"
+                  ? "border-ember/40 bg-ember/10 text-ember"
+                  : "border-amber-400/40 bg-amber-400/10 text-amber-300"
+              }`}
+            >
+              {w.level === "error" ? "⚠ " : "• "}
+              {w.text}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <form onSubmit={save} className="space-y-4 border border-white/10 bg-panel p-5">
         <label className="block space-y-1 sm:max-w-xs">

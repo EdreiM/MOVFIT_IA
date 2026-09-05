@@ -635,6 +635,26 @@ async def generate_ai_reply(
                 "content": f"Contexto da base de conhecimento:\n{rag_context}",
             }
         )
+    units_result = await db.execute(
+        select(Unit.name).where(Unit.company_id == conversation.company_id, Unit.is_active.is_(True))
+    )
+    active_unit_names = [n for (n,) in units_result.all()]
+    if len(active_unit_names) > 1:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Esta academia tem mais de uma unidade: " + ", ".join(active_unit_names) + ". "
+                    "Informações como horário de funcionamento, endereço, estrutura, estacionamento "
+                    "e aulas variam de unidade para unidade. Se o cliente perguntar algo assim e "
+                    "ainda não tiver dito nesta conversa qual unidade é a dele, PERGUNTE primeiro "
+                    "qual unidade antes de responder — como um atendente humano faria. Nunca escolha "
+                    "uma unidade por conta própria nem misture dados de unidades diferentes. Se o "
+                    "cliente já informou a unidade antes na conversa, não pergunte de novo, use a "
+                    "que ele já disse."
+                ),
+            }
+        )
     catalog_context = await build_catalog_context(db, conversation.company_id)
     if catalog_context:
         messages.append(
