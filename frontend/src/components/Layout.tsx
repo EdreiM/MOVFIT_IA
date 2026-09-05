@@ -66,7 +66,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 ))}
               </select>
             )}
-            <span className="hidden text-sand/60 sm:inline">{user?.full_name}</span>
+            <NavLink
+              to="/account"
+              className={({ isActive }) =>
+                `hidden text-sand/60 hover:text-sand sm:inline ${isActive ? "text-lime" : ""}`
+              }
+            >
+              {user?.full_name}
+            </NavLink>
             <button
               onClick={logout}
               className="rounded-md border border-white/15 px-3 py-1.5 text-sand/80 hover:border-ember/50 hover:text-ember"

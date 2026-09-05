@@ -18,6 +18,12 @@ class Conversation(Base):
     number_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("numbers.id", ondelete="SET NULL"), nullable=True
     )
+    # Qual integração originou essa conversa — define quais ferramentas
+    # "escopadas por integração" a IA usa aqui, e pra onde o outbound manda a
+    # resposta (em vez de mandar pra todas as integrações ativas da empresa).
+    integration_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("integrations.id", ondelete="SET NULL"), index=True
+    )
     external_conversation_id: Mapped[str | None] = mapped_column(String(255), index=True)
     contact_phone: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     contact_name: Mapped[str | None] = mapped_column(String(255))

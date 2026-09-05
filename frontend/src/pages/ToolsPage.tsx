@@ -16,8 +16,14 @@ type Tool = {
   description: string | null;
   parameters: ToolParameter[];
   webhook_url: string | null;
+  integration_id: string | null;
   is_active: boolean;
   last_executed_at: string | null;
+};
+
+type Integration = {
+  id: string;
+  name: string;
 };
 
 const PRESETS: { key: string; label: string; description: string }[] = [
@@ -58,6 +64,8 @@ export default function ToolsPage() {
   const [webhookUrl, setWebhookUrl] = useState("");
   const [params, setParams] = useState<ToolParameter[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [integrations, setIntegrations] = useState<Integration[]>([]);
+  const [integrationId, setIntegrationId] = useState("");
 
   const load = () => {
     if (!companyId) return;
@@ -68,6 +76,7 @@ export default function ToolsPage() {
 
   useEffect(() => {
     load();
+    api<Integration[]>("/integrations").then(setIntegrations).catch(() => {});
   }, [companyId]);
 
   const onPresetChange = (key: string) => {
@@ -95,6 +104,7 @@ export default function ToolsPage() {
     setCustomKey("");
     setWebhookUrl("");
     setParams([]);
+    setIntegrationId("");
   };
 
   const onEdit = (tool: Tool) => {
@@ -106,6 +116,7 @@ export default function ToolsPage() {
     setDescription(tool.description ?? "");
     setWebhookUrl(tool.webhook_url ?? "");
     setParams(tool.parameters.map((p) => ({ ...p })));
+    setIntegrationId(tool.integration_id ?? "");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -123,6 +134,7 @@ export default function ToolsPage() {
             description,
             webhook_url: webhookUrl,
             parameters: params.filter((p) => p.name.trim()),
+            integration_id: integrationId || null,
           }),
         });
         resetForm();
@@ -147,6 +159,7 @@ export default function ToolsPage() {
           description,
           webhook_url: webhookUrl,
           parameters: params.filter((p) => p.name.trim()),
+          integration_id: integrationId || null,
         }),
       });
       resetForm();
@@ -254,6 +267,24 @@ export default function ToolsPage() {
         </label>
 
         <label className="block space-y-1">
+          <span className="text-sm text-sand/60">
+            Integração <span className="text-sand/40">(em qual conversa a IA usa esse webhook)</span>
+          </span>
+          <select
+            className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+            value={integrationId}
+            onChange={(e) => setIntegrationId(e.target.value)}
+          >
+            <option value="">Todas (global)</option>
+            {integrations.map((i) => (
+              <option key={i.id} value={i.id}>
+                {i.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="block space-y-1">
           <span className="text-sm text-sand/60">URL do webhook (n8n)</span>
           <input
             className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
@@ -347,6 +378,12 @@ export default function ToolsPage() {
                 </p>
                 {t.description && <p className="mt-0.5 text-sm text-sand/60">{t.description}</p>}
                 {t.webhook_url && <p className="mt-1 break-all text-xs text-sand/40">{t.webhook_url}</p>}
+                <p className="mt-1 text-xs text-sand/40">
+                  Integração:{" "}
+                  {t.integration_id
+                    ? integrations.find((i) => i.id === t.integration_id)?.name ?? "desconhecida"
+                    : "Todas (global)"}
+                </p>
                 {t.parameters.length > 0 && (
                   <p className="mt-1 text-xs text-sand/40">
                     Parâmetros: {t.parameters.map((p) => p.name).join(", ")}

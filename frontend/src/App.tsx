@@ -10,6 +10,7 @@ import IntegrationsPage from "./pages/IntegrationsPage";
 import TestChatPage from "./pages/TestChatPage";
 import ToolsPage from "./pages/ToolsPage";
 import CatalogPage from "./pages/CatalogPage";
+import AccountPage from "./pages/AccountPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -42,6 +43,7 @@ export default function App() {
                 <Route path="/catalog" element={<CatalogPage />} />
                 <Route path="/conversations" element={<ConversationsPage />} />
                 <Route path="/integrations" element={<IntegrationsPage />} />
+                <Route path="/account" element={<AccountPage />} />
               </Routes>
             </Layout>
           </PrivateRoute>

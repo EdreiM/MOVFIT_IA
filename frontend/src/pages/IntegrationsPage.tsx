@@ -6,10 +6,13 @@ type Integration = {
   name: string;
   integration_type: string;
   adapter_key: string;
+  inbound_secret: string | null;
   outbound_url: string | null;
   field_mapping: Record<string, string> | null;
   is_active: boolean;
 };
+
+const inboundUrl = (i: Integration) => `${API_URL}/webhooks/inbound/${i.id}/${i.inbound_secret ?? ""}`;
 
 // Campos que o adaptador genérico entende (app/adapters/generic_mapping.py) —
 // o valor é o caminho (estilo "data.message.text") dentro do JSON que a
@@ -59,6 +62,23 @@ export default function IntegrationsPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro");
+    }
+  };
+
+  const onRegenerateSecret = async (i: Integration) => {
+    if (
+      !confirm(
+        `Gerar uma URL nova pra "${i.name}"? A URL antiga para de funcionar imediatamente — você vai precisar atualizar o webhook na plataforma externa.`
+      )
+    )
+      return;
+    setError("");
+    try {
+      const updated = await api<Integration>(`/integrations/${i.id}/regenerate-secret`, { method: "POST" });
+      setCreated(updated);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao regenerar segredo");
     }
   };
 
@@ -249,7 +269,7 @@ export default function IntegrationsPage() {
             externa (e marque lá o evento de mensagem recebida):
           </p>
           <p className="mt-2 break-all rounded-md bg-ink px-3 py-2 text-sm text-lime">
-            {API_URL}/webhooks/inbound/{created.id}
+            {inboundUrl(created)}
           </p>
           <button
             type="button"
@@ -283,6 +303,14 @@ export default function IntegrationsPage() {
                 )}
                 <button
                   type="button"
+                  onClick={() => onRegenerateSecret(i)}
+                  title="Gera uma URL nova — a antiga para de funcionar. Use se o link vazou."
+                  className="rounded-md border border-white/15 px-2 py-1 text-xs text-sand/60 hover:bg-white/5"
+                >
+                  Regenerar segredo
+                </button>
+                <button
+                  type="button"
                   onClick={() => onDelete(i.id, i.name)}
                   className="rounded-md border border-ember/40 px-2 py-1 text-xs text-ember hover:bg-ember/10"
                 >
@@ -290,9 +318,7 @@ export default function IntegrationsPage() {
                 </button>
               </div>
             </div>
-            <p className="mt-1 break-all text-sm text-lime">
-              Inbound: {API_URL}/webhooks/inbound/{i.id}
-            </p>
+            <p className="mt-1 break-all text-sm text-lime">Inbound: {inboundUrl(i)}</p>
             {i.outbound_url && (
               <p className="mt-1 break-all text-sm text-sand/50">Outbound: {i.outbound_url}</p>
             )}

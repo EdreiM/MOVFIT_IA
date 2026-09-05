@@ -132,7 +132,13 @@ export default function AiConfigPage() {
         </label>
 
         <label className="block space-y-1">
-          <span className="text-sm text-sand/60">Prompt do sistema</span>
+          <span className="text-sm text-sand/60">
+            Prompt do sistema{" "}
+            <span className="text-sand/40">
+              (use <code className="text-lime">{"{ai_name}"}</code> em vez de digitar o nome direto — daí,
+              se trocar o "Nome da IA" acima, o prompt já acompanha, sem digitar o nome duas vezes)
+            </span>
+          </span>
           <textarea
             className="min-h-32 w-full rounded-md border border-white/15 bg-ink px-3 py-2"
             value={config.system_prompt}

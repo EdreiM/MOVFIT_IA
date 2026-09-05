@@ -54,6 +54,17 @@ export default function NumbersPage() {
     await load();
   };
 
+  const onDelete = async (n: NumberItem) => {
+    if (!confirm(`Excluir o número/canal "${n.label}"?`)) return;
+    setError("");
+    try {
+      await api(`/numbers/${n.id}`, { method: "DELETE" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao excluir");
+    }
+  };
+
   return (
     <div className="space-y-8">
       <div>
@@ -104,14 +115,22 @@ export default function NumbersPage() {
                 {n.phone} · {n.channel_type}
               </p>
             </div>
-            <button
-              onClick={() => toggle(n)}
-              className={`rounded-md px-3 py-1.5 text-sm ${
-                n.is_active ? "bg-leaf text-white" : "bg-white/5 text-muted"
-              }`}
-            >
-              {n.is_active ? "Ativo" : "Inativo"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => toggle(n)}
+                className={`rounded-md px-3 py-1.5 text-sm ${
+                  n.is_active ? "bg-leaf text-white" : "bg-white/5 text-muted"
+                }`}
+              >
+                {n.is_active ? "Ativo" : "Inativo"}
+              </button>
+              <button
+                onClick={() => onDelete(n)}
+                className="rounded-md border border-ember/40 px-3 py-1.5 text-sm text-ember hover:bg-ember/10"
+              >
+                Excluir
+              </button>
+            </div>
           </li>
         ))}
         {items.length === 0 && (

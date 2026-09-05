@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,7 +22,6 @@ from app.models import (
     Message,
     MetricsDaily,
     Number,
-    Plan,
     RagSource,
     Tool,
     Unit,
@@ -88,6 +87,7 @@ async def get_or_create_conversation(
     company_id: UUID,
     event: NormalizedMessageEvent,
     number: Number | None = None,
+    integration_id: UUID | None = None,
 ) -> Conversation:
     conv: Conversation | None = None
     if event.external_conversation_id:
@@ -116,6 +116,7 @@ async def get_or_create_conversation(
         conv = Conversation(
             company_id=company_id,
             number_id=number.id if number else None,
+            integration_id=integration_id,
             external_conversation_id=event.external_conversation_id,
             contact_phone=event.contact_phone or "unknown",
             contact_name=event.contact_name,
@@ -131,6 +132,8 @@ async def get_or_create_conversation(
             conv.contact_name = event.contact_name
         if event.external_conversation_id and not conv.external_conversation_id:
             conv.external_conversation_id = event.external_conversation_id
+        if integration_id and not conv.integration_id:
+            conv.integration_id = integration_id
         conv.last_message_at = event.timestamp or datetime.now(timezone.utc)
 
     if event.human_handoff_detected:
@@ -323,13 +326,22 @@ def _normalize_tokens(text: str) -> set[str]:
 def _best_matches(candidates: list[tuple[str, set[str]]], arg_tokens: set[str], threshold: float) -> list[str]:
     """Pontua cada candidato pela fração dos seus tokens de identidade que
     aparecem nos argumentos da IA (recall) — não exige nome idêntico, só que
-    o suficiente dele apareça. Empate no topo = ambíguo, não arrisca."""
+    o suficiente dele apareça. Retorna todo mundo empatado no topo — quem
+    chama decide o que fazer com empate (ver `_unique_match`)."""
     scored = [(name, len(tokens & arg_tokens) / len(tokens)) for name, tokens in candidates if tokens]
     scored = [(name, score) for name, score in scored if score >= threshold]
     if not scored:
         return []
     best_score = max(score for _, score in scored)
     return [name for name, score in scored if score == best_score]
+
+
+def _unique_match(candidates: list[tuple[str, set[str]]], arg_tokens: set[str], threshold: float) -> str | None:
+    """Como `_best_matches`, mas só devolve um resultado quando ele é
+    inequívoco — empate no topo (duas unidades igualmente prováveis) devolve
+    None, porque errar a unidade é pior do que admitir que não achou."""
+    matches = _best_matches(candidates, arg_tokens, threshold)
+    return matches[0] if len(matches) == 1 else None
 
 
 async def _resolve_plan_images(db: AsyncSession, company_id: UUID, arguments: dict) -> list[dict]:
@@ -358,18 +370,44 @@ async def _resolve_plan_images(db: AsyncSession, company_id: UUID, arguments: di
     unit_candidates = [
         (str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}")) for u in units
     ]
-    matched_ids = set(_best_matches(unit_candidates, arg_tokens, threshold=0.4))
-    matched_units = [u for u in units if str(u.id) in matched_ids]
+    matched_unit_id = _unique_match(unit_candidates, arg_tokens, threshold=0.4)
+    matched_units = [u for u in units if str(u.id) == matched_unit_id] if matched_unit_id else []
 
     images: list[dict] = []
     for unit in matched_units:
         available = [p for p in unit.plans if p.is_active and p.image_url]
         plan_candidates = [(str(p.id), _normalize_tokens(p.name)) for p in available]
-        matched_plan_ids = set(_best_matches(plan_candidates, arg_tokens, threshold=0.4))
-        matched_plans = [p for p in available if str(p.id) in matched_plan_ids]
+        matched_plan_id = _unique_match(plan_candidates, arg_tokens, threshold=0.4)
+        matched_plans = [p for p in available if str(p.id) == matched_plan_id] if matched_plan_id else []
         for plan in matched_plans or available:
             images.append({"unidade": unit.name, "plano": plan.name, "url": plan.image_url})
     return images
+
+
+async def _get_sent_plan_image_urls(db: AsyncSession, conversation_id: UUID) -> set[str]:
+    """URLs de imagem de plano já mandadas nesta conversa — pra não repetir a
+    mesma imagem toda vez que o assunto voltar à tona (só reenvia se o
+    cliente pedir explicitamente de novo)."""
+    result = await db.execute(
+        select(Message.raw_payload).where(
+            Message.conversation_id == conversation_id,
+            Message.content_type == "image",
+        )
+    )
+    urls: set[str] = set()
+    for payload in result.scalars().all():
+        for img in (payload or {}).get("images", []):
+            url = img.get("url")
+            if url:
+                urls.add(url)
+    return urls
+
+
+_IMAGE_REQUEST_KEYWORDS = {"imagem", "imagens", "foto", "fotos"}
+
+
+def _wants_image_explicitly(text: str) -> bool:
+    return bool(_normalize_tokens(text) & _IMAGE_REQUEST_KEYWORDS)
 
 
 def _tool_to_openai_schema(tool: Tool) -> dict:
@@ -401,6 +439,8 @@ async def execute_tool(
     tool: Tool,
     arguments: dict,
     conversation: Conversation,
+    force_resend: bool = False,
+    touched_units: set[str] | None = None,
 ) -> dict:
     if not tool.webhook_url:
         return {"sucesso": False, "mensagem": "Ferramenta sem webhook configurado."}
@@ -412,11 +452,30 @@ async def execute_tool(
     }
     plan_images: list[dict] = []
     if tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES:
-        plan_images = await _resolve_plan_images(db, conversation.company_id, arguments)
+        resolved_images = await _resolve_plan_images(db, conversation.company_id, arguments)
+        if touched_units is not None:
+            # Registra a unidade como "atendida nesta resposta" mesmo se o
+            # dedup abaixo acabar não mandando nada — evita que a chamada da
+            # IA e o gatilho automático mandem a mesma imagem duas vezes na
+            # mesma resposta quando o cliente pede reenvio explícito.
+            touched_units.update(img["unidade"] for img in resolved_images)
+        if force_resend:
+            plan_images = resolved_images
+        else:
+            already_sent = await _get_sent_plan_image_urls(db, conversation.id)
+            plan_images = [img for img in resolved_images if img["url"] not in already_sent]
         contexto["imagens_planos"] = plan_images
         logger.info(
-            "enviar_imagens_planos: arguments=%r resolved=%d imagens", arguments, len(plan_images)
+            "enviar_imagens_planos: arguments=%r resolved=%d imagens (force_resend=%s)",
+            arguments,
+            len(plan_images),
+            force_resend,
         )
+        if resolved_images and not plan_images:
+            # Achou o(s) plano(s), mas a imagem de cada um já foi mandada
+            # antes nesta conversa e o cliente não pediu reenvio — não vale
+            # nem chamar o webhook de novo.
+            return {"sucesso": True, "mensagem": "Imagens já enviadas anteriormente nesta conversa.", "dados": {}}
 
     payload = {
         "ferramenta": tool.tool_key,
@@ -470,6 +529,54 @@ async def execute_tool(
     return data
 
 
+async def _auto_send_plan_images(
+    db: AsyncSession,
+    conversation: Conversation,
+    user_text: str,
+    tools_by_key: dict[str, Tool],
+    touched_units: set[str],
+) -> None:
+    """Rede de segurança: garante que a imagem do plano seja mandada quando o
+    cliente menciona uma unidade, mesmo que a IA não decida chamar a
+    ferramenta por conta própria (comportamento de prompt não é 100%
+    consistente). O dedup ("não repetir a mesma imagem") e o reenvio quando
+    o cliente pede explicitamente já são tratados dentro do execute_tool,
+    então essa função só decide QUANDO tentar chamar, não SE deve repetir.
+
+    `touched_units` traz as unidades que a própria IA já mandou imagem nessa
+    mesma resposta (via chamada de ferramenta) — pula essas pra não mandar a
+    mesma imagem duas vezes numa resposta só."""
+    tool = tools_by_key.get(TOOL_KEY_SEND_PLAN_IMAGES)
+    if not tool or not tool.webhook_url:
+        return
+
+    text_tokens = _normalize_tokens(user_text)
+    if not text_tokens:
+        return
+
+    result = await db.execute(
+        select(Unit)
+        .options(selectinload(Unit.plans))
+        .where(Unit.company_id == conversation.company_id, Unit.is_active.is_(True))
+    )
+    units = result.scalars().unique().all()
+    candidates = [(str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}")) for u in units]
+    matched_unit_id = _unique_match(candidates, text_tokens, threshold=0.4)
+    if not matched_unit_id:
+        return
+
+    unit = next((u for u in units if str(u.id) == matched_unit_id), None)
+    if not unit or unit.name in touched_units:
+        return
+    if not any(p.is_active and p.image_url for p in unit.plans):
+        return
+
+    force_resend = _wants_image_explicitly(user_text)
+    await execute_tool(
+        db, tool, {"Unidade": unit.name}, conversation, force_resend=force_resend, touched_units=touched_units
+    )
+
+
 async def generate_ai_reply(
     db: AsyncSession,
     conversation: Conversation,
@@ -503,7 +610,11 @@ async def generate_ai_reply(
     is_first_contact = not any(m.actor in {"ai", "human_agent"} for m in history)
 
     ai_name = config.ai_name or "assistente virtual"
-    messages = [{"role": "system", "content": config.system_prompt}]
+    # Permite usar {ai_name} no prompt pra sempre bater com o campo "Nome da
+    # IA" — sem isso, quem trocasse o nome só nesse campo ficaria com um
+    # prompt cujo texto continua citando o nome antigo escrito à mão.
+    system_prompt = (config.system_prompt or "").replace("{ai_name}", ai_name)
+    messages = [{"role": "system", "content": system_prompt}]
     if is_first_contact:
         messages.append(
             {
@@ -546,10 +657,19 @@ async def generate_ai_reply(
             messages.append({"role": role, "content": m.text})
 
     tools_result = await db.execute(
-        select(Tool).where(Tool.company_id == conversation.company_id, Tool.is_active.is_(True))
+        select(Tool).where(
+            Tool.company_id == conversation.company_id,
+            Tool.is_active.is_(True),
+            or_(Tool.integration_id.is_(None), Tool.integration_id == conversation.integration_id),
+        )
     )
     active_tools = tools_result.scalars().all()
-    tools_by_key = {t.tool_key: t for t in active_tools}
+    # Se uma ferramenta global e uma escopada pra essa integração dividem o
+    # mesmo tool_key, a escopada vence — é o webhook certo pra essa conversa.
+    tools_by_key: dict[str, Tool] = {}
+    for t in sorted(active_tools, key=lambda t: t.integration_id is not None):
+        tools_by_key[t.tool_key] = t
+    active_tools = list(tools_by_key.values())
     tool_defs = [_tool_to_openai_schema(t) for t in active_tools] or None
 
     assistant_message = await chat_completion(
@@ -561,6 +681,7 @@ async def generate_ai_reply(
         tools=tool_defs,
     )
 
+    touched_units: set[str] = set()
     max_tool_rounds = 4
     rounds = 0
     while assistant_message.get("tool_calls") and rounds < max_tool_rounds:
@@ -582,7 +703,14 @@ async def generate_ai_reply(
 
             tool = tools_by_key.get(key)
             if tool:
-                result = await execute_tool(db, tool, arguments, conversation)
+                result = await execute_tool(
+                    db,
+                    tool,
+                    arguments,
+                    conversation,
+                    force_resend=_wants_image_explicitly(user_text),
+                    touched_units=touched_units,
+                )
             else:
                 result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
 
@@ -603,6 +731,7 @@ async def generate_ai_reply(
             tools=tool_defs,
         )
 
+    await _auto_send_plan_images(db, conversation, user_text, tools_by_key, touched_units)
     return assistant_message.get("content")
 
 
@@ -612,13 +741,24 @@ async def send_outbound(
     conversation: Conversation,
     text: str,
 ) -> None:
-    result = await db.execute(
-        select(Integration).where(
+    if conversation.integration_id:
+        # Conversa tem origem conhecida — manda só pra ela, não pra todas as
+        # integrações ativas da empresa (senão uma resposta de um canal
+        # vazaria/duplicaria pros outros).
+        stmt = select(Integration).where(
+            Integration.id == conversation.integration_id,
+            Integration.is_active.is_(True),
+            Integration.outbound_url.is_not(None),
+        )
+    else:
+        # Conversa antiga ou sem integração rastreada (ex: número cadastrado
+        # manualmente) — mantém o comportamento anterior como fallback.
+        stmt = select(Integration).where(
             Integration.company_id == company_id,
             Integration.is_active.is_(True),
             Integration.outbound_url.is_not(None),
         )
-    )
+    result = await db.execute(stmt)
     integrations = result.scalars().all()
     payload = {
         "conversation_id": str(conversation.id),
@@ -767,11 +907,12 @@ async def process_normalized_event(
     company_id: UUID,
     event: NormalizedMessageEvent,
     number: Number | None = None,
+    integration_id: UUID | None = None,
 ) -> dict:
     if event.event_type == "status_update" and not event.text:
         return {"status": "ignored", "reason": "status_without_text"}
 
-    conversation = await get_or_create_conversation(db, company_id, event, number)
+    conversation = await get_or_create_conversation(db, company_id, event, number, integration_id=integration_id)
     message = await save_message(db, conversation, event)
 
     ai_reply_scheduled = False

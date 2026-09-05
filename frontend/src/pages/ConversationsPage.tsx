@@ -1,5 +1,6 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { useAuth } from "../auth";
 
 type Conversation = {
   id: string;
@@ -21,11 +22,14 @@ type Message = {
 };
 
 export default function ConversationsPage() {
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role === "super_admin";
   const [items, setItems] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [reply, setReply] = useState("");
   const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
 
   const load = () =>
     api<Conversation[]>("/conversations")
@@ -35,6 +39,17 @@ export default function ConversationsPage() {
   useEffect(() => {
     load();
   }, []);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(
+      (c) =>
+        c.id.toLowerCase().includes(q) ||
+        c.contact_phone.toLowerCase().includes(q) ||
+        (c.contact_name || "").toLowerCase().includes(q)
+    );
+  }, [items, search]);
 
   const open = async (c: Conversation) => {
     setSelected(c);
@@ -50,6 +65,21 @@ export default function ConversationsPage() {
     });
     setSelected(updated);
     await load();
+  };
+
+  const deleteConversation = async () => {
+    if (!selected) return;
+    if (!confirm(`Excluir a conversa com "${selected.contact_name || selected.contact_phone}"? Essa ação não pode ser desfeita.`))
+      return;
+    setError("");
+    try {
+      await api(`/conversations/${selected.id}`, { method: "DELETE" });
+      setSelected(null);
+      setMessages([]);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao excluir conversa");
+    }
   };
 
   const send = async (e: FormEvent) => {
@@ -73,26 +103,36 @@ export default function ConversationsPage() {
       {error && <p className="text-ember">{error}</p>}
 
       <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <ul className="max-h-[70vh] overflow-auto border border-white/10">
-          {items.map((c) => (
-            <li key={c.id}>
-              <button
-                onClick={() => open(c)}
-                className={`w-full border-b border-white/10 px-4 py-3 text-left transition hover:bg-white/5 ${
-                  selected?.id === c.id ? "bg-leaf/15 border-l-2 border-leaf" : ""
-                }`}
-              >
-                <p className="font-medium">{c.contact_name || c.contact_phone}</p>
-                <p className="text-xs text-sand/50">
-                  {c.status} · IA {c.ai_enabled ? "ligada" : "pausada"}
-                </p>
-              </button>
-            </li>
-          ))}
-          {items.length === 0 && (
-            <li className="px-4 py-8 text-center text-sand/45">Nenhuma conversa.</li>
-          )}
-        </ul>
+        <div className="space-y-2">
+          <input
+            className="w-full rounded-md border border-white/15 bg-ink px-3 py-2 text-sm"
+            placeholder="Buscar por nome, telefone ou ID..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <ul className="max-h-[70vh] overflow-auto border border-white/10">
+            {filtered.map((c) => (
+              <li key={c.id}>
+                <button
+                  onClick={() => open(c)}
+                  className={`w-full border-b border-white/10 px-4 py-3 text-left transition hover:bg-white/5 ${
+                    selected?.id === c.id ? "bg-leaf/15 border-l-2 border-leaf" : ""
+                  }`}
+                >
+                  <p className="font-medium">{c.contact_name || c.contact_phone}</p>
+                  <p className="text-xs text-sand/50">
+                    {c.status} · IA {c.ai_enabled ? "ligada" : "pausada"}
+                  </p>
+                </button>
+              </li>
+            ))}
+            {filtered.length === 0 && (
+              <li className="px-4 py-8 text-center text-sand/45">
+                {items.length === 0 ? "Nenhuma conversa." : "Nenhuma conversa bate com a busca."}
+              </li>
+            )}
+          </ul>
+        </div>
 
         <div className="border border-white/10 bg-ink/30">
           {!selected ? (
@@ -104,14 +144,25 @@ export default function ConversationsPage() {
                   <p className="font-medium">{selected.contact_name || selected.contact_phone}</p>
                   <p className="text-xs text-sand/50">{selected.contact_phone}</p>
                 </div>
-                <button
-                  onClick={toggleAi}
-                  className={`rounded-md px-3 py-1.5 text-sm ${
-                    selected.ai_enabled ? "bg-leaf text-white" : "bg-white/10 text-muted"
-                  }`}
-                >
-                  IA {selected.ai_enabled ? "ligada" : "pausada"}
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    onClick={toggleAi}
+                    className={`rounded-md px-3 py-1.5 text-sm ${
+                      selected.ai_enabled ? "bg-leaf text-white" : "bg-white/10 text-muted"
+                    }`}
+                  >
+                    IA {selected.ai_enabled ? "ligada" : "pausada"}
+                  </button>
+                  {isSuperAdmin && (
+                    <button
+                      onClick={deleteConversation}
+                      title="Só visível pra super_admin — apagar conversa de teste/dev"
+                      className="rounded-md border border-ember/40 px-3 py-1.5 text-sm text-ember hover:bg-ember/10"
+                    >
+                      Excluir
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="flex-1 space-y-3 overflow-auto p-4">
                 {messages.map((m) => {

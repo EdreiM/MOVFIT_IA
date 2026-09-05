@@ -9,7 +9,37 @@ on:
       - ".github/workflows/docker-publish.yml"
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: monica
+          POSTGRES_PASSWORD: monica
+          POSTGRES_DB: monica
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U monica -d monica"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r backend/requirements-dev.txt
+      - name: Run tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://monica:monica@localhost:5432/monica_test
+          TEST_ADMIN_DATABASE_URL: postgresql+asyncpg://monica:monica@localhost:5432/monica
+        run: pytest -v
+
   backend:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,9 +51,12 @@ jobs:
         with:
           context: ./backend
           push: true
-          tags: edreimp/movfit-ia-backend:latest
+          tags: |
+            edreimp/movfit-ia-backend:latest
+            edreimp/movfit-ia-backend:${{ github.sha }}
 
   frontend:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +68,8 @@ jobs:
         with:
           context: ./frontend
           push: true
-          tags: edreimp/movfit-ia-frontend:latest
+          tags: |
+            edreimp/movfit-ia-frontend:latest
+            edreimp/movfit-ia-frontend:${{ github.sha }}
           build-args: |
-            VITE_API_URL=https://movfit-ia.mov.pro.br
+            VITE_API_URL=http://200.6.142.5:8001

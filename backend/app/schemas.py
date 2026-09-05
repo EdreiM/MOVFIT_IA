@@ -107,6 +107,7 @@ class ConversationOut(BaseModel):
     id: UUID
     company_id: UUID
     number_id: UUID | None
+    integration_id: UUID | None
     external_conversation_id: str | None
     contact_phone: str
     contact_name: str | None
@@ -275,6 +276,9 @@ class ToolCreate(BaseModel):
     description: str | None = None
     parameters: list[ToolParameter] = Field(default_factory=list)
     webhook_url: str
+    # Em branco = ferramenta global (todas as integrações). Preenchido = só
+    # usada em conversas vindas dessa integração específica.
+    integration_id: UUID | None = None
 
 
 class ToolUpdate(BaseModel):
@@ -283,11 +287,13 @@ class ToolUpdate(BaseModel):
     parameters: list[ToolParameter] | None = None
     webhook_url: str | None = None
     is_active: bool | None = None
+    integration_id: UUID | None = None
 
 
 class ToolOut(BaseModel):
     id: UUID
     company_id: UUID
+    integration_id: UUID | None
     name: str
     tool_key: str
     description: str | None
@@ -333,6 +339,7 @@ class IntegrationOut(BaseModel):
     name: str
     integration_type: str
     adapter_key: str
+    inbound_secret: str | None
     outbound_url: str | None
     field_mapping: dict | None
     is_active: bool

@@ -1,4 +1,5 @@
 import json
+import secrets
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -46,6 +47,7 @@ async def create_webhook_integration(
         name=payload.name,
         integration_type=payload.integration_type or "webhook",
         adapter_key=payload.adapter_key,
+        inbound_secret=secrets.token_urlsafe(24),
         outbound_url=payload.outbound_url,
         field_mapping=payload.field_mapping or {},
         config=config,
@@ -68,6 +70,7 @@ async def create_chatwoot_integration(
         name=payload.name or "Chatwoot",
         integration_type="chatwoot",
         adapter_key=payload.adapter_key or "chatwoot_v1",
+        inbound_secret=secrets.token_urlsafe(24),
         outbound_url=payload.outbound_url,
         field_mapping=payload.field_mapping or {},
         config=payload.config or {},
@@ -109,14 +112,35 @@ async def delete_integration(
     await db.delete(integ)
 
 
-@router.post("/webhooks/inbound/{integration_id}")
+@router.post("/integrations/{integration_id}/regenerate-secret", response_model=IntegrationOut)
+async def regenerate_inbound_secret(
+    integration_id: UUID,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    integ = await db.get(Integration, integration_id)
+    if not integ or integ.company_id != company_id:
+        raise HTTPException(status_code=404, detail="Integração não encontrada")
+    integ.inbound_secret = secrets.token_urlsafe(24)
+    await db.flush()
+    await db.refresh(integ)
+    return integ
+
+
+@router.post("/webhooks/inbound/{integration_id}/{secret}")
 async def inbound_webhook(
     integration_id: UUID,
+    secret: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     integ = await db.get(Integration, integration_id)
-    if not integ or not integ.is_active:
+    # Mesma resposta (404) pra integração inexistente e pra segredo errado —
+    # não dá pra quem está tentando adivinhar saber qual dos dois errou.
+    if not integ or not integ.is_active or not integ.inbound_secret:
+        raise HTTPException(status_code=404, detail="Integração não encontrada")
+    if not secrets.compare_digest(secret, integ.inbound_secret):
         raise HTTPException(status_code=404, detail="Integração não encontrada")
 
     try:
@@ -158,7 +182,7 @@ async def inbound_webhook(
             )
             number = result.scalar_one_or_none()
 
-        result = await process_normalized_event(db, integ.company_id, event, number)
+        result = await process_normalized_event(db, integ.company_id, event, number, integration_id=integ.id)
         log.status = "ok"
         log.http_status = 200
         return result

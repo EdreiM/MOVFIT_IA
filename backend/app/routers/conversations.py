@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import NormalizedMessageEvent
 from app.database import get_db
-from app.deps import CurrentUser, get_current_user, resolve_company_id
+from app.deps import CurrentUser, get_current_user, require_roles, resolve_company_id
 from app.models import Conversation, Message
 from app.schemas import (
     AiStatusUpdate,
@@ -68,6 +68,21 @@ async def update_conversation(
     await db.flush()
     await db.refresh(conv)
     return conv
+
+
+@router.delete("/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: UUID,
+    current: CurrentUser = Depends(require_roles("super_admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restrito a super_admin — pra apagar conversas de teste/dev sem deixar
+    isso acessível pra atendentes/admins comuns da empresa."""
+    company_id = await resolve_company_id(current, db)
+    conv = await db.get(Conversation, conversation_id)
+    if not conv or conv.company_id != company_id:
+        raise HTTPException(status_code=404, detail="Conversa não encontrada")
+    await db.delete(conv)
 
 
 @router.patch("/{conversation_id}/ai-status", response_model=ConversationOut)

@@ -1,3 +1,5 @@
+import time
+
 from fastapi import APIRouter, Depends, HTTPException
 from jose import JWTError
 from sqlalchemy import select
@@ -17,15 +19,45 @@ from app.security import (
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# Rate limit simples em memória — ok pra 1 instância do backend (é o caso
+# aqui); se um dia rodar múltiplas réplicas, precisaria mover isso pra um
+# storage compartilhado (Redis, etc.) pra valer entre elas.
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 5 * 60
+_failed_attempts: dict[str, list[float]] = {}
+
+
+def _register_failed_attempt(key: str) -> None:
+    now = time.time()
+    attempts = [t for t in _failed_attempts.get(key, []) if now - t < LOGIN_WINDOW_SECONDS]
+    attempts.append(now)
+    _failed_attempts[key] = attempts
+
+
+def _is_locked_out(key: str) -> bool:
+    now = time.time()
+    attempts = [t for t in _failed_attempts.get(key, []) if now - t < LOGIN_WINDOW_SECONDS]
+    _failed_attempts[key] = attempts
+    return len(attempts) >= MAX_LOGIN_ATTEMPTS
+
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+    rate_key = payload.email.strip().lower()
+    if _is_locked_out(rate_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Muitas tentativas de login. Tente novamente em alguns minutos.",
+        )
+
     result = await db.execute(
         select(User).options(selectinload(User.companies)).where(User.email == payload.email)
     )
     user = result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.hashed_password):
+        _register_failed_attempt(rate_key)
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos")
+    _failed_attempts.pop(rate_key, None)
     if user.status != "active":
         raise HTTPException(status_code=403, detail="Usuário inativo")
     if user.role == "atendente":

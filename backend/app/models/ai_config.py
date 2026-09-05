@@ -66,6 +66,13 @@ class Tool(Base):
     ai_config_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("ai_configs.id", ondelete="CASCADE"), index=True
     )
+    # Em branco = ferramenta global, vale pra conversas de qualquer integração
+    # (comportamento de sempre). Preenchida = só é usada em conversas vindas
+    # dessa integração específica — permite, por exemplo, duas ferramentas
+    # "enviar_imagens_planos" com webhooks diferentes por integração.
+    integration_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("integrations.id", ondelete="SET NULL"), index=True
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     # Identificador estável enviado ao webhook e usado p/ efeitos internos
     # (transferir_atendimento, encerrar_atendimento). Ferramentas customizadas

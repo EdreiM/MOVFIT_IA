@@ -32,6 +32,15 @@ docker compose up --build
 /frontend  → Dashboard React
 ```
 
+## Testes (backend)
+
+Roda contra um banco `monica_test` separado (mesma instância Postgres), recriado do zero a cada execução — não toca no banco de dev.
+
+```bash
+docker exec movfitia-backend-1 pip install -r requirements-dev.txt
+docker exec movfitia-backend-1 python -m pytest tests/ -v
+```
+
 ## Variáveis de ambiente (backend)
 
 Copie `backend/.env.example` para `backend/.env` e ajuste se necessário.
