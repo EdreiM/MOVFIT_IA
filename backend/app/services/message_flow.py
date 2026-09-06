@@ -368,11 +368,21 @@ async def _resolve_plan_images(db: AsyncSession, company_id: UUID, arguments: di
     if not arg_tokens:
         return []
 
-    unit_candidates = [
-        (str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}")) for u in units
-    ]
-    matched_unit_id = _unique_match(unit_candidates, arg_tokens, threshold=0.4)
-    matched_units = [u for u in units if str(u.id) == matched_unit_id] if matched_unit_id else []
+    if len(units) == 1:
+        # Só uma unidade ativa — não tem ambiguidade nenhuma pra escolher a
+        # errada, então não exige que a IA repita nome+cidade+tipo por
+        # completo (ela às vezes só manda a cidade, tipo "Santarém", e isso
+        # já basta). Ainda assim exige alguma menção real — argumento sem
+        # nenhuma palavra em comum não deve virar match "porque só tem uma".
+        only_unit = units[0]
+        unit_tokens = _normalize_tokens(f"{only_unit.name} {only_unit.city} {only_unit.unit_type or ''}")
+        matched_units = [only_unit] if unit_tokens & arg_tokens else []
+    else:
+        unit_candidates = [
+            (str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}")) for u in units
+        ]
+        matched_unit_id = _unique_match(unit_candidates, arg_tokens, threshold=0.4)
+        matched_units = [u for u in units if str(u.id) == matched_unit_id] if matched_unit_id else []
 
     images: list[dict] = []
     for unit in matched_units:
@@ -669,7 +679,9 @@ async def generate_ai_reply(
             {
                 "role": "system",
                 "content": (
-                    "Esta academia tem mais de uma unidade: " + ", ".join(active_unit_names) + ". "
+                    "Esta academia tem HOJE, atualmente, estas unidades (lista sempre atual — "
+                    "ignore qualquer outro nome de unidade citado antes nesta conversa, mesmo por "
+                    "você mesma, se ele não estiver nesta lista): " + ", ".join(active_unit_names) + ". "
                     "Informações como horário de funcionamento, endereço, estrutura, estacionamento "
                     "e aulas variam de unidade para unidade. Se o cliente perguntar algo assim e "
                     "ainda não tiver dito nesta conversa qual unidade é a dele, PERGUNTE primeiro "
@@ -688,7 +700,10 @@ async def generate_ai_reply(
                 "content": (
                     "[Planos]\n"
                     "Catálogo oficial de unidades e planos, sempre atualizado — use isso, "
-                    "não invente valores fora daqui. Quando o cliente confirmar qual plano "
+                    "não invente valores fora daqui. Isso vale MAIS que qualquer coisa dita "
+                    "antes nesta conversa (inclusive por você mesma): se uma unidade, plano ou "
+                    "preço mencionado anteriormente não aparecer aqui embaixo, ele não existe "
+                    "mais — não repita. Quando o cliente confirmar qual plano "
                     "específico ele quer (não só a unidade), e esse plano tiver um \"Link de "
                     "cadastro\", envie esse link exatamente como está aqui — não invente nem "
                     "reproduza de memória. Se o plano não tiver link, avise que vai encaminhar "
