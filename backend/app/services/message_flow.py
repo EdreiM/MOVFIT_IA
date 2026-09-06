@@ -504,17 +504,27 @@ async def execute_tool(
         "argumentos": arguments,
         "contexto": contexto,
     }
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(tool.webhook_url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Ferramenta %s (%s) falhou: %s", tool.name, tool.tool_key, exc)
-        return {"sucesso": False, "mensagem": "Falha ao executar a ferramenta agora."}
+    is_test = conversation.channel == "test_console"
+    if is_test:
+        # Chat de teste não deve disparar nada de verdade fora do MovFit IA
+        # (workflow do n8n, API do WhatsApp, etc) — só o texto já tinha essa
+        # proteção; o webhook da própria ferramenta não tinha, e "testar" o
+        # envio de imagem estava executando o workflow de produção de
+        # verdade. Simula sucesso pra IA seguir o fluxo normalmente.
+        data: dict = {"sucesso": True, "mensagem": "Simulado no chat de teste — nada foi enviado de verdade.", "dados": {}}
+        logger.info("Ferramenta %s (%s) simulada no chat de teste: argumentos=%r", tool.name, tool.tool_key, arguments)
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.post(tool.webhook_url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ferramenta %s (%s) falhou: %s", tool.name, tool.tool_key, exc)
+            return {"sucesso": False, "mensagem": "Falha ao executar a ferramenta agora."}
 
-    tool.last_executed_at = datetime.now(timezone.utc)
-    logger.info("Ferramenta %s (%s) respondeu: %r", tool.name, tool.tool_key, data)
+        tool.last_executed_at = datetime.now(timezone.utc)
+        logger.info("Ferramenta %s (%s) respondeu: %r", tool.name, tool.tool_key, data)
 
     if data.get("sucesso"):
         if tool.tool_key == TOOL_KEY_TRANSFER:
@@ -523,7 +533,6 @@ async def execute_tool(
         elif tool.tool_key == TOOL_KEY_END:
             conversation.status = "resolved"
 
-    is_test = conversation.channel == "test_console"
     if tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES and plan_images and (data.get("sucesso") or is_test):
         # Quem manda a mídia de verdade é o workflow n8n (WhatsApp/Evolution
         # etc), e só sabemos que a entrega real aconteceu se ele responder
