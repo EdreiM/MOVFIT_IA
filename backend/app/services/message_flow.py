@@ -233,6 +233,32 @@ async def build_catalog_context(db: AsyncSession, company_id: UUID) -> str:
     return "\n\n".join(blocks)
 
 
+def _format_plan_caption(unit: Unit, plan: Plan) -> str:
+    """Legenda pronta pra WhatsApp (negrito com um asterisco, emojis, sem
+    markdown de título) pra ir junto da imagem do plano — pensada pra virar
+    o caption da própria mensagem de mídia no n8n, então imagem e descrição
+    chegam como uma coisa só, na ordem certa, sem depender de sincronizar
+    dois envios separados (imagem via webhook da ferramenta, texto via
+    outbound). Mesmo template que a IA usa quando escreve a descrição em
+    texto livre — ver instrução de formatação em generate_ai_reply."""
+    lines = [f"🏋️ *{plan.name.upper()}*", "", f"💰 *{_format_price(plan.monthly_price)} por mês*"]
+    if plan.payment_info:
+        lines.append(f"💳 Pagamento em {plan.payment_info}")
+    if plan.fidelity_months:
+        lines.append(f"📅 Fidelidade de {plan.fidelity_months} meses")
+    if plan.enrollment_fee:
+        lines.append(f"🎟️ Taxa de inscrição: {_format_price(plan.enrollment_fee)}")
+    if plan.benefits:
+        lines.append("")
+        lines.append("✅ *Você terá:*")
+        lines.extend(f"• {b}" for b in plan.benefits)
+    if plan.signup_url:
+        lines.append("")
+        lines.append("👉 *Faça sua matrícula pelo link:*")
+        lines.append(plan.signup_url)
+    return "\n".join(lines)
+
+
 async def fetch_rag_context(db: AsyncSession, company_id: UUID, query: str) -> str:
     result = await db.execute(
         select(RagSource).where(RagSource.company_id == company_id, RagSource.is_active.is_(True))
@@ -391,7 +417,14 @@ async def _resolve_plan_images(db: AsyncSession, company_id: UUID, arguments: di
         matched_plan_id = _unique_match(plan_candidates, arg_tokens, threshold=0.4)
         matched_plans = [p for p in available if str(p.id) == matched_plan_id] if matched_plan_id else []
         for plan in matched_plans or available:
-            images.append({"unidade": unit.name, "plano": plan.name, "url": plan.image_url})
+            images.append(
+                {
+                    "unidade": unit.name,
+                    "plano": plan.name,
+                    "url": plan.image_url,
+                    "legenda": _format_plan_caption(unit, plan),
+                }
+            )
     return images
 
 
@@ -674,14 +707,25 @@ async def generate_ai_reply(
             "content": (
                 "Formatação: isso vai pro WhatsApp, não markdown de verdade. Use *um "
                 "asterisco* pra negrito (nunca **dois**) e _sublinhado_ pra itálico — sem "
-                "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. Listas: hífen simples, "
-                "sem numerar a menos que a ordem importe. Links: manda a URL pura "
+                "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. Listas: hífen ou • "
+                "simples, sem numerar a menos que a ordem importe. Links: manda a URL pura "
                 "(https://...) solta no texto — NUNCA no formato [texto](url) do markdown, "
                 "porque o WhatsApp não interpreta isso, aparece literalmente com colchetes e "
                 "parênteses pro cliente; uma URL pura o WhatsApp já deixa clicável sozinho. Ao "
                 "apresentar planos, não repita a descrição/slogan geral da academia em cada "
-                "plano — isso já foi dito (ou nem precisa ser dito) uma vez só; cada plano é só "
-                "nome, valor, fidelidade, benefícios e link, direto ao ponto."
+                "plano — isso já foi dito (ou nem precisa ser dito) uma vez só. Cada plano "
+                "individual segue este modelo visual (adapte os dados de cada plano, mas "
+                "mantenha a estrutura, os emojis e as quebras de linha — pule qualquer linha "
+                "cujo dado não exista para aquele plano, tipo taxa de matrícula zerada):\n\n"
+                "🏋️ *NOME DO PLANO EM MAIÚSCULAS*\n\n"
+                "💰 *R$ 000,00 por mês*\n"
+                "💳 Pagamento em [forma de pagamento]\n"
+                "📅 Fidelidade de N meses\n\n"
+                "✅ *Você terá:*\n"
+                "• benefício 1\n"
+                "• benefício 2\n\n"
+                "👉 *Faça sua matrícula pelo link:*\n"
+                "https://..."
             ),
         }
     )
@@ -706,24 +750,40 @@ async def generate_ai_reply(
             }
         )
     units_result = await db.execute(
-        select(Unit.name).where(Unit.company_id == conversation.company_id, Unit.is_active.is_(True))
+        select(Unit.name, Unit.city).where(Unit.company_id == conversation.company_id, Unit.is_active.is_(True))
     )
-    active_unit_names = [n for (n,) in units_result.all()]
+    active_units_rows = units_result.all()
+    active_unit_names = [n for n, _ in active_units_rows]
     if len(active_unit_names) > 1:
+        cities: dict[str, list[str]] = {}
+        for name, city in active_units_rows:
+            cities.setdefault(city, []).append(name)
+        ambiguous_note = ""
+        ambiguous_cities = {city: names for city, names in cities.items() if len(names) > 1}
+        if ambiguous_cities:
+            pairs = "; ".join(f"{city}: {' ou '.join(names)}" for city, names in ambiguous_cities.items())
+            ambiguous_note = (
+                " ATENÇÃO: mais de uma unidade divide a mesma cidade (" + pairs + "). Se o "
+                "cliente disser só o nome da cidade (ex: apenas \"Santarém\"), isso NÃO "
+                "identifica qual das duas ele quer — pergunte de novo especificando as opções "
+                "pelo nome completo de cada uma, não escolha nenhuma e não mostre informação de "
+                "nenhuma das duas ainda."
+            )
         messages.append(
             {
                 "role": "system",
                 "content": (
                     "Esta academia tem HOJE, atualmente, estas unidades (lista sempre atual — "
                     "ignore qualquer outro nome de unidade citado antes nesta conversa, mesmo por "
-                    "você mesma, se ele não estiver nesta lista): " + ", ".join(active_unit_names) + ". "
-                    "Informações como horário de funcionamento, endereço, estrutura, estacionamento "
-                    "e aulas variam de unidade para unidade. Se o cliente perguntar algo assim e "
-                    "ainda não tiver dito nesta conversa qual unidade é a dele, PERGUNTE primeiro "
-                    "qual unidade antes de responder — como um atendente humano faria. Nunca escolha "
-                    "uma unidade por conta própria nem misture dados de unidades diferentes. Se o "
-                    "cliente já informou a unidade antes na conversa, não pergunte de novo, use a "
-                    "que ele já disse."
+                    "você mesma, se ele não estiver nesta lista): " + ", ".join(active_unit_names) + "." +
+                    ambiguous_note + " Informações como horário de funcionamento, endereço, estrutura, "
+                    "estacionamento, aulas e planos variam de unidade para unidade. Se o cliente "
+                    "perguntar algo assim e ainda não tiver dito nesta conversa, de forma inequívoca, "
+                    "qual unidade específica é a dele, PERGUNTE primeiro qual unidade antes de "
+                    "responder — como um atendente humano faria. NUNCA responda com informação de "
+                    "mais de uma unidade na mesma mensagem — isso satura o cliente. Se o cliente já "
+                    "informou a unidade antes na conversa sem ambiguidade, não pergunte de novo, use "
+                    "a que ele já disse."
                 ),
             }
         )
@@ -747,7 +807,12 @@ async def generate_ai_reply(
                     "assinar ou fechar algum desses planos, a resposta é: confirme qual plano, e "
                     "diga claramente que é só acessar aquele link e completar o cadastro por lá "
                     "(não diga que vai encaminhar pra um atendente nesse caso — isso é só quando "
-                    "o plano não tem link nenhum aqui embaixo).\n" + catalog_context
+                    "o plano não tem link nenhum aqui embaixo). Por isso, ao terminar de "
+                    "apresentar plano(s), não ofereça ajuda pra \"finalizar a matrícula\" nem "
+                    "diga \"se quiser se matricular, me avise\" — isso sugere que você vai fazer "
+                    "algo a mais, e não vai (o link já resolve sozinho). Prefira fechar com algo "
+                    "neutro tipo \"Deseja mais alguma informação?\" ou \"Posso ajudar com mais "
+                    "alguma coisa?\".\n" + catalog_context
                 ),
             }
         )
