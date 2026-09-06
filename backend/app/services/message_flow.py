@@ -675,10 +675,13 @@ async def generate_ai_reply(
                 "Formatação: isso vai pro WhatsApp, não markdown de verdade. Use *um "
                 "asterisco* pra negrito (nunca **dois**) e _sublinhado_ pra itálico — sem "
                 "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. Listas: hífen simples, "
-                "sem numerar a menos que a ordem importe. Ao apresentar planos, não repita a "
-                "descrição/slogan geral da academia em cada plano — isso já foi dito (ou nem "
-                "precisa ser dito) uma vez só; cada plano é só nome, valor, fidelidade, "
-                "benefícios e link, direto ao ponto."
+                "sem numerar a menos que a ordem importe. Links: manda a URL pura "
+                "(https://...) solta no texto — NUNCA no formato [texto](url) do markdown, "
+                "porque o WhatsApp não interpreta isso, aparece literalmente com colchetes e "
+                "parênteses pro cliente; uma URL pura o WhatsApp já deixa clicável sozinho. Ao "
+                "apresentar planos, não repita a descrição/slogan geral da academia em cada "
+                "plano — isso já foi dito (ou nem precisa ser dito) uma vez só; cada plano é só "
+                "nome, valor, fidelidade, benefícios e link, direto ao ponto."
             ),
         }
     )
@@ -738,8 +741,13 @@ async def generate_ai_reply(
                     "mais — não repita. Quando o cliente confirmar qual plano "
                     "específico ele quer (não só a unidade), e esse plano tiver um \"Link de "
                     "cadastro\", envie esse link exatamente como está aqui — não invente nem "
-                    "reproduza de memória. Se o plano não tiver link, avise que vai encaminhar "
-                    "para um atendente concluir a matrícula.\n" + catalog_context
+                    "reproduza de memória. A matrícula é sempre feita pelo próprio cliente "
+                    "nesse link (autoatendimento) — você não coleta dados nem processa a "
+                    "matrícula pelo chat. Então, quando o cliente disser que quer se matricular, "
+                    "assinar ou fechar algum desses planos, a resposta é: confirme qual plano, e "
+                    "diga claramente que é só acessar aquele link e completar o cadastro por lá "
+                    "(não diga que vai encaminhar pra um atendente nesse caso — isso é só quando "
+                    "o plano não tem link nenhum aqui embaixo).\n" + catalog_context
                 ),
             }
         )

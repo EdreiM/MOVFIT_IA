@@ -197,6 +197,16 @@ export default function ToolsPage() {
     return <p className="text-sand/60">Selecione uma empresa.</p>;
   }
 
+  const globalTools = items.filter((t) => !t.integration_id);
+  const groups = [
+    { key: "global", label: "Todas (global)", tools: globalTools },
+    ...integrations.map((i) => ({
+      key: i.id,
+      label: i.name,
+      tools: items.filter((t) => t.integration_id === i.id),
+    })),
+  ];
+
   return (
     <div className="space-y-8">
       <div>
@@ -368,62 +378,65 @@ export default function ToolsPage() {
         </div>
       </form>
 
-      <ul className="divide-y divide-white/10 border border-white/10">
-        {items.map((t) => (
-          <li key={t.id} className="space-y-2 px-4 py-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="font-medium">
-                  {t.name} <span className="text-sm text-sand/50">({t.tool_key})</span>
-                </p>
-                {t.description && <p className="mt-0.5 text-sm text-sand/60">{t.description}</p>}
-                {t.webhook_url && <p className="mt-1 break-all text-xs text-sand/40">{t.webhook_url}</p>}
-                <p className="mt-1 text-xs text-sand/40">
-                  Integração:{" "}
-                  {t.integration_id
-                    ? integrations.find((i) => i.id === t.integration_id)?.name ?? "desconhecida"
-                    : "Todas (global)"}
-                </p>
-                {t.parameters.length > 0 && (
-                  <p className="mt-1 text-xs text-sand/40">
-                    Parâmetros: {t.parameters.map((p) => p.name).join(", ")}
-                  </p>
-                )}
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => onEdit(t)}
-                  className="rounded-md border border-white/15 px-2 py-1 text-xs text-sand/60 hover:bg-white/5"
-                >
-                  Editar
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onToggleActive(t)}
-                  className={`rounded-md border px-2 py-1 text-xs ${
-                    t.is_active
-                      ? "border-leaf/40 text-lime hover:bg-leaf/10"
-                      : "border-white/15 text-sand/50 hover:bg-white/5"
-                  }`}
-                >
-                  {t.is_active ? "Ativa" : "Inativa"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDelete(t)}
-                  className="rounded-md border border-ember/40 px-2 py-1 text-xs text-ember hover:bg-ember/10"
-                >
-                  Excluir
-                </button>
-              </div>
-            </div>
-          </li>
+      <div className="space-y-6">
+        {groups.map((g) => (
+          <section key={g.key} className="space-y-2">
+            <h3 className="font-display text-sm font-semibold uppercase tracking-wide text-sand/50">
+              {g.label} <span className="text-sand/30">({g.tools.length})</span>
+            </h3>
+            <ul className="divide-y divide-white/10 border border-white/10">
+              {g.tools.map((t) => (
+                <li key={t.id} className="space-y-2 px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">
+                        {t.name} <span className="text-sm text-sand/50">({t.tool_key})</span>
+                      </p>
+                      {t.description && <p className="mt-0.5 text-sm text-sand/60">{t.description}</p>}
+                      {t.webhook_url && <p className="mt-1 break-all text-xs text-sand/40">{t.webhook_url}</p>}
+                      {t.parameters.length > 0 && (
+                        <p className="mt-1 text-xs text-sand/40">
+                          Parâmetros: {t.parameters.map((p) => p.name).join(", ")}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onEdit(t)}
+                        className="rounded-md border border-white/15 px-2 py-1 text-xs text-sand/60 hover:bg-white/5"
+                      >
+                        Editar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onToggleActive(t)}
+                        className={`rounded-md border px-2 py-1 text-xs ${
+                          t.is_active
+                            ? "border-leaf/40 text-lime hover:bg-leaf/10"
+                            : "border-white/15 text-sand/50 hover:bg-white/5"
+                        }`}
+                      >
+                        {t.is_active ? "Ativa" : "Inativa"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDelete(t)}
+                        className="rounded-md border border-ember/40 px-2 py-1 text-xs text-ember hover:bg-ember/10"
+                      >
+                        Excluir
+                      </button>
+                    </div>
+                  </div>
+                </li>
+              ))}
+              {g.tools.length === 0 && (
+                <li className="px-4 py-6 text-center text-sand/45">Nenhuma ferramenta ainda.</li>
+              )}
+            </ul>
+          </section>
         ))}
-        {items.length === 0 && (
-          <li className="px-4 py-6 text-center text-sand/45">Nenhuma ferramenta ainda.</li>
-        )}
-      </ul>
+      </div>
     </div>
   );
 }
