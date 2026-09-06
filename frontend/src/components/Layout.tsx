@@ -4,6 +4,7 @@ import { useAuth } from "../auth";
 const links = [
   { to: "/", label: "Métricas" },
   { to: "/conversations", label: "Conversas" },
+  { to: "/leads", label: "Clientes" },
   { to: "/numbers", label: "Números" },
   { to: "/integrations", label: "Integrações" },
   { to: "/ai", label: "Config. IA" },

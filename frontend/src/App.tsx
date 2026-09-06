@@ -6,6 +6,7 @@ import DashboardPage from "./pages/DashboardPage";
 import NumbersPage from "./pages/NumbersPage";
 import AiConfigPage from "./pages/AiConfigPage";
 import ConversationsPage from "./pages/ConversationsPage";
+import LeadsPage from "./pages/LeadsPage";
 import IntegrationsPage from "./pages/IntegrationsPage";
 import TestChatPage from "./pages/TestChatPage";
 import ToolsPage from "./pages/ToolsPage";
@@ -42,6 +43,7 @@ export default function App() {
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/catalog" element={<CatalogPage />} />
                 <Route path="/conversations" element={<ConversationsPage />} />
+                <Route path="/leads" element={<LeadsPage />} />
                 <Route path="/integrations" element={<IntegrationsPage />} />
                 <Route path="/account" element={<AccountPage />} />
               </Routes>

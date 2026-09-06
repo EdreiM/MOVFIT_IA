@@ -20,6 +20,7 @@ from app.routers import (
     companies,
     conversations,
     integrations,
+    leads,
     metrics,
     numbers,
 )
@@ -59,6 +60,7 @@ app.include_router(ai_configs.router)
 app.include_router(catalog.router)
 app.include_router(catalog.plans_router)
 app.include_router(integrations.router)
+app.include_router(leads.router)
 app.include_router(metrics.router)
 app.include_router(admin.router)
 

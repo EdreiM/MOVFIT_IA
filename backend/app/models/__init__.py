@@ -6,6 +6,7 @@ from app.models.ai_config import AiConfig, RagSource, Tool
 from app.models.catalog import Unit, Plan
 from app.models.integration import Integration, WebhookLog
 from app.models.metrics import MetricsDaily
+from app.models.lead import Lead
 
 __all__ = [
     "Company",
@@ -22,4 +23,5 @@ __all__ = [
     "Integration",
     "WebhookLog",
     "MetricsDaily",
+    "Lead",
 ]

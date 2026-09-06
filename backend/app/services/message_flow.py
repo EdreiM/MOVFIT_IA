@@ -19,6 +19,7 @@ from app.models import (
     AiConfig,
     Conversation,
     Integration,
+    Lead,
     Message,
     MetricsDaily,
     Number,
@@ -341,6 +342,81 @@ TOOL_KEY_TRANSFER = "transferir_atendimento"
 TOOL_KEY_END = "encerrar_atendimento"
 TOOL_KEY_SEND_PLAN_IMAGES = "enviar_imagens_planos"
 
+# Ferramenta interna, sempre disponível pra qualquer empresa — não é um
+# webhook n8n, é tratada 100% dentro do próprio código (grava no cadastro
+# estruturado do cliente, ver models.Lead). Existe pra a IA não depender só
+# da janela de histórico de mensagens pra "lembrar" nome, CPF, e-mail etc.
+TOOL_KEY_SAVE_LEAD_DATA = "salvar_dado_cliente"
+
+SAVE_LEAD_DATA_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": TOOL_KEY_SAVE_LEAD_DATA,
+        "description": (
+            "Salva/atualiza o cadastro do cliente com dados que ele informou na "
+            "conversa (nome, CPF, e-mail, data de nascimento) e/ou o estágio dele "
+            "no funil (ex: qualificado, interessado, sem interesse). Chame isso "
+            "assim que o cliente disser um desses dados pela primeira vez, ou "
+            "corrigir um valor — depois de salvo, não precisa perguntar de novo. "
+            "Não invente nenhum valor; só passe o que o cliente realmente disse, e "
+            "só os campos que mudaram."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nome": {"type": "string", "description": "Nome completo do cliente"},
+                "cpf": {"type": "string", "description": "CPF do cliente, só números ou formatado"},
+                "email": {"type": "string", "description": "E-mail do cliente"},
+                "data_nascimento": {
+                    "type": "string",
+                    "description": "Data de nascimento do cliente, no formato AAAA-MM-DD",
+                },
+                "estagio": {
+                    "type": "string",
+                    "description": (
+                        "Estágio do cliente no funil de atendimento, texto livre "
+                        "curto (ex: qualificado, interessado, sem interesse). Não "
+                        "use isso pra marcar transferência ou encerramento — essas "
+                        "ferramentas já atualizam o estágio sozinhas."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+
+async def _upsert_lead(db: AsyncSession, company_id: UUID, phone: str, fields: dict) -> Lead | None:
+    """Cria ou atualiza o cadastro do cliente (por telefone dentro da
+    empresa) com os campos informados — só sobrescreve o que vier
+    preenchido, o resto do cadastro existente fica como estava."""
+    phone_digits = sanitize_phone_digits(phone)
+    if not phone_digits:
+        # Conversa sem telefone real (ex: placeholder do Chat de teste) —
+        # não cria lead fantasma, sem como identificar o cliente de verdade.
+        return None
+    result = await db.execute(select(Lead).where(Lead.company_id == company_id, Lead.phone == phone_digits))
+    lead = result.scalar_one_or_none()
+    if not lead:
+        lead = Lead(company_id=company_id, phone=phone_digits)
+        db.add(lead)
+    if fields.get("nome"):
+        lead.name = str(fields["nome"])
+    if fields.get("cpf"):
+        lead.cpf = str(fields["cpf"])
+    if fields.get("email"):
+        lead.email = str(fields["email"])
+    if fields.get("data_nascimento"):
+        try:
+            lead.birthdate = date.fromisoformat(str(fields["data_nascimento"]))
+        except ValueError:
+            pass
+    if fields.get("estagio"):
+        lead.stage = str(fields["estagio"])
+    await db.flush()
+    return lead
+
 
 def _normalize_tokens(text: str) -> set[str]:
     """Minúsculo, sem acento, só letras/números — pra comparar 'Santarém' com
@@ -563,8 +639,10 @@ async def execute_tool(
         if tool.tool_key == TOOL_KEY_TRANSFER:
             conversation.ai_enabled = False
             conversation.status = "with_human"
+            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "transferido"})
         elif tool.tool_key == TOOL_KEY_END:
             conversation.status = "resolved"
+            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
 
     if tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES and plan_images and (data.get("sucesso") or is_test):
         # Quem manda a mídia de verdade é o workflow n8n (WhatsApp/Evolution
@@ -816,6 +894,37 @@ async def generate_ai_reply(
                 ),
             }
         )
+    lead_result = await db.execute(
+        select(Lead).where(
+            Lead.company_id == conversation.company_id,
+            Lead.phone == sanitize_phone_digits(conversation.contact_phone),
+        )
+    )
+    lead = lead_result.scalar_one_or_none()
+    known_fields = []
+    if lead:
+        if lead.name:
+            known_fields.append(f"nome: {lead.name}")
+        if lead.cpf:
+            known_fields.append(f"CPF: {lead.cpf}")
+        if lead.email:
+            known_fields.append(f"e-mail: {lead.email}")
+        if lead.birthdate:
+            known_fields.append(f"data de nascimento: {lead.birthdate.isoformat()}")
+        known_fields.append(f"estágio atual: {lead.stage}")
+    if known_fields:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Dados já cadastrados deste cliente (de conversas/mensagens anteriores, "
+                    "não precisa perguntar de novo): " + "; ".join(known_fields) + ". Se o "
+                    "cliente informar um valor diferente pra algum desses campos agora, chame "
+                    "salvar_dado_cliente pra atualizar."
+                ),
+            }
+        )
+
     for m in history:
         role = "assistant" if m.actor in {"ai", "human_agent"} else "user"
         if m.text:
@@ -835,7 +944,7 @@ async def generate_ai_reply(
     for t in sorted(active_tools, key=lambda t: t.integration_id is not None):
         tools_by_key[t.tool_key] = t
     active_tools = list(tools_by_key.values())
-    tool_defs = [_tool_to_openai_schema(t) for t in active_tools] or None
+    tool_defs = [_tool_to_openai_schema(t) for t in active_tools] + [SAVE_LEAD_DATA_TOOL_SCHEMA]
 
     assistant_message = await chat_completion(
         provider=config.llm_provider,
@@ -865,6 +974,16 @@ async def generate_ai_reply(
                 arguments = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 arguments = {}
+
+            if key == TOOL_KEY_SAVE_LEAD_DATA:
+                # Ferramenta interna — não passa por webhook nenhum, grava
+                # direto no cadastro do cliente.
+                await _upsert_lead(db, conversation.company_id, conversation.contact_phone, arguments)
+                result = {"sucesso": True, "mensagem": "Dado salvo.", "dados": {}}
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, ensure_ascii=False)}
+                )
+                continue
 
             tool = tools_by_key.get(key)
             if tool:

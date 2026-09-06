@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
@@ -347,6 +347,32 @@ class IntegrationOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# Leads (cadastro estruturado do cliente, separado da conversa)
+class LeadOut(BaseModel):
+    id: UUID
+    company_id: UUID
+    phone: str
+    name: str | None
+    cpf: str | None
+    email: str | None
+    birthdate: date | None
+    stage: str
+    custom_fields: dict
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class LeadUpdate(BaseModel):
+    name: str | None = None
+    cpf: str | None = None
+    email: str | None = None
+    birthdate: date | None = None
+    stage: str | None = None
+    custom_fields: dict | None = None
 
 
 # Metrics
