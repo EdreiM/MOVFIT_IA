@@ -570,8 +570,6 @@ async def execute_tool(
     tool: Tool,
     arguments: dict,
     conversation: Conversation,
-    force_resend: bool = False,
-    touched_units: set[str] | None = None,
 ) -> dict:
     if not tool.webhook_url:
         return {"sucesso": False, "mensagem": "Ferramenta sem webhook configurado."}
@@ -581,33 +579,6 @@ async def execute_tool(
         "nome_cliente": conversation.contact_name,
         "conversation_id": str(conversation.id),
     }
-    plan_images: list[dict] = []
-    if tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES:
-        resolved_images = await _resolve_plan_images(db, conversation.company_id, arguments)
-        if touched_units is not None:
-            # Registra a unidade como "atendida nesta resposta" mesmo se o
-            # dedup abaixo acabar não mandando nada — evita que a chamada da
-            # IA e o gatilho automático mandem a mesma imagem duas vezes na
-            # mesma resposta quando o cliente pede reenvio explícito.
-            touched_units.update(img["unidade"] for img in resolved_images)
-        if force_resend:
-            plan_images = resolved_images
-        else:
-            already_sent = await _get_sent_plan_image_urls(db, conversation.id)
-            plan_images = [img for img in resolved_images if img["url"] not in already_sent]
-        contexto["imagens_planos"] = plan_images
-        logger.info(
-            "enviar_imagens_planos: arguments=%r resolved=%d imagens (force_resend=%s)",
-            arguments,
-            len(plan_images),
-            force_resend,
-        )
-        if resolved_images and not plan_images:
-            # Achou o(s) plano(s), mas a imagem de cada um já foi mandada
-            # antes nesta conversa e o cliente não pediu reenvio — não vale
-            # nem chamar o webhook de novo.
-            return {"sucesso": True, "mensagem": "Imagens já enviadas anteriormente nesta conversa.", "dados": {}}
-
     payload = {
         "ferramenta": tool.tool_key,
         "argumentos": arguments,
@@ -644,13 +615,111 @@ async def execute_tool(
             conversation.status = "resolved"
             await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
 
-    if tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES and plan_images and (data.get("sucesso") or is_test):
-        # Quem manda a mídia de verdade é o workflow n8n (WhatsApp/Evolution
-        # etc), e só sabemos que a entrega real aconteceu se ele responder
-        # sucesso:true conforme o contrato. No chat de teste não existe
-        # entrega real pra confirmar — mostra o que seria enviado mesmo assim,
-        # pra dar pra validar se a IA escolheu as imagens certas mesmo antes
-        # do workflow n8n devolver a resposta no formato esperado.
+    return data
+
+
+async def _send_single_plan_image(db: AsyncSession, tool: Tool, image: dict, conversation: Conversation) -> bool:
+    """Manda o webhook da ferramenta pra UMA imagem só e espera a resposta
+    antes de devolver — usado pra garantir que a legenda (texto) só saia
+    depois que a imagem já foi confirmada enviada, mantendo a ordem certa
+    (imagem, depois descrição) por plano em vez de mandar tudo de uma vez."""
+    is_test = conversation.channel == "test_console"
+    payload = {
+        "ferramenta": tool.tool_key,
+        "argumentos": {"Unidade": image["unidade"], "Nome do Plano": image["plano"]},
+        "contexto": {
+            "telefone_cliente": sanitize_phone_digits(conversation.contact_phone),
+            "nome_cliente": conversation.contact_name,
+            "conversation_id": str(conversation.id),
+            "imagens_planos": [image],
+        },
+    }
+    if is_test:
+        data: dict = {"sucesso": True}
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.post(tool.webhook_url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ferramenta %s (%s) falhou pra %s: %s", tool.name, tool.tool_key, image["plano"], exc)
+            return False
+        tool.last_executed_at = datetime.now(timezone.utc)
+        if not data.get("sucesso"):
+            return False
+
+    await save_message(
+        db,
+        conversation,
+        NormalizedMessageEvent(
+            event_type="message_outbound",
+            external_message_id=None,
+            external_conversation_id=None,
+            channel_to=None,
+            contact_phone=conversation.contact_phone,
+            content_type="image",
+            text=f"{image['plano']} ({image['unidade']})",
+            timestamp=datetime.now(timezone.utc),
+            actor="ai",
+            raw_payload={"images": [image]},
+        ),
+    )
+    return True
+
+
+async def _present_plan_images_with_captions(
+    db: AsyncSession,
+    conversation: Conversation,
+    company_id: UUID,
+    tool: Tool,
+    images: list[dict],
+    force_resend: bool,
+) -> dict:
+    """Apresenta cada plano como imagem seguida da própria legenda/descrição,
+    um de cada vez, esperando a imagem ser confirmada antes de mandar o
+    texto — a única forma de garantir a ordem imagem->descrição por plano,
+    já que imagem (webhook da ferramenta) e texto (outbound da integração)
+    são dois canais de entrega sem sincronia nenhuma entre si."""
+    if not images:
+        return {"sucesso": True, "mensagem": "Nenhum plano encontrado pra essa unidade.", "dados": {}}
+
+    if force_resend:
+        to_send = images
+    else:
+        already_sent = await _get_sent_plan_image_urls(db, conversation.id)
+        to_send = [img for img in images if img["url"] not in already_sent]
+    if not to_send:
+        return {"sucesso": True, "mensagem": "Imagens já enviadas anteriormente nesta conversa.", "dados": {}}
+
+    is_test = conversation.channel == "test_console"
+    unit_name = to_send[0]["unidade"]
+    intro = f"Aqui estão os planos da unidade {unit_name}:"
+    await save_message(
+        db,
+        conversation,
+        NormalizedMessageEvent(
+            event_type="message_outbound",
+            external_message_id=None,
+            external_conversation_id=None,
+            channel_to=None,
+            contact_phone=conversation.contact_phone,
+            content_type="text",
+            text=intro,
+            timestamp=datetime.now(timezone.utc),
+            actor="ai",
+            raw_payload={"generated": True},
+        ),
+    )
+    if not is_test:
+        await send_outbound(db, company_id, conversation, intro)
+
+    sent_count = 0
+    for image in to_send:
+        if not await _send_single_plan_image(db, tool, image, conversation):
+            continue
+        sent_count += 1
+        caption = image.get("legenda") or f"{image['plano']} — {image['unidade']}"
         await save_message(
             db,
             conversation,
@@ -660,15 +729,27 @@ async def execute_tool(
                 external_conversation_id=None,
                 channel_to=None,
                 contact_phone=conversation.contact_phone,
-                content_type="image",
-                text=" · ".join(f"{img['plano']} ({img['unidade']})" for img in plan_images),
+                content_type="text",
+                text=caption,
                 timestamp=datetime.now(timezone.utc),
                 actor="ai",
-                raw_payload={"images": plan_images},
+                raw_payload={"generated": True, "plan_caption": True},
             ),
         )
+        if not is_test:
+            await send_outbound(db, company_id, conversation, caption)
 
-    return data
+    if sent_count == 0:
+        return {"sucesso": False, "mensagem": "Falha ao enviar as imagens agora."}
+    return {
+        "sucesso": True,
+        "mensagem": (
+            f"{sent_count} plano(s) já apresentados ao cliente, cada um com imagem e descrição "
+            "completa. Não repita os detalhes desses planos na sua resposta de texto — só feche "
+            "com algo curto, tipo perguntar se quer mais alguma informação."
+        ),
+        "dados": {},
+    }
 
 
 async def _auto_send_plan_images(
@@ -683,8 +764,9 @@ async def _auto_send_plan_images(
     cliente menciona uma unidade, mesmo que a IA não decida chamar a
     ferramenta por conta própria (comportamento de prompt não é 100%
     consistente). O dedup ("não repetir a mesma imagem") e o reenvio quando
-    o cliente pede explicitamente já são tratados dentro do execute_tool,
-    então essa função só decide QUANDO tentar chamar, não SE deve repetir.
+    o cliente pede explicitamente já são tratados dentro de
+    _present_plan_images_with_captions, então essa função só decide QUANDO
+    tentar chamar, não SE deve repetir.
 
     `touched_units` traz as unidades que a própria IA já mandou imagem nessa
     mesma resposta (via chamada de ferramenta) — pula essas pra não mandar a
@@ -733,11 +815,13 @@ async def _auto_send_plan_images(
         # (o dedup por URL não se aplica no reenvio forçado). Fora isso,
         # "unidade já tocada" não quer dizer "todos os planos dela já foram
         # mandados" — a IA pode ter chamado a ferramenta só pra um dos
-        # planos da unidade, e o dedup por URL abaixo (dentro do
-        # execute_tool) já cuida de não repetir o que já foi enviado.
+        # planos da unidade, e o dedup por URL abaixo já cuida de não
+        # repetir o que já foi enviado.
         return
-    await execute_tool(
-        db, tool, {"Unidade": unit.name}, conversation, force_resend=force_resend, touched_units=touched_units
+    resolved_images = await _resolve_plan_images(db, conversation.company_id, {"Unidade": unit.name})
+    touched_units.update(img["unidade"] for img in resolved_images)
+    await _present_plan_images_with_captions(
+        db, conversation, conversation.company_id, tool, resolved_images, force_resend=force_resend
     )
 
 
@@ -785,7 +869,10 @@ async def generate_ai_reply(
             "content": (
                 "Formatação: isso vai pro WhatsApp, não markdown de verdade. Use *um "
                 "asterisco* pra negrito (nunca **dois**) e _sublinhado_ pra itálico — sem "
-                "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. Listas: hífen ou • "
+                "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. NUNCA use \"---\", "
+                "\"***\" ou qualquer linha divisória pra separar seções/planos — isso vira uma "
+                "mensagem separada e sem sentido pro cliente; uma linha em branco entre "
+                "parágrafos já separa o suficiente. Listas: hífen ou • "
                 "simples, sem numerar a menos que a ordem importe. Links: manda a URL pura "
                 "(https://...) solta no texto — NUNCA no formato [texto](url) do markdown, "
                 "porque o WhatsApp não interpreta isso, aparece literalmente com colchetes e "
@@ -890,7 +977,17 @@ async def generate_ai_reply(
                     "diga \"se quiser se matricular, me avise\" — isso sugere que você vai fazer "
                     "algo a mais, e não vai (o link já resolve sozinho). Prefira fechar com algo "
                     "neutro tipo \"Deseja mais alguma informação?\" ou \"Posso ajudar com mais "
-                    "alguma coisa?\".\n" + catalog_context
+                    "alguma coisa?\".\n\n"
+                    "REGRA CRÍTICA sobre a ferramenta enviar_imagens_planos: toda vez que você "
+                    "chamar essa ferramenta, a imagem E a descrição completa (nome, valor, "
+                    "fidelidade, benefícios, link) de cada plano já são enviadas automaticamente "
+                    "pro cliente, uma de cada vez, nesse exato momento da chamada — antes até de "
+                    "você escrever sua resposta de texto. Por isso, depois de chamar essa "
+                    "ferramenta, sua resposta de texto final NÃO deve repetir nome, preço, "
+                    "fidelidade, benefícios ou link de nenhum desses planos — o cliente já "
+                    "recebeu tudo isso. Só complemente com algo bem curto (ex: \"Posso ajudar "
+                    "com mais alguma coisa?\"). Escrever a descrição do plano de novo no texto "
+                    "duplica a informação pro cliente, que é o erro mais comum aqui — evite.\n" + catalog_context
                 ),
             }
         )
@@ -985,16 +1082,29 @@ async def generate_ai_reply(
                 )
                 continue
 
+            if key == TOOL_KEY_SEND_PLAN_IMAGES:
+                tool = tools_by_key.get(key)
+                if not tool:
+                    result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
+                else:
+                    resolved_images = await _resolve_plan_images(db, conversation.company_id, arguments)
+                    touched_units.update(img["unidade"] for img in resolved_images)
+                    result = await _present_plan_images_with_captions(
+                        db,
+                        conversation,
+                        conversation.company_id,
+                        tool,
+                        resolved_images,
+                        force_resend=_wants_image_explicitly(user_text),
+                    )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, ensure_ascii=False)}
+                )
+                continue
+
             tool = tools_by_key.get(key)
             if tool:
-                result = await execute_tool(
-                    db,
-                    tool,
-                    arguments,
-                    conversation,
-                    force_resend=_wants_image_explicitly(user_text),
-                    touched_units=touched_units,
-                )
+                result = await execute_tool(db, tool, arguments, conversation)
             else:
                 result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
 
