@@ -18,6 +18,9 @@ services:
 
   backend:
     image: edreimp/movfit-ia-backend:latest
+    networks:
+      - default
+      - redeMov
     deploy:
       restart_policy:
         # Swarm não segura o start do backend até o Postgres ficar pronto
@@ -26,9 +29,24 @@ services:
         # não respondeu, o Swarm reinicia sozinho até dar certo.
         condition: any
         delay: 5s
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=redeMov
+        # /api no mesmo domínio do frontend (só temos um hostname) — o
+        # StripPrefix abaixo tira o "/api" antes de chegar no FastAPI, que
+        # não sabe nem precisa saber que existe um prefixo.
+        - traefik.http.routers.movfit-ia-backend.rule=Host(`movfit-ia.xmov.com.br`) && PathPrefix(`/api`)
+        - traefik.http.routers.movfit-ia-backend.entrypoints=websecure
+        - traefik.http.routers.movfit-ia-backend.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.movfit-ia-backend.priority=10
+        - traefik.http.middlewares.movfit-ia-strip-api.stripprefix.prefixes=/api
+        - traefik.http.routers.movfit-ia-backend.middlewares=movfit-ia-strip-api
+        - traefik.http.services.movfit-ia-backend.loadbalancer.server.port=8000
     ports:
-      # host:container — 8001 no host, igual ao padrão usado no outro
-      # projeto de vocês. Dentro do container continua 8000.
+      # Mantido por enquanto pra não quebrar integrações que ainda apontam
+      # pro IP:porta antigo enquanto a migração pro domínio não terminar.
+      # Remover depois que tudo (n8n, etc) estiver usando o domínio nas
+      # URLs de webhook.
       - "8001:8000"
     environment:
       APP_NAME: Monica AI
@@ -38,23 +56,42 @@ services:
       REFRESH_TOKEN_EXPIRE_DAYS: 7
       DATABASE_URL: postgresql+asyncpg://monica:1863d5c33e605af8ea3795e69f608a1b9961790d@db:5432/monica
       ENCRYPTION_KEY: 876d4a77ecb49c89652733eaf0ebe45a3f6890b55134c7bec4105990649796bb
-      # Origem(ns) do frontend em produção, separadas por vírgula (sem barra no final).
-      CORS_ORIGINS: http://200.6.142.5:5174
+      # As duas origens vivas por enquanto (domínio novo + IP antigo) —
+      # remove a do IP quando ninguém mais acessar o dashboard por ali.
+      CORS_ORIGINS: https://movfit-ia.xmov.com.br,http://200.6.142.5:5174
       OPENAI_DEFAULT_MODEL: gpt-4o-mini
       AI_REPLY_DEBOUNCE_SECONDS: 8
       AI_BUBBLE_MAX_CHARS: 320
       AI_BUBBLE_DELAY_SECONDS: 1.2
-      PUBLIC_BASE_URL: http://200.6.142.5:8001
+      # Usado pra montar a URL pública das imagens de plano e a URL de
+      # webhook inbound mostrada no dashboard — inclui o /api porque é
+      # assim que esse domínio chega no backend (ver PathPrefix acima).
+      PUBLIC_BASE_URL: https://movfit-ia.xmov.com.br/api
     volumes:
       - uploads:/app/uploads
 
   frontend:
     image: edreimp/movfit-ia-frontend:latest
+    networks:
+      - redeMov
     deploy:
       restart_policy:
         condition: any
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=redeMov
+        - traefik.http.routers.movfit-ia-frontend.rule=Host(`movfit-ia.xmov.com.br`)
+        - traefik.http.routers.movfit-ia-frontend.entrypoints=websecure
+        - traefik.http.routers.movfit-ia-frontend.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.movfit-ia-frontend.priority=1
+        - traefik.http.services.movfit-ia-frontend.loadbalancer.server.port=5174
     ports:
+      # Mesma lógica do backend: mantido até a migração terminar.
       - "5174:5174"
+
+networks:
+  redeMov:
+    external: true
 
 volumes:
   pgdata:

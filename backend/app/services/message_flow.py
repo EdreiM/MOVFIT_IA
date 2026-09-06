@@ -601,12 +601,21 @@ async def _auto_send_plan_images(
         if _mentions_any_plan(combined_tokens, candidate_unit.plans):
             unit = candidate_unit
 
-    if not unit or unit.name in touched_units:
+    if not unit:
         return
     if not any(p.is_active and p.image_url for p in unit.plans):
         return
 
     force_resend = _wants_image_explicitly(user_text)
+    if force_resend and unit.name in touched_units:
+        # Só pula quando é reenvio explícito: aí sim a IA já tendo mandado a
+        # imagem dessa unidade nessa resposta é sinal de duplicata na certa
+        # (o dedup por URL não se aplica no reenvio forçado). Fora isso,
+        # "unidade já tocada" não quer dizer "todos os planos dela já foram
+        # mandados" — a IA pode ter chamado a ferramenta só pra um dos
+        # planos da unidade, e o dedup por URL abaixo (dentro do
+        # execute_tool) já cuida de não repetir o que já foi enviado.
+        return
     await execute_tool(
         db, tool, {"Unidade": unit.name}, conversation, force_resend=force_resend, touched_units=touched_units
     )
@@ -650,6 +659,20 @@ async def generate_ai_reply(
     # prompt cujo texto continua citando o nome antigo escrito à mão.
     system_prompt = (config.system_prompt or "").replace("{ai_name}", ai_name)
     messages = [{"role": "system", "content": system_prompt}]
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Formatação: isso vai pro WhatsApp, não markdown de verdade. Use *um "
+                "asterisco* pra negrito (nunca **dois**) e _sublinhado_ pra itálico — sem "
+                "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. Listas: hífen simples, "
+                "sem numerar a menos que a ordem importe. Ao apresentar planos, não repita a "
+                "descrição/slogan geral da academia em cada plano — isso já foi dito (ou nem "
+                "precisa ser dito) uma vez só; cada plano é só nome, valor, fidelidade, "
+                "benefícios e link, direto ao ponto."
+            ),
+        }
+    )
     if is_first_contact:
         messages.append(
             {

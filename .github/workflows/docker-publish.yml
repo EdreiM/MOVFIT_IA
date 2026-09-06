@@ -72,4 +72,4 @@ jobs:
             edreimp/movfit-ia-frontend:latest
             edreimp/movfit-ia-frontend:${{ github.sha }}
           build-args: |
-            VITE_API_URL=http://200.6.142.5:8001
+            VITE_API_URL=https://movfit-ia.xmov.com.br/api
