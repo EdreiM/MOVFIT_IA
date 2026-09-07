@@ -603,6 +603,10 @@ async def execute_tool(
         "telefone_cliente": sanitize_phone_digits(conversation.contact_phone),
         "nome_cliente": conversation.contact_name,
         "conversation_id": str(conversation.id),
+        # ID da conversa na plataforma de origem (ex: sessionId do GYMBOT) —
+        # sem isso, o sistema externo não consegue localizar a conversa no
+        # banco dele mesmo recebendo a chamada da ferramenta.
+        "external_conversation_id": conversation.external_conversation_id,
     }
     payload = {
         "ferramenta": tool.tool_key,
@@ -656,6 +660,7 @@ async def _send_single_plan_image(db: AsyncSession, tool: Tool, image: dict, con
             "telefone_cliente": sanitize_phone_digits(conversation.contact_phone),
             "nome_cliente": conversation.contact_name,
             "conversation_id": str(conversation.id),
+            "external_conversation_id": conversation.external_conversation_id,
             "imagens_planos": [image],
         },
     }
