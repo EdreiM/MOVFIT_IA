@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -44,7 +44,10 @@ def _to_out(config: AiConfig) -> AiConfigOut:
     return AiConfigOut(
         id=config.id,
         company_id=config.company_id,
+        integration_id=config.integration_id,
         ai_name=config.ai_name,
+        tone=config.tone,
+        use_emoji=config.use_emoji,
         system_prompt=config.system_prompt,
         llm_provider=config.llm_provider,
         llm_model=config.llm_model,
@@ -55,22 +58,60 @@ def _to_out(config: AiConfig) -> AiConfigOut:
     )
 
 
+async def _get_default_ai_config(db: AsyncSession, company_id: UUID) -> AiConfig:
+    """A configuração "padrão" da empresa (integration_id nulo) — usada como
+    base pra novas personalizações por integração, e como dona de RAGs e
+    ferramentas (que continuam da empresa como um todo, não de uma
+    personalização específica)."""
+    result = await db.execute(
+        select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id.is_(None))
+    )
+    config = result.scalar_one_or_none()
+    if not config:
+        config = AiConfig(company_id=company_id)
+        db.add(config)
+        await db.flush()
+    return config
+
+
 @router.get("/ai-configs/{company_id}", response_model=AiConfigOut)
 async def get_ai_config(
     company_id: UUID,
+    integration_id: UUID | None = Query(None),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     resolved = await resolve_company_id(current, db)
     if company_id != resolved and not current.is_super_admin:
         raise HTTPException(status_code=403, detail="Sem acesso")
-    result = await db.execute(select(AiConfig).where(AiConfig.company_id == company_id))
+
+    default_config = await _get_default_ai_config(db, company_id)
+    if integration_id is None:
+        return _to_out(default_config)
+
+    result = await db.execute(
+        select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id == integration_id)
+    )
     config = result.scalar_one_or_none()
     if not config:
-        config = AiConfig(company_id=company_id)
+        # Primeira vez vendo essa integração — nasce como cópia da
+        # configuração padrão, pra você já começar personalizando a partir
+        # do que já existe, em vez de um formulário em branco.
+        config = AiConfig(
+            company_id=company_id,
+            integration_id=integration_id,
+            ai_name=default_config.ai_name,
+            tone=default_config.tone,
+            use_emoji=default_config.use_emoji,
+            system_prompt=default_config.system_prompt,
+            llm_provider=default_config.llm_provider,
+            llm_model=default_config.llm_model,
+            llm_api_key_encrypted=default_config.llm_api_key_encrypted,
+            temperature=default_config.temperature,
+            operation_mode=default_config.operation_mode,
+        )
         db.add(config)
         await db.flush()
-        await db.refresh(config)
     return _to_out(config)
 
 
@@ -78,18 +119,38 @@ async def get_ai_config(
 async def update_ai_config(
     company_id: UUID,
     payload: AiConfigUpdate,
+    integration_id: UUID | None = Query(None),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     resolved = await resolve_company_id(current, db)
     if company_id != resolved and not current.is_super_admin:
         raise HTTPException(status_code=403, detail="Sem acesso")
-    result = await db.execute(select(AiConfig).where(AiConfig.company_id == company_id))
-    config = result.scalar_one_or_none()
-    if not config:
-        config = AiConfig(company_id=company_id)
-        db.add(config)
-        await db.flush()
+
+    if integration_id is None:
+        config = await _get_default_ai_config(db, company_id)
+    else:
+        result = await db.execute(
+            select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id == integration_id)
+        )
+        config = result.scalar_one_or_none()
+        if not config:
+            default_config = await _get_default_ai_config(db, company_id)
+            config = AiConfig(
+                company_id=company_id,
+                integration_id=integration_id,
+                ai_name=default_config.ai_name,
+                tone=default_config.tone,
+                use_emoji=default_config.use_emoji,
+                system_prompt=default_config.system_prompt,
+                llm_provider=default_config.llm_provider,
+                llm_model=default_config.llm_model,
+                llm_api_key_encrypted=default_config.llm_api_key_encrypted,
+                temperature=default_config.temperature,
+                operation_mode=default_config.operation_mode,
+            )
+            db.add(config)
+            await db.flush()
 
     data = payload.model_dump(exclude_unset=True)
     api_key = data.pop("llm_api_key", None)
@@ -112,12 +173,7 @@ async def create_rag_source(
     resolved = await resolve_company_id(current, db)
     if company_id != resolved and not current.is_super_admin:
         raise HTTPException(status_code=403, detail="Sem acesso")
-    result = await db.execute(select(AiConfig).where(AiConfig.company_id == company_id))
-    config = result.scalar_one_or_none()
-    if not config:
-        config = AiConfig(company_id=company_id)
-        db.add(config)
-        await db.flush()
+    config = await _get_default_ai_config(db, company_id)
     rag = RagSource(
         company_id=company_id,
         ai_config_id=config.id,
@@ -191,12 +247,7 @@ async def create_tool(
     resolved = await resolve_company_id(current, db)
     if company_id != resolved and not current.is_super_admin:
         raise HTTPException(status_code=403, detail="Sem acesso")
-    result = await db.execute(select(AiConfig).where(AiConfig.company_id == company_id))
-    config = result.scalar_one_or_none()
-    if not config:
-        config = AiConfig(company_id=company_id)
-        db.add(config)
-        await db.flush()
+    config = await _get_default_ai_config(db, company_id)
     tool = Tool(
         company_id=company_id,
         ai_config_id=config.id,

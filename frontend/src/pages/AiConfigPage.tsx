@@ -5,7 +5,10 @@ import { useAuth } from "../auth";
 type AiConfig = {
   id: string;
   company_id: string;
+  integration_id: string | null;
   ai_name: string;
+  tone: string | null;
+  use_emoji: boolean;
   system_prompt: string;
   llm_provider: string;
   llm_model: string;
@@ -13,6 +16,11 @@ type AiConfig = {
   has_api_key: boolean;
   temperature: number;
   operation_mode: string;
+};
+
+type Integration = {
+  id: string;
+  name: string;
 };
 
 type Rag = {
@@ -27,6 +35,8 @@ const OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-m
 
 export default function AiConfigPage() {
   const { companyId } = useAuth();
+  const [integrations, setIntegrations] = useState<Integration[]>([]);
+  const [integrationId, setIntegrationId] = useState("");
   const [config, setConfig] = useState<AiConfig | null>(null);
   const [rags, setRags] = useState<Rag[]>([]);
   const [apiKey, setApiKey] = useState("");
@@ -35,17 +45,24 @@ export default function AiConfigPage() {
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
-  const load = async () => {
+  const loadConfig = async (targetIntegrationId: string) => {
     if (!companyId) return;
-    const cfg = await api<AiConfig>(`/ai-configs/${companyId}`);
-    const list = await api<Rag[]>(`/ai-configs/${companyId}/rag-sources`);
+    const qs = targetIntegrationId ? `?integration_id=${targetIntegrationId}` : "";
+    const cfg = await api<AiConfig>(`/ai-configs/${companyId}${qs}`);
     setConfig(cfg);
-    setRags(list);
+    setApiKey("");
   };
 
   useEffect(() => {
-    load().catch((e) => setError(e.message));
+    if (!companyId) return;
+    api<Integration[]>("/integrations").then(setIntegrations).catch(() => {});
+    api<Rag[]>(`/ai-configs/${companyId}/rag-sources`).then(setRags).catch((e) => setError(e.message));
   }, [companyId]);
+
+  useEffect(() => {
+    loadConfig(integrationId).catch((e) => setError(e.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, integrationId]);
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
@@ -53,8 +70,11 @@ export default function AiConfigPage() {
     setError("");
     setMsg("");
     try {
+      const qs = integrationId ? `?integration_id=${integrationId}` : "";
       const body: Record<string, unknown> = {
         ai_name: config.ai_name,
+        tone: config.tone,
+        use_emoji: config.use_emoji,
         system_prompt: config.system_prompt,
         llm_provider: config.llm_provider,
         llm_model: config.llm_model,
@@ -62,7 +82,7 @@ export default function AiConfigPage() {
         operation_mode: config.operation_mode,
       };
       if (apiKey.trim()) body.llm_api_key = apiKey.trim();
-      const updated = await api<AiConfig>(`/ai-configs/${companyId}`, {
+      const updated = await api<AiConfig>(`/ai-configs/${companyId}${qs}`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
@@ -74,6 +94,12 @@ export default function AiConfigPage() {
     }
   };
 
+  const loadRags = async () => {
+    if (!companyId) return;
+    const list = await api<Rag[]>(`/ai-configs/${companyId}/rag-sources`);
+    setRags(list);
+  };
+
   const addRag = async (e: FormEvent) => {
     e.preventDefault();
     if (!companyId) return;
@@ -83,7 +109,7 @@ export default function AiConfigPage() {
     });
     setRagName("");
     setRagUrl("");
-    await load();
+    await loadRags();
   };
 
   const toggleRagActive = async (rag: Rag) => {
@@ -92,14 +118,14 @@ export default function AiConfigPage() {
       method: "PATCH",
       body: JSON.stringify({ is_active: !rag.is_active }),
     });
-    await load();
+    await loadRags();
   };
 
   const deleteRag = async (rag: Rag) => {
     if (!companyId) return;
     if (!confirm(`Excluir a RAG "${rag.name}"?`)) return;
     await api(`/ai-configs/${companyId}/rag-sources/${rag.id}`, { method: "DELETE" });
-    await load();
+    await loadRags();
   };
 
   if (!companyId) {
@@ -124,18 +150,6 @@ export default function AiConfigPage() {
       text: "Modo de operação está \"Desligado\" — a IA não vai responder automaticamente a nenhuma mensagem.",
     });
   }
-  if (!config.system_prompt.trim()) {
-    warnings.push({
-      level: "warning",
-      text: "Prompt do sistema está vazio — a IA vai responder sem nenhuma instrução de comportamento.",
-    });
-  }
-  if (config.system_prompt.trim() && !config.system_prompt.includes("{ai_name}")) {
-    warnings.push({
-      level: "warning",
-      text: 'Prompt não usa o placeholder "{ai_name}" — se trocar o nome da IA depois, o prompt não vai acompanhar automaticamente.',
-    });
-  }
   if (config.operation_mode === "suggest") {
     warnings.push({
       level: "warning",
@@ -155,9 +169,31 @@ export default function AiConfigPage() {
       <div>
         <h2 className="font-display text-3xl font-bold">Configuração da IA</h2>
         <p className="mt-1 text-sand/55">
-          Prompt, provedor LLM, API key e RAGs via webhook n8n.
+          Nome, personalidade, provedor LLM, API key e RAGs via webhook n8n.
         </p>
       </div>
+
+      <label className="block max-w-sm space-y-1">
+        <span className="text-sm text-sand/60">
+          Personalizar para integração{" "}
+          <span className="text-sand/40">
+            (opcional — nome, tom de voz e chave de API podem ser diferentes por integração;
+            sem selecionar, edita a configuração padrão da empresa)
+          </span>
+        </span>
+        <select
+          className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+          value={integrationId}
+          onChange={(e) => setIntegrationId(e.target.value)}
+        >
+          <option value="">Padrão da empresa</option>
+          {integrations.map((i) => (
+            <option key={i.id} value={i.id}>
+              {i.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {warnings.length > 0 && (
         <ul className="space-y-2">
@@ -191,17 +227,23 @@ export default function AiConfigPage() {
 
         <label className="block space-y-1">
           <span className="text-sm text-sand/60">
-            Prompt do sistema{" "}
-            <span className="text-sand/40">
-              (use <code className="text-lime">{"{ai_name}"}</code> em vez de digitar o nome direto — daí,
-              se trocar o "Nome da IA" acima, o prompt já acompanha, sem digitar o nome duas vezes)
-            </span>
+            Tom de voz <span className="text-sand/40">(descrição curta da personalidade)</span>
           </span>
           <textarea
-            className="min-h-32 w-full rounded-md border border-white/15 bg-ink px-3 py-2"
-            value={config.system_prompt}
-            onChange={(e) => setConfig({ ...config, system_prompt: e.target.value })}
+            className="min-h-20 w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+            placeholder="Ex: Caloroso, simpático e acolhedor — fala como alguém que gosta de ajudar, sem soar robótica ou formal demais."
+            value={config.tone ?? ""}
+            onChange={(e) => setConfig({ ...config, tone: e.target.value })}
           />
+        </label>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={config.use_emoji}
+            onChange={(e) => setConfig({ ...config, use_emoji: e.target.checked })}
+          />
+          <span className="text-sm text-sand/60">Pode usar emoji nas respostas</span>
         </label>
 
         <div className="grid gap-3 sm:grid-cols-3">
@@ -279,6 +321,24 @@ export default function AiConfigPage() {
           </select>
         </label>
 
+        <details className="rounded-md border border-white/10 p-3">
+          <summary className="cursor-pointer text-sm text-sand/60">
+            Instruções extras (avançado, opcional)
+          </summary>
+          <label className="mt-3 block space-y-1">
+            <span className="text-xs text-sand/40">
+              Regra específica que não caiba em nome/tom/emoji — some ao prompt montado a partir
+              dos campos acima. Use <code className="text-lime">{"{ai_name}"}</code> se quiser
+              citar o nome da IA aqui.
+            </span>
+            <textarea
+              className="min-h-24 w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+              value={config.system_prompt}
+              onChange={(e) => setConfig({ ...config, system_prompt: e.target.value })}
+            />
+          </label>
+        </details>
+
         {msg && <p className="text-lime">{msg}</p>}
         {error && <p className="text-ember">{error}</p>}
 
@@ -289,6 +349,9 @@ export default function AiConfigPage() {
 
       <section className="space-y-4">
         <h3 className="font-display text-xl font-semibold">RAGs (n8n)</h3>
+        <p className="text-sm text-sand/45">
+          RAGs valem pra empresa toda, independente da integração selecionada acima.
+        </p>
         <form onSubmit={addRag} className="grid gap-3 sm:grid-cols-3">
           <input
             className="rounded-md border border-white/15 bg-ink px-3 py-2"

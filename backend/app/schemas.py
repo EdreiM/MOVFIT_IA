@@ -150,6 +150,8 @@ class MessageOut(BaseModel):
 # AI Config
 class AiConfigUpdate(BaseModel):
     ai_name: str | None = None
+    tone: str | None = None
+    use_emoji: bool | None = None
     system_prompt: str | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
@@ -161,7 +163,10 @@ class AiConfigUpdate(BaseModel):
 class AiConfigOut(BaseModel):
     id: UUID
     company_id: UUID
+    integration_id: UUID | None
     ai_name: str
+    tone: str | None
+    use_emoji: bool
     system_prompt: str
     llm_provider: str
     llm_model: str

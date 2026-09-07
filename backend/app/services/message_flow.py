@@ -924,12 +924,25 @@ async def generate_ai_reply(
     if not conversation.ai_enabled:
         return None
 
-    result = await db.execute(
-        select(AiConfig)
-        .options(selectinload(AiConfig.rag_sources))
-        .where(AiConfig.company_id == conversation.company_id)
-    )
-    config = result.scalar_one_or_none()
+    config = None
+    if conversation.integration_id:
+        result = await db.execute(
+            select(AiConfig).where(
+                AiConfig.company_id == conversation.company_id,
+                AiConfig.integration_id == conversation.integration_id,
+            )
+        )
+        config = result.scalar_one_or_none()
+    if not config:
+        # Sem personalização própria pra essa integração (ou conversa sem
+        # integração conhecida) — usa a configuração padrão da empresa.
+        result = await db.execute(
+            select(AiConfig).where(
+                AiConfig.company_id == conversation.company_id,
+                AiConfig.integration_id.is_(None),
+            )
+        )
+        config = result.scalar_one_or_none()
     if not config or config.operation_mode == "off":
         return None
     if not config.llm_api_key_encrypted:
@@ -949,10 +962,19 @@ async def generate_ai_reply(
     is_first_contact = not any(m.actor in {"ai", "human_agent"} for m in history)
 
     ai_name = config.ai_name or "assistente virtual"
-    # Permite usar {ai_name} no prompt pra sempre bater com o campo "Nome da
-    # IA" — sem isso, quem trocasse o nome só nesse campo ficaria com um
-    # prompt cujo texto continua citando o nome antigo escrito à mão.
-    system_prompt = (config.system_prompt or "").replace("{ai_name}", ai_name)
+    # Nome, tom de voz e uso de emoji são campos estruturados (editáveis sem
+    # mexer em prompt) — o prompt "de verdade" é montado a partir deles aqui.
+    # system_prompt vira só um espaço pra instrução extra opcional, além do
+    # que os campos estruturados já cobrem.
+    tone_text = (config.tone or "cordial, objetiva e útil").strip()
+    emoji_instruction = (
+        "Pode usar emoji com moderação, de acordo com o contexto."
+        if config.use_emoji
+        else "Não use emoji nas respostas."
+    )
+    base_prompt = f"Você é a {ai_name}, assistente virtual da Mov Fit. Seu tom de voz: {tone_text}. {emoji_instruction}"
+    extra_instructions = (config.system_prompt or "").replace("{ai_name}", ai_name).strip()
+    system_prompt = f"{base_prompt}\n\n{extra_instructions}" if extra_instructions else base_prompt
     messages = [{"role": "system", "content": system_prompt}]
     brazil_now = datetime.now(timezone(timedelta(hours=-3)))
     weekday_pt = [

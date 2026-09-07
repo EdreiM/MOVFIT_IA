@@ -40,7 +40,9 @@ async def health(
             .select_from(RagSource)
             .where(RagSource.company_id == company_id, RagSource.is_active.is_(True))
         )
-        cfg = await db.scalar(select(AiConfig).where(AiConfig.company_id == company_id))
+        cfg = await db.scalar(
+            select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id.is_(None))
+        )
         has_llm_key = bool(cfg and cfg.llm_api_key_encrypted)
 
     return {

@@ -52,13 +52,18 @@ export default function TestChatPage() {
   useEffect(() => {
     if (!companyId) return;
     load().catch((e) => setError(e.message));
-    api<AiConfig>(`/ai-configs/${companyId}`)
-      .then((cfg) => setAiName(cfg.ai_name || "a IA"))
-      .catch(() => {});
     api<Integration[]>(`/integrations`)
       .then(setIntegrations)
       .catch(() => {});
   }, [companyId]);
+
+  useEffect(() => {
+    if (!companyId) return;
+    const qs = integrationId ? `?integration_id=${integrationId}` : "";
+    api<AiConfig>(`/ai-configs/${companyId}${qs}`)
+      .then((cfg) => setAiName(cfg.ai_name || "a IA"))
+      .catch(() => {});
+  }, [companyId, integrationId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

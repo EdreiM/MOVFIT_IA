@@ -24,5 +24,7 @@ class Company(Base):
     users = relationship("UserCompany", back_populates="company", cascade="all, delete-orphan")
     numbers = relationship("Number", back_populates="company", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="company", cascade="all, delete-orphan")
-    ai_config = relationship("AiConfig", back_populates="company", uselist=False, cascade="all, delete-orphan")
+    # Uma empresa pode ter várias linhas de AiConfig agora (padrão + uma por
+    # integração personalizada) — lista, não mais um-pra-um.
+    ai_configs = relationship("AiConfig", back_populates="company", cascade="all, delete-orphan")
     integrations = relationship("Integration", back_populates="company", cascade="all, delete-orphan")
