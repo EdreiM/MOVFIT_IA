@@ -694,6 +694,15 @@ async def execute_tool(
             conversation.status = "resolved"
             await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
 
+        # Qualquer ferramenta que consulte um sistema externo e devolva
+        # nome/CPF/e-mail/data de nascimento do cliente (ex: consultar
+        # parcelas) já atualiza o cadastro com esse dado — vem confirmado
+        # pelo sistema, mais confiável que o que o cliente digitou.
+        dados_extra = data.get("dados") if isinstance(data.get("dados"), dict) else {}
+        lead_result_fields = {k: v for k, v in {**data, **dados_extra}.items() if k in _LEAD_ARG_KEYS and v}
+        if lead_result_fields:
+            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, lead_result_fields)
+
     return data
 
 
@@ -1244,6 +1253,17 @@ async def generate_ai_reply(
                 ),
             }
         )
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Se o resultado de alguma ferramenta trouxer o nome real do cliente (campo "
+                "\"nome\" na resposta), passe a chamá-lo por esse nome pelo resto da conversa — "
+                "é mais confiável que o que ele mesmo escreveu, porque vem confirmado pelo "
+                "sistema. Use só o primeiro nome, de forma natural, sem soar formal demais."
+            ),
+        }
+    )
 
     for m in history:
         role = "assistant" if m.actor in {"ai", "human_agent"} else "user"
