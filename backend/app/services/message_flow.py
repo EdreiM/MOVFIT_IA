@@ -604,15 +604,18 @@ def _tool_to_openai_schema(tool: Tool) -> dict:
         )
     elif tool.tool_key == TOOL_KEY_TRANSFER:
         description = (
-            description + " Chame isso quando: (1) o cliente pedir explicitamente por atendente "
-            "humano; (2) for reclamação, cobrança errada, pagamento ou CANCELAMENTO de matrícula; "
-            "(3) pedido de desconto ou condição especial fora do catálogo; (4) pergunta fora do "
-            "que você sabe (RAG/catálogo não cobre, assunto sem relação com a academia); (5) "
-            "assunto sensível — lesão, saúde, questão jurídica; (6) o cliente insistir na mesma "
-            "dúvida ou pedido mais de 2 vezes mesmo depois de você já ter respondido; (7) o "
-            "cliente parecer irritado, indignado, com raiva, ou usar xingamentos/palavrões. NÃO "
-            "chame pra dúvidas normais (planos, preços, horários, endereço, estrutura, matrícula "
-            "via link) — isso a IA resolve sozinha."
+            description + " Se existir uma ferramenta específica pra resolver o pedido (ex: "
+            "consultar parcela em atraso, gerar link de pagamento), chame ESSA primeiro — não "
+            "transfira só porque é sobre pagamento. Chame transferir_atendimento quando: (1) o "
+            "cliente pedir explicitamente por atendente humano; (2) for reclamação, cobrança "
+            "errada ou problema de pagamento que NENHUMA ferramenta disponível resolve; (3) "
+            "CANCELAMENTO de matrícula; (4) pedido de desconto ou condição especial fora do "
+            "catálogo; (5) pergunta fora do que você sabe (RAG/catálogo não cobre, assunto sem "
+            "relação com a academia); (6) assunto sensível — lesão, saúde, questão jurídica; (7) "
+            "o cliente insistir na mesma dúvida ou pedido mais de 2 vezes mesmo depois de você já "
+            "ter respondido; (8) o cliente parecer irritado, indignado, com raiva, ou usar "
+            "xingamentos/palavrões. NÃO chame pra dúvidas normais (planos, preços, horários, "
+            "endereço, estrutura, matrícula via link) — isso a IA resolve sozinha."
         )
     return {
         "type": "function",
@@ -1042,16 +1045,23 @@ async def generate_ai_reply(
         {
             "role": "system",
             "content": (
+                "IMPORTANTE: se existir uma ferramenta específica disponível pra resolver o que o "
+                "cliente está pedindo (ex: consultar parcela/mensalidade em atraso, gerar link de "
+                "pagamento), chame ESSA ferramenta primeiro — não transfira direto só porque o "
+                "assunto é sobre pagamento. Só transfira se a ferramenta específica não existir, "
+                "não resolver, ou o próprio resultado dela indicar que precisa de atendente.\n"
                 "Quando transferir pra atendente humano (ferramenta transferir_atendimento), se "
                 "ela estiver disponível: (1) cliente pediu explicitamente por atendente; (2) "
-                "reclamação, cobrança errada, pagamento, ou CANCELAMENTO de matrícula; (3) pedido "
-                "de desconto/condição especial fora do catálogo; (4) pergunta fora do que você "
-                "sabe (RAG/catálogo não cobre, assunto sem relação com a academia); (5) assunto "
-                "sensível — lesão, saúde, questão jurídica; (6) cliente insiste na mesma dúvida ou "
-                "pedido mais de 2 vezes mesmo depois de você já ter respondido; (7) cliente "
-                "parece irritado, indignado, com raiva, ou usa xingamentos/palavrões. Pra dúvidas "
-                "normais (planos, preços, horários, endereço, estrutura, matrícula via link), "
-                "resolva sozinha — não transfira à toa."
+                "reclamação, cobrança errada, ou problema de pagamento que NENHUMA ferramenta "
+                "disponível resolve (ex: trocar cartão, cobrança duplicada) — se tiver ferramenta "
+                "específica pra consultar isso, use-a antes; (3) CANCELAMENTO de matrícula; (4) "
+                "pedido de desconto/condição especial fora do catálogo; (5) pergunta fora do que "
+                "você sabe (RAG/catálogo não cobre, assunto sem relação com a academia); (6) "
+                "assunto sensível — lesão, saúde, questão jurídica; (7) cliente insiste na mesma "
+                "dúvida ou pedido mais de 2 vezes mesmo depois de você já ter respondido; (8) "
+                "cliente parece irritado, indignado, com raiva, ou usa xingamentos/palavrões. Pra "
+                "dúvidas normais (planos, preços, horários, endereço, estrutura, matrícula via "
+                "link), resolva sozinha — não transfira à toa."
             ),
         }
     )
