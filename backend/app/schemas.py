@@ -391,3 +391,8 @@ class MetricsPoint(BaseModel):
     conversations_total: int
     messages_inbound: int
     messages_outbound: int
+
+
+class StageCount(BaseModel):
+    stage: str
+    count: int

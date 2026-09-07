@@ -4,8 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
-from app.models import Conversation, Message, MetricsDaily
-from app.schemas import MetricsOverview, MetricsPoint
+from app.models import Conversation, Lead, Message, MetricsDaily
+from app.schemas import MetricsOverview, MetricsPoint, StageCount
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -107,3 +107,17 @@ async def metrics_timeseries(
         )
         for r in rows
     ]
+
+
+@router.get("/leads-funnel", response_model=list[StageCount])
+async def leads_funnel(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    result = await db.execute(
+        select(Lead.stage, func.count())
+        .where(Lead.company_id == company_id)
+        .group_by(Lead.stage)
+    )
+    return [StageCount(stage=stage, count=count) for stage, count in result.all()]

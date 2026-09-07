@@ -19,19 +19,146 @@ type Health = {
   llm_configured: boolean;
 };
 
+type MetricsPoint = {
+  day: string;
+  conversations_total: number;
+  messages_inbound: number;
+  messages_outbound: number;
+};
+
+type StageCount = {
+  stage: string;
+  count: number;
+};
+
+// Ordem canônica do funil — estágios conhecidos aparecem nessa ordem;
+// qualquer estágio customizado que a IA ou um usuário crie entra depois,
+// ordenado por volume.
+const STAGE_ORDER = ["novo", "qualificado", "interessado", "transferido", "matriculado", "resolvido", "perdido"];
+const STAGE_LABELS: Record<string, string> = {
+  novo: "Novo",
+  qualificado: "Qualificado",
+  interessado: "Interessado",
+  transferido: "Transferido",
+  matriculado: "Matriculado",
+  resolvido: "Resolvido",
+  perdido: "Perdido",
+};
+
+function TrendChart({ points }: { points: MetricsPoint[] }) {
+  if (points.length === 0) {
+    return <p className="text-sand/45">Sem dados suficientes ainda — volta aqui depois de alguns dias de uso.</p>;
+  }
+
+  const width = 640;
+  const height = 200;
+  const padding = { top: 10, right: 10, bottom: 24, left: 10 };
+  const innerW = width - padding.left - padding.right;
+  const innerH = height - padding.top - padding.bottom;
+
+  const series = [
+    { key: "conversations_total" as const, label: "Conversas", color: "#7fe37a" },
+    { key: "messages_inbound" as const, label: "Msgs entrada", color: "#5fb8ff" },
+    { key: "messages_outbound" as const, label: "Msgs saída", color: "#ff8a5f" },
+  ];
+
+  const maxY = Math.max(1, ...points.flatMap((p) => series.map((s) => p[s.key])));
+  const stepX = points.length > 1 ? innerW / (points.length - 1) : 0;
+
+  const pathFor = (key: keyof MetricsPoint) =>
+    points
+      .map((p, i) => {
+        const x = padding.left + i * stepX;
+        const y = padding.top + innerH - (Number(p[key]) / maxY) * innerH;
+        return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+
+  const labelEvery = Math.max(1, Math.ceil(points.length / 6));
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" role="img" aria-label="Tendência de conversas e mensagens">
+        {series.map((s) => (
+          <path key={s.key} d={pathFor(s.key)} fill="none" stroke={s.color} strokeWidth={2} />
+        ))}
+        {points.map((p, i) => {
+          if (i % labelEvery !== 0 && i !== points.length - 1) return null;
+          const x = padding.left + i * stepX;
+          const [, m, d] = p.day.split("-");
+          return (
+            <text key={p.day} x={x} y={height - 6} fontSize={10} fill="#9a9a9a" textAnchor="middle">
+              {d}/{m}
+            </text>
+          );
+        })}
+      </svg>
+      <div className="mt-2 flex flex-wrap gap-4 text-xs">
+        {series.map((s) => (
+          <span key={s.key} className="flex items-center gap-1.5 text-sand/60">
+            <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
+            {s.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StageFunnel({ stages }: { stages: StageCount[] }) {
+  if (stages.length === 0) {
+    return <p className="text-sand/45">Nenhum cliente cadastrado ainda.</p>;
+  }
+  const known = STAGE_ORDER.filter((s) => stages.some((st) => st.stage === s));
+  const unknown = stages
+    .filter((st) => !STAGE_ORDER.includes(st.stage))
+    .sort((a, b) => b.count - a.count)
+    .map((st) => st.stage);
+  const orderedKeys = [...known, ...unknown];
+  const maxCount = Math.max(1, ...stages.map((s) => s.count));
+
+  return (
+    <div className="space-y-2">
+      {orderedKeys.map((key) => {
+        const entry = stages.find((s) => s.stage === key);
+        if (!entry) return null;
+        const pct = (entry.count / maxCount) * 100;
+        return (
+          <div key={key} className="flex items-center gap-3">
+            <span className="w-28 shrink-0 text-sm text-sand/70">{STAGE_LABELS[key] || key}</span>
+            <div className="h-5 flex-1 rounded bg-white/5">
+              <div
+                className="h-5 rounded bg-leaf transition-all"
+                style={{ width: `${Math.max(pct, 4)}%` }}
+              />
+            </div>
+            <span className="w-8 shrink-0 text-right text-sm font-semibold text-lime">{entry.count}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
+  const [timeseries, setTimeseries] = useState<MetricsPoint[]>([]);
+  const [funnel, setFunnel] = useState<StageCount[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
     Promise.all([
       api<Overview>("/metrics/overview"),
       api<Health>("/admin/health"),
+      api<MetricsPoint[]>("/metrics/timeseries"),
+      api<StageCount[]>("/metrics/leads-funnel"),
     ])
-      .then(([o, h]) => {
+      .then(([o, h, ts, f]) => {
         setOverview(o);
         setHealth(h);
+        setTimeseries(ts);
+        setFunnel(f);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -70,6 +197,22 @@ export default function DashboardPage() {
             <p className="mt-2 font-display text-3xl font-bold text-lime">{c.value}</p>
           </div>
         ))}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="border border-white/10 bg-panel px-5 py-4">
+          <p className="text-xs uppercase tracking-wider text-muted">Tendência (últimos 30 dias)</p>
+          <div className="mt-4">
+            <TrendChart points={timeseries} />
+          </div>
+        </div>
+
+        <div className="border border-white/10 bg-panel px-5 py-4">
+          <p className="text-xs uppercase tracking-wider text-muted">Funil de clientes por estágio</p>
+          <div className="mt-4">
+            <StageFunnel stages={funnel} />
+          </div>
+        </div>
       </div>
 
       {health && (
