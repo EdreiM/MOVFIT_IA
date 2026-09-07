@@ -426,6 +426,13 @@ def _normalize_tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", ascii_text.lower()))
 
 
+def _normalize_text(text: str) -> str:
+    """Como _normalize_tokens, mas preserva a ordem/espaços — pra procurar
+    frase inteira (ex: 'vou encaminhar'), não só palavras soltas."""
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return re.sub(r"\s+", " ", ascii_text.lower())
+
+
 def _best_matches(candidates: list[tuple[str, set[str]]], arg_tokens: set[str], threshold: float) -> list[str]:
     """Pontua cada candidato pela fração dos seus tokens de identidade que
     aparecem nos argumentos da IA (recall) — não exige nome idêntico, só que
@@ -541,6 +548,25 @@ def _wants_plan_info(text: str) -> bool:
     — mencionar o nome de uma unidade por outro motivo (ex: perguntar
     horário) não deve, sozinho, disparar o envio de planos."""
     return bool(_normalize_tokens(text) & _PLAN_INTENT_KEYWORDS)
+
+
+_TRANSFER_PROMISE_PHRASES = [
+    "vou encaminhar", "vou te transferir", "vou transferir voce",
+    "vou chamar um atendente", "vou passar para um atendente", "vou passar pra um atendente",
+    "encaminhar para o atendimento", "encaminhar para um atendente", "encaminhando para um atendente",
+    "transferir para um atendente", "transferindo para um atendente", "um atendente vai te",
+    "um atendente ira", "ja vou te transferir", "vou te encaminhar",
+]
+
+
+def _promised_transfer_without_acting(text: str) -> bool:
+    """Detecta quando a IA escreveu no texto que vai transferir/encaminhar
+    pra um humano — usado como rede de segurança pra garantir que a
+    ferramenta transferir_atendimento seja realmente chamada quando isso
+    acontece (a instrução de prompt pra fazer as duas coisas juntas nem
+    sempre é seguida pelo modelo)."""
+    normalized = _normalize_text(text)
+    return any(phrase in normalized for phrase in _TRANSFER_PROMISE_PHRASES)
 
 
 def _mentions_any_plan(text_tokens: set[str], plans: list[Plan]) -> bool:
@@ -717,12 +743,18 @@ async def _present_plan_images_with_captions(
     tool: Tool,
     images: list[dict],
     force_resend: bool,
+    touched_units: set[str] | None = None,
 ) -> dict:
     """Apresenta cada plano como imagem seguida da própria legenda/descrição,
     um de cada vez, esperando a imagem ser confirmada antes de mandar o
     texto — a única forma de garantir a ordem imagem->descrição por plano,
     já que imagem (webhook da ferramenta) e texto (outbound da integração)
-    são dois canais de entrega sem sincronia nenhuma entre si."""
+    são dois canais de entrega sem sincronia nenhuma entre si.
+
+    `touched_units` (compartilhado entre chamadas da mesma resposta) evita
+    mandar a introdução "Aqui estão os planos..." mais de uma vez quando a
+    IA chama essa ferramenta várias vezes na mesma resposta (ex: uma vez por
+    plano) — já vimos isso acontecer de verdade em produção."""
     if not images:
         return {"sucesso": True, "mensagem": "Nenhum plano encontrado pra essa unidade.", "dados": {}}
 
@@ -736,25 +768,29 @@ async def _present_plan_images_with_captions(
 
     is_test = conversation.channel == "test_console"
     unit_name = to_send[0]["unidade"]
-    intro = f"Aqui estão os planos da unidade {unit_name}:"
-    await save_message(
-        db,
-        conversation,
-        NormalizedMessageEvent(
-            event_type="message_outbound",
-            external_message_id=None,
-            external_conversation_id=None,
-            channel_to=None,
-            contact_phone=conversation.contact_phone,
-            content_type="text",
-            text=intro,
-            timestamp=datetime.now(timezone.utc),
-            actor="ai",
-            raw_payload={"generated": True},
-        ),
-    )
-    if not is_test:
-        await send_outbound(db, company_id, conversation, intro)
+    already_announced = touched_units is not None and unit_name in touched_units
+    if touched_units is not None:
+        touched_units.add(unit_name)
+    if not already_announced:
+        intro = f"Aqui estão os planos da unidade {unit_name}:"
+        await save_message(
+            db,
+            conversation,
+            NormalizedMessageEvent(
+                event_type="message_outbound",
+                external_message_id=None,
+                external_conversation_id=None,
+                channel_to=None,
+                contact_phone=conversation.contact_phone,
+                content_type="text",
+                text=intro,
+                timestamp=datetime.now(timezone.utc),
+                actor="ai",
+                raw_payload={"generated": True},
+            ),
+        )
+        if not is_test:
+            await send_outbound(db, company_id, conversation, intro)
 
     sent_count = 0
     for image in to_send:
@@ -866,9 +902,14 @@ async def _auto_send_plan_images(
         # repetir o que já foi enviado.
         return
     resolved_images = await _resolve_plan_images(db, conversation.company_id, {"Unidade": unit.name})
-    touched_units.update(img["unidade"] for img in resolved_images)
     await _present_plan_images_with_captions(
-        db, conversation, conversation.company_id, tool, resolved_images, force_resend=force_resend
+        db,
+        conversation,
+        conversation.company_id,
+        tool,
+        resolved_images,
+        force_resend=force_resend,
+        touched_units=touched_units,
     )
 
 
@@ -958,6 +999,42 @@ async def generate_ai_reply(
                 "• benefício 2\n\n"
                 "👉 *Faça sua matrícula pelo link:*\n"
                 "https://..."
+            ),
+        }
+    )
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Tom de conversa — escreva como uma pessoa de verdade atendendo pelo WhatsApp, "
+                "não como um bot decorado:\n"
+                "1) NÃO termine toda resposta com \"Posso ajudar com mais alguma coisa?\", "
+                "\"Estou à disposição!\" ou frases parecidas. Isso é repetitivo e soa robótico "
+                "quando aparece em toda mensagem. Só use algo assim quando a conversa realmente "
+                "estiver terminando (cliente agradeceu, confirmou que não precisa de mais nada, "
+                "ou claramente encerrou o assunto) — no meio de uma troca ativa, só responda a "
+                "pergunta e pare.\n"
+                "2) NÃO quebre uma resposta simples em várias mensagens separadas só por estilo "
+                "(ex: uma frase, depois uma lista em bolha separada, depois uma pergunta em outra "
+                "bolha). Escreva como uma pessoa escreveria — um parágrafo natural corrido. "
+                "Quebras em bolhas diferentes são só pra listas genuinamente longas (tipo o "
+                "catálogo de unidades) ou pra apresentação de planos.\n"
+                "3) NUNCA mencione termos técnicos internos pro cliente — coisas como \"houve um "
+                "problema ao enviar\", \"falha no sistema\", \"erro ao processar\", \"tentando "
+                "novamente\". Se algo não funcionar, siga a conversa naturalmente sem expor isso "
+                "— o cliente não precisa saber que existe um sistema por trás.\n"
+                "4) NUNCA invente valor, condição ou informação que não esteja no catálogo ou na "
+                "base de conhecimento (ex: diária, day use, aula experimental, desconto não "
+                "listado, promoção). Se não tiver certeza ou o dado não existir aqui, diga "
+                "claramente que não tem essa informação agora e ofereça transferir pra um "
+                "atendente confirmar — nunca chute um número. Antes de dizer \"não tenho essa "
+                "informação\", olhe o histórico da conversa: se você mesma já respondeu isso há "
+                "pouco, não se contradiga — reafirme o que já foi dito em vez de negar.\n"
+                "5) Se você disser ao cliente que vai transferir, encaminhar pro atendimento ou "
+                "chamar um atendente, você TEM que chamar a ferramenta transferir_atendimento "
+                "nessa mesma resposta (se ela estiver disponível) — nunca prometa isso em texto "
+                "sem realmente executar a ferramenta. Prometer e não fazer é pior do que não "
+                "prometer nada."
             ),
         }
     )
@@ -1179,7 +1256,6 @@ async def generate_ai_reply(
                     result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
                 else:
                     resolved_images = await _resolve_plan_images(db, conversation.company_id, arguments)
-                    touched_units.update(img["unidade"] for img in resolved_images)
                     result = await _present_plan_images_with_captions(
                         db,
                         conversation,
@@ -1187,6 +1263,7 @@ async def generate_ai_reply(
                         tool,
                         resolved_images,
                         force_resend=_wants_image_explicitly(user_text),
+                        touched_units=touched_units,
                     )
                 messages.append(
                     {"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, ensure_ascii=False)}
@@ -1218,6 +1295,24 @@ async def generate_ai_reply(
 
     final_text = assistant_message.get("content") or ""
     await _auto_send_plan_images(db, conversation, user_text, final_text, tools_by_key, touched_units)
+
+    transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+    if (
+        transfer_tool
+        and transfer_tool.webhook_url
+        and conversation.status != "with_human"
+        and _promised_transfer_without_acting(final_text)
+    ):
+        # Rede de segurança: a IA escreveu que ia transferir mas não chamou
+        # a ferramenta nessa resposta — chama por ela, senão vira promessa
+        # vazia pro cliente (já visto acontecer de verdade em produção).
+        await execute_tool(
+            db,
+            transfer_tool,
+            {"motivo": "Assunto fora do que a IA consegue resolver — ela já sinalizou a transferência ao cliente."},
+            conversation,
+        )
+
     return final_text
 
 
