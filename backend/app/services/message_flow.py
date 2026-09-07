@@ -358,8 +358,11 @@ SAVE_LEAD_DATA_TOOL_SCHEMA = {
             "no funil (ex: qualificado, interessado, sem interesse). Chame isso "
             "assim que o cliente disser um desses dados pela primeira vez, ou "
             "corrigir um valor — depois de salvo, não precisa perguntar de novo. "
-            "Não invente nenhum valor; só passe o que o cliente realmente disse, e "
-            "só os campos que mudaram."
+            "IMPORTANTE: chame isso MESMO QUANDO o dado for informado só pra "
+            "outra ferramenta (ex: o cliente deu o CPF pra consultar parcela) — "
+            "chame as duas ferramentas, essa aqui pra guardar o dado permanente e "
+            "a outra pra resolver o pedido dele. Não invente nenhum valor; só "
+            "passe o que o cliente realmente disse, e só os campos que mudaram."
         ),
         "parameters": {
             "type": "object",
@@ -385,6 +388,12 @@ SAVE_LEAD_DATA_TOOL_SCHEMA = {
         },
     },
 }
+
+
+# Nomes de argumento que, se aparecerem em QUALQUER chamada de ferramenta
+# (não só salvar_dado_cliente), já valem pra atualizar o cadastro do cliente
+# — cobre o caso comum de "cliente deu o CPF pra outra ferramenta usar".
+_LEAD_ARG_KEYS = {"cpf", "nome", "email", "data_nascimento"}
 
 
 async def _upsert_lead(db: AsyncSession, company_id: UUID, phone: str, fields: dict) -> Lead | None:
@@ -1112,6 +1121,20 @@ async def generate_ai_reply(
     )
     active_units_rows = units_result.all()
     active_unit_names = [n for n, _ in active_units_rows]
+    if active_unit_names:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Sempre que uma ferramenta pedir o parâmetro \"unidade\", preencha com o "
+                    "nome EXATO da unidade como está cadastrado (veja a lista abaixo/adiante) — "
+                    "nunca parafraseie, abrevie ou use o tipo/apelido dela. Ex: se a unidade se "
+                    "chama \"" + active_unit_names[0] + "\", use exatamente esse texto, não uma "
+                    "descrição tipo cidade+tipo. Isso é necessário pra sistemas externos "
+                    "reconhecerem a unidade corretamente."
+                ),
+            }
+        )
     if len(active_unit_names) > 1:
         cities: dict[str, list[str]] = {}
         for name, city in active_units_rows:
@@ -1271,6 +1294,17 @@ async def generate_ai_reply(
                 arguments = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 arguments = {}
+
+            if key != TOOL_KEY_SAVE_LEAD_DATA:
+                # Rede de segurança: qualquer ferramenta que receba CPF, nome,
+                # e-mail ou data de nascimento como argumento já salva isso no
+                # cadastro do cliente também — não dá pra confiar que a IA vá
+                # lembrar de chamar salvar_dado_cliente à parte toda vez que
+                # esses dados aparecerem a serviço de outra ferramenta (já
+                # visto não acontecer na prática).
+                lead_fields = {k: v for k, v in arguments.items() if k in _LEAD_ARG_KEYS and v}
+                if lead_fields:
+                    await _upsert_lead(db, conversation.company_id, conversation.contact_phone, lead_fields)
 
             if key == TOOL_KEY_SAVE_LEAD_DATA:
                 # Ferramenta interna — não passa por webhook nenhum, grava
