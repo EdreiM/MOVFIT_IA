@@ -576,6 +576,18 @@ def _tool_to_openai_schema(tool: Tool) -> dict:
             "valores ou matrícula nesta mensagem — nunca chame só porque confirmou a unidade pra "
             "responder outra pergunta (horário, endereço, estrutura etc)."
         )
+    elif tool.tool_key == TOOL_KEY_TRANSFER:
+        description = (
+            description + " Chame isso quando: (1) o cliente pedir explicitamente por atendente "
+            "humano; (2) for reclamação, cobrança errada, pagamento ou CANCELAMENTO de matrícula; "
+            "(3) pedido de desconto ou condição especial fora do catálogo; (4) pergunta fora do "
+            "que você sabe (RAG/catálogo não cobre, assunto sem relação com a academia); (5) "
+            "assunto sensível — lesão, saúde, questão jurídica; (6) o cliente insistir na mesma "
+            "dúvida ou pedido mais de 2 vezes mesmo depois de você já ter respondido; (7) o "
+            "cliente parecer irritado, indignado, com raiva, ou usar xingamentos/palavrões. NÃO "
+            "chame pra dúvidas normais (planos, preços, horários, endereço, estrutura, matrícula "
+            "via link) — isso a IA resolve sozinha."
+        )
     return {
         "type": "function",
         "function": {
@@ -946,6 +958,23 @@ async def generate_ai_reply(
                 "• benefício 2\n\n"
                 "👉 *Faça sua matrícula pelo link:*\n"
                 "https://..."
+            ),
+        }
+    )
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Quando transferir pra atendente humano (ferramenta transferir_atendimento), se "
+                "ela estiver disponível: (1) cliente pediu explicitamente por atendente; (2) "
+                "reclamação, cobrança errada, pagamento, ou CANCELAMENTO de matrícula; (3) pedido "
+                "de desconto/condição especial fora do catálogo; (4) pergunta fora do que você "
+                "sabe (RAG/catálogo não cobre, assunto sem relação com a academia); (5) assunto "
+                "sensível — lesão, saúde, questão jurídica; (6) cliente insiste na mesma dúvida ou "
+                "pedido mais de 2 vezes mesmo depois de você já ter respondido; (7) cliente "
+                "parece irritado, indignado, com raiva, ou usa xingamentos/palavrões. Pra dúvidas "
+                "normais (planos, preços, horários, endereço, estrutura, matrícula via link), "
+                "resolva sozinha — não transfira à toa."
             ),
         }
     )
