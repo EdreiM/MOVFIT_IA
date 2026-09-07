@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
@@ -530,6 +530,19 @@ def _wants_image_explicitly(text: str) -> bool:
     return bool(_normalize_tokens(text) & _IMAGE_REQUEST_KEYWORDS)
 
 
+_PLAN_INTENT_KEYWORDS = {
+    "plano", "planos", "preco", "precos", "valor", "valores", "mensalidade",
+    "matricula", "matricular", "assinar", "assinatura", "contratar", "contrato",
+}
+
+
+def _wants_plan_info(text: str) -> bool:
+    """Verdadeiro só quando o texto do CLIENTE realmente pede por plano/preço
+    — mencionar o nome de uma unidade por outro motivo (ex: perguntar
+    horário) não deve, sozinho, disparar o envio de planos."""
+    return bool(_normalize_tokens(text) & _PLAN_INTENT_KEYWORDS)
+
+
 def _mentions_any_plan(text_tokens: set[str], plans: list[Plan]) -> bool:
     """Verdadeiro quando o texto (tipicamente a própria resposta da IA) cita
     o nome de algum plano por extenso — sinal confiável de que o assunto é
@@ -551,11 +564,23 @@ def _tool_to_openai_schema(tool: Tool) -> dict:
         }
         if p.get("required"):
             required.append(p["name"])
+    description = tool.description or tool.name
+    if tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES:
+        # Reforça aqui, na própria descrição vista na hora de decidir chamar
+        # a ferramenta — colocar isso só num system prompt solto no meio do
+        # contexto não foi suficiente pra IA parar de oferecer plano sem ser
+        # perguntado (testado e confirmado o comportamento errado antes
+        # desse reforço).
+        description = (
+            description + " SÓ chame isso se o cliente pediu explicitamente por planos, preços, "
+            "valores ou matrícula nesta mensagem — nunca chame só porque confirmou a unidade pra "
+            "responder outra pergunta (horário, endereço, estrutura etc)."
+        )
     return {
         "type": "function",
         "function": {
             "name": tool.tool_key,
-            "description": tool.description or tool.name,
+            "description": description,
             "parameters": {
                 "type": "object",
                 "properties": properties,
@@ -774,6 +799,11 @@ async def _auto_send_plan_images(
     tool = tools_by_key.get(TOOL_KEY_SEND_PLAN_IMAGES)
     if not tool or not tool.webhook_url:
         return
+    if not _wants_plan_info(user_text):
+        # Sem isso, só citar o nome de uma unidade por qualquer outro motivo
+        # (ex: "a academia de Itaituba abre hoje?") já disparava o envio dos
+        # planos — o cliente só queria saber o horário.
+        return
 
     text_tokens = _normalize_tokens(user_text)
 
@@ -863,6 +893,26 @@ async def generate_ai_reply(
     # prompt cujo texto continua citando o nome antigo escrito à mão.
     system_prompt = (config.system_prompt or "").replace("{ai_name}", ai_name)
     messages = [{"role": "system", "content": system_prompt}]
+    brazil_now = datetime.now(timezone(timedelta(hours=-3)))
+    weekday_pt = [
+        "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+        "sexta-feira", "sábado", "domingo",
+    ][brazil_now.weekday()]
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                f"Agora são {brazil_now.strftime('%H:%M')} de {weekday_pt}, "
+                f"{brazil_now.strftime('%d/%m/%Y')} (horário de Brasília) — use isso pra "
+                "responder com precisão qualquer pergunta sobre \"hoje\", \"agora\", se a "
+                "academia está aberta neste momento, ou horário de funcionamento (que pode "
+                "variar por dia da semana e por feriado, conforme os dados da base de "
+                "conhecimento ou do catálogo). Se hoje for feriado nacional ou municipal "
+                "conhecido, considere isso ao responder sobre horário — mas só se tiver certeza "
+                "da data comemorada; não invente feriado."
+            ),
+        }
+    )
     messages.append(
         {
             "role": "system",
@@ -959,6 +1009,13 @@ async def generate_ai_reply(
                 "role": "system",
                 "content": (
                     "[Planos]\n"
+                    "REGRA: só fale de planos, preços, ou chame enviar_imagens_planos quando o "
+                    "cliente pedir isso explicitamente (palavras como plano, preço, valor, "
+                    "mensalidade, matrícula, assinar, contratar). Se o cliente confirmou a "
+                    "unidade pra responder OUTRA pergunta (horário, endereço, estrutura, "
+                    "estacionamento etc), responda SÓ essa pergunta — não aproveite pra oferecer "
+                    "planos por conta própria, mesmo que pareça prestativo; isso confunde o "
+                    "cliente que só queria uma informação simples.\n\n"
                     "Catálogo oficial de unidades e planos, sempre atualizado — use isso, "
                     "não invente valores fora daqui. Isso vale MAIS que qualquer coisa dita "
                     "antes nesta conversa (inclusive por você mesma): se uma unidade, plano ou "
