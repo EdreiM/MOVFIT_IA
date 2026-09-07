@@ -23,7 +23,12 @@ async def seed() -> None:
         else:
             logger.info("Empresa Mov Fit já existe")
 
-        result = await db.execute(select(AiConfig).where(AiConfig.company_id == company.id))
+        result = await db.execute(
+            select(AiConfig).where(
+                AiConfig.company_id == company.id,
+                AiConfig.integration_id.is_(None),
+            )
+        )
         if not result.scalar_one_or_none():
             db.add(
                 AiConfig(
