@@ -18,6 +18,7 @@ type Tool = {
   webhook_url: string | null;
   integration_id: string | null;
   is_active: boolean;
+  featured_in_metrics: boolean;
   last_executed_at: string | null;
 };
 
@@ -66,6 +67,7 @@ export default function ToolsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [integrationId, setIntegrationId] = useState("");
+  const [featuredInMetrics, setFeaturedInMetrics] = useState(false);
 
   const load = () => {
     if (!companyId) return;
@@ -105,6 +107,7 @@ export default function ToolsPage() {
     setWebhookUrl("");
     setParams([]);
     setIntegrationId("");
+    setFeaturedInMetrics(false);
   };
 
   const onEdit = (tool: Tool) => {
@@ -117,6 +120,7 @@ export default function ToolsPage() {
     setWebhookUrl(tool.webhook_url ?? "");
     setParams(tool.parameters.map((p) => ({ ...p })));
     setIntegrationId(tool.integration_id ?? "");
+    setFeaturedInMetrics(tool.featured_in_metrics);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -135,6 +139,7 @@ export default function ToolsPage() {
             webhook_url: webhookUrl,
             parameters: params.filter((p) => p.name.trim()),
             integration_id: integrationId || null,
+            featured_in_metrics: featuredInMetrics,
           }),
         });
         resetForm();
@@ -160,6 +165,7 @@ export default function ToolsPage() {
           webhook_url: webhookUrl,
           parameters: params.filter((p) => p.name.trim()),
           integration_id: integrationId || null,
+          featured_in_metrics: featuredInMetrics,
         }),
       });
       resetForm();
@@ -294,6 +300,18 @@ export default function ToolsPage() {
           </select>
         </label>
 
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={featuredInMetrics}
+            onChange={(e) => setFeaturedInMetrics(e.target.checked)}
+          />
+          <span className="text-sm text-sand/60">
+            Destacar essa ferramenta no Painel{" "}
+            <span className="text-sand/40">(vira um card com o total de chamadas com sucesso)</span>
+          </span>
+        </label>
+
         <label className="block space-y-1">
           <span className="text-sm text-sand/60">URL do webhook (n8n)</span>
           <input
@@ -391,6 +409,11 @@ export default function ToolsPage() {
                     <div>
                       <p className="font-medium">
                         {t.name} <span className="text-sm text-sand/50">({t.tool_key})</span>
+                        {t.featured_in_metrics && (
+                          <span className="ml-2 rounded border border-leaf/40 px-1.5 py-0.5 text-xs text-lime">
+                            destacada no Painel
+                          </span>
+                        )}
                       </p>
                       {t.description && <p className="mt-0.5 text-sm text-sand/60">{t.description}</p>}
                       {t.webhook_url && <p className="mt-1 break-all text-xs text-sand/40">{t.webhook_url}</p>}

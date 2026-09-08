@@ -117,6 +117,11 @@ class Tool(Base):
     tool_type: Mapped[str] = mapped_column(String(50), default="webhook")  # webhook | native
     webhook_url: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Ferramentas marcadas aparecem como card de destaque no Painel de
+    # métricas (ex: "Links de parcela enviados: 12") — genérico, não fixo
+    # numa ferramenta específica, pra qualquer empresa poder escolher o que
+    # quer acompanhar de perto.
+    featured_in_metrics: Mapped[bool] = mapped_column(Boolean, default=False)
     last_executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

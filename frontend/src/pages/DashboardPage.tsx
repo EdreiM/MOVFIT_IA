@@ -156,6 +156,7 @@ export default function DashboardPage() {
   const [timeseries, setTimeseries] = useState<MetricsPoint[]>([]);
   const [funnel, setFunnel] = useState<StageCount[]>([]);
   const [toolStats, setToolStats] = useState<ToolStats[]>([]);
+  const [featuredTools, setFeaturedTools] = useState<ToolStats[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -165,13 +166,15 @@ export default function DashboardPage() {
       api<MetricsPoint[]>("/metrics/timeseries"),
       api<StageCount[]>("/metrics/leads-funnel"),
       api<ToolStats[]>("/metrics/tools"),
+      api<ToolStats[]>("/metrics/featured-tools"),
     ])
-      .then(([o, h, ts, f, t]) => {
+      .then(([o, h, ts, f, t, ft]) => {
         setOverview(o);
         setHealth(h);
         setTimeseries(ts);
         setFunnel(f);
         setToolStats(t);
+        setFeaturedTools(ft);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -188,6 +191,7 @@ export default function DashboardPage() {
               ? `${Math.round(overview.ai_resolution_rate * 100)}%`
               : "—",
         },
+        ...featuredTools.map((t) => ({ label: t.tool_name, value: t.success_calls })),
       ]
     : [];
 

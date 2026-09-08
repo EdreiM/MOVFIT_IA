@@ -290,6 +290,7 @@ class ToolCreate(BaseModel):
     # Em branco = ferramenta global (todas as integrações). Preenchido = só
     # usada em conversas vindas dessa integração específica.
     integration_id: UUID | None = None
+    featured_in_metrics: bool = False
 
 
 class ToolUpdate(BaseModel):
@@ -299,6 +300,7 @@ class ToolUpdate(BaseModel):
     webhook_url: str | None = None
     is_active: bool | None = None
     integration_id: UUID | None = None
+    featured_in_metrics: bool | None = None
 
 
 class ToolOut(BaseModel):
@@ -312,6 +314,7 @@ class ToolOut(BaseModel):
     tool_type: str
     webhook_url: str | None
     is_active: bool
+    featured_in_metrics: bool
     last_executed_at: datetime | None
 
     model_config = {"from_attributes": True}

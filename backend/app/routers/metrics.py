@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
-from app.models import Conversation, Lead, Message, MetricsDaily, ToolCallLog
+from app.models import Conversation, Lead, Message, MetricsDaily, Tool, ToolCallLog
 from app.schemas import MetricsOverview, MetricsPoint, StageCount, ToolStats
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -153,6 +153,56 @@ async def tools_stats(
             ToolStats(
                 tool_key=tool_key,
                 tool_name=tool_name,
+                total_calls=total,
+                success_calls=success,
+                failed_calls=total - success,
+                distinct_conversations=distinct_conv,
+                success_rate=(success / total) if total else None,
+            )
+        )
+    return stats
+
+
+@router.get("/featured-tools", response_model=list[ToolStats])
+async def featured_tools_stats(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ferramentas marcadas como "destacar nas métricas" (tela Ferramentas)
+    — vira card no topo do Painel. Ao contrário de /tools, sempre lista a
+    ferramenta mesmo com zero chamadas ainda (é um card fixo, não uma
+    tabela de "o que já teve uso")."""
+    company_id = await resolve_company_id(current, db)
+    tools_result = await db.execute(
+        select(Tool).where(Tool.company_id == company_id, Tool.featured_in_metrics.is_(True))
+    )
+    featured_tools = tools_result.scalars().all()
+    if not featured_tools:
+        return []
+
+    tool_ids = [t.id for t in featured_tools]
+    result = await db.execute(
+        select(
+            ToolCallLog.tool_id,
+            func.count().label("total"),
+            func.sum(case((ToolCallLog.success.is_(True), 1), else_=0)).label("success"),
+            func.count(func.distinct(ToolCallLog.conversation_id)).label("distinct_conv"),
+        )
+        .where(ToolCallLog.company_id == company_id, ToolCallLog.tool_id.in_(tool_ids))
+        .group_by(ToolCallLog.tool_id)
+    )
+    stats_by_tool_id = {row.tool_id: row for row in result.all()}
+
+    stats = []
+    for tool in featured_tools:
+        row = stats_by_tool_id.get(tool.id)
+        total = row.total if row else 0
+        success = (row.success if row else 0) or 0
+        distinct_conv = row.distinct_conv if row else 0
+        stats.append(
+            ToolStats(
+                tool_key=tool.tool_key,
+                tool_name=tool.name,
                 total_calls=total,
                 success_calls=success,
                 failed_calls=total - success,
