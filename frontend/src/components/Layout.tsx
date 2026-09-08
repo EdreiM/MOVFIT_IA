@@ -11,6 +11,7 @@ const links = [
   { to: "/catalog", label: "Unidades & Planos" },
   { to: "/tools", label: "Ferramentas" },
   { to: "/test-chat", label: "Chat de teste" },
+  { to: "/api-keys", label: "API externa" },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {

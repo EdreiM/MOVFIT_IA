@@ -206,7 +206,13 @@ async def _process_conversation(db, conversation: Conversation) -> None:
         if motivo == "transferido":
             conversation.ai_enabled = False
             conversation.status = "with_human"
-            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "transferido"})
+            await _upsert_lead(
+                db,
+                conversation.company_id,
+                conversation.contact_phone,
+                {"estagio": "transferido"},
+                sticky_flags={"was_transferred": True},
+            )
             logger.info(
                 "Conversa %s sincronizada como transferida — atendente assumiu na plataforma externa.",
                 conversation.id,

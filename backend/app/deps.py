@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
@@ -8,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.models import Company, User, UserCompany
-from app.security import decode_token
+from app.models import ApiKey, Company, User, UserCompany
+from app.security import decode_token, hash_api_key
 
 security = HTTPBearer(auto_error=False)
 
@@ -80,6 +81,25 @@ def require_roles(*roles: str):
         return current
 
     return _dep
+
+
+async def get_api_key_company(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> UUID:
+    """Autenticação machine-to-machine pra API externa (/api/v1/*) — chave
+    de acesso no header Authorization: Bearer, sem usuário/login por trás.
+    Ver app/models/api_key.py."""
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Chave de API ausente")
+    key_hash = hash_api_key(credentials.credentials)
+    result = await db.execute(select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active.is_(True)))
+    api_key = result.scalar_one_or_none()
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Chave de API inválida")
+    api_key.last_used_at = datetime.now(timezone.utc)
+    await db.flush()
+    return api_key.company_id
 
 
 async def resolve_company_id(current: CurrentUser, db: AsyncSession) -> UUID:

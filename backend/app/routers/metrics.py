@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,13 +12,7 @@ from app.schemas import MetricsOverview, MetricsPoint, StageCount, ToolStats
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 
-@router.get("/overview", response_model=MetricsOverview)
-async def metrics_overview(
-    current: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    company_id = await resolve_company_id(current, db)
-
+async def _compute_overview(db: AsyncSession, company_id: UUID) -> MetricsOverview:
     conv_total = await db.scalar(
         select(func.count())
         .select_from(Conversation)
@@ -74,6 +70,22 @@ async def metrics_overview(
     if ai_r + hu_r > 0:
         rate = ai_r / (ai_r + hu_r)
 
+    # Flags permanentes do Lead (ver app/models/lead.py) — sobrevivem a
+    # mudança de stage depois, por isso não dá pra derivar de Lead.stage.
+    students_total = await db.scalar(
+        select(func.count()).select_from(Lead).where(Lead.company_id == company_id, Lead.is_student.is_(True))
+    )
+    transferred_total = await db.scalar(
+        select(func.count())
+        .select_from(Lead)
+        .where(Lead.company_id == company_id, Lead.was_transferred.is_(True))
+    )
+    cancellation_requests_total = await db.scalar(
+        select(func.count())
+        .select_from(Lead)
+        .where(Lead.company_id == company_id, Lead.wants_cancellation.is_(True))
+    )
+
     return MetricsOverview(
         conversations_total=conv_total or 0,
         messages_inbound=inbound or 0,
@@ -82,15 +94,13 @@ async def metrics_overview(
         human_resolved=hu_r,
         avg_response_seconds=float(avg_resp) if avg_resp is not None else None,
         ai_resolution_rate=rate,
+        students_total=students_total or 0,
+        transferred_total=transferred_total or 0,
+        cancellation_requests_total=cancellation_requests_total or 0,
     )
 
 
-@router.get("/timeseries", response_model=list[MetricsPoint])
-async def metrics_timeseries(
-    current: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    company_id = await resolve_company_id(current, db)
+async def _compute_timeseries(db: AsyncSession, company_id: UUID) -> list[MetricsPoint]:
     result = await db.execute(
         select(MetricsDaily)
         .where(MetricsDaily.company_id == company_id)
@@ -109,30 +119,18 @@ async def metrics_timeseries(
     ]
 
 
-@router.get("/leads-funnel", response_model=list[StageCount])
-async def leads_funnel(
-    current: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    company_id = await resolve_company_id(current, db)
+async def _compute_leads_funnel(db: AsyncSession, company_id: UUID) -> list[StageCount]:
     result = await db.execute(
-        select(Lead.stage, func.count())
-        .where(Lead.company_id == company_id)
-        .group_by(Lead.stage)
+        select(Lead.stage, func.count()).where(Lead.company_id == company_id).group_by(Lead.stage)
     )
     return [StageCount(stage=stage, count=count) for stage, count in result.all()]
 
 
-@router.get("/tools", response_model=list[ToolStats])
-async def tools_stats(
-    current: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def _compute_tools_stats(db: AsyncSession, company_id: UUID) -> list[ToolStats]:
     """Uso por ferramenta (link de parcela, planos, transferência etc) —
     quantas vezes foi chamada, taxa de sucesso, e quantas conversas
     distintas usaram cada uma. Chat de teste não entra (ToolCallLog nunca
     grava linha pra ele)."""
-    company_id = await resolve_company_id(current, db)
     result = await db.execute(
         select(
             ToolCallLog.tool_key,
@@ -163,16 +161,11 @@ async def tools_stats(
     return stats
 
 
-@router.get("/featured-tools", response_model=list[ToolStats])
-async def featured_tools_stats(
-    current: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def _compute_featured_tools_stats(db: AsyncSession, company_id: UUID) -> list[ToolStats]:
     """Ferramentas marcadas como "destacar nas métricas" (tela Ferramentas)
-    — vira card no topo do Painel. Ao contrário de /tools, sempre lista a
-    ferramenta mesmo com zero chamadas ainda (é um card fixo, não uma
-    tabela de "o que já teve uso")."""
-    company_id = await resolve_company_id(current, db)
+    — vira card no topo do Painel. Ao contrário de _compute_tools_stats,
+    sempre lista a ferramenta mesmo com zero chamadas ainda (é um card
+    fixo, não uma tabela de "o que já teve uso")."""
     tools_result = await db.execute(
         select(Tool).where(Tool.company_id == company_id, Tool.featured_in_metrics.is_(True))
     )
@@ -211,3 +204,48 @@ async def featured_tools_stats(
             )
         )
     return stats
+
+
+@router.get("/overview", response_model=MetricsOverview)
+async def metrics_overview(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await _compute_overview(db, company_id)
+
+
+@router.get("/timeseries", response_model=list[MetricsPoint])
+async def metrics_timeseries(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await _compute_timeseries(db, company_id)
+
+
+@router.get("/leads-funnel", response_model=list[StageCount])
+async def leads_funnel(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await _compute_leads_funnel(db, company_id)
+
+
+@router.get("/tools", response_model=list[ToolStats])
+async def tools_stats(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await _compute_tools_stats(db, company_id)
+
+
+@router.get("/featured-tools", response_model=list[ToolStats])
+async def featured_tools_stats(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await _compute_featured_tools_stats(db, company_id)

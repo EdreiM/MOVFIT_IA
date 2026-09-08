@@ -8,6 +8,7 @@ from app.models.integration import Integration, WebhookLog
 from app.models.metrics import MetricsDaily
 from app.models.lead import Lead
 from app.models.tool_call_log import ToolCallLog
+from app.models.api_key import ApiKey
 
 __all__ = [
     "Company",
@@ -26,4 +27,5 @@ __all__ = [
     "MetricsDaily",
     "Lead",
     "ToolCallLog",
+    "ApiKey",
 ]

@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 from app.routers import (
     admin,
     ai_configs,
+    api_keys,
     auth,
     catalog,
     companies,
@@ -25,6 +26,7 @@ from app.routers import (
     leads,
     metrics,
     numbers,
+    public_api,
 )
 
 settings = get_settings()
@@ -71,6 +73,8 @@ app.include_router(integrations.router)
 app.include_router(leads.router)
 app.include_router(metrics.router)
 app.include_router(admin.router)
+app.include_router(api_keys.router)
+app.include_router(public_api.router)
 
 
 @app.get("/health")

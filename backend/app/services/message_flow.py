@@ -414,6 +414,7 @@ async def _upsert_lead(
     phone: str,
     fields: dict,
     stage_if_new: str | None = None,
+    sticky_flags: dict[str, bool] | None = None,
 ) -> Lead | None:
     """Cria ou atualiza o cadastro do cliente (por telefone dentro da
     empresa) com os campos informados — só sobrescreve o que vier
@@ -422,7 +423,12 @@ async def _upsert_lead(
     `stage_if_new` só é aplicado se não vier "estagio" explícito em `fields`
     E o estágio atual ainda for o padrão "novo" — usado pra sinalizar "isso
     aqui prova que o cliente já é aluno" sem sobrescrever um estágio mais
-    avançado que já tenha sido definido (ex: transferido, resolvido)."""
+    avançado que já tenha sido definido (ex: transferido, resolvido).
+
+    `sticky_flags` (ex: {"is_student": True}) só liga — nunca desliga um
+    flag que já esteja True. Usado pra métrica que não pode se perder
+    quando o `stage` (um valor só) muda depois pra outra coisa (ex: aluno
+    que depois é transferido continua contando como aluno)."""
     phone_digits = sanitize_phone_digits(phone)
     if not phone_digits:
         # Conversa sem telefone real (ex: placeholder do Chat de teste) —
@@ -431,7 +437,12 @@ async def _upsert_lead(
     result = await db.execute(select(Lead).where(Lead.company_id == company_id, Lead.phone == phone_digits))
     lead = result.scalar_one_or_none()
     if not lead:
-        lead = Lead(company_id=company_id, phone=phone_digits)
+        # stage="novo" explícito (não só confiar no default da coluna): o
+        # default só é aplicado pelo SQLAlchemy no flush, então checar
+        # `lead.stage == "novo"` mais abaixo (stage_if_new) falharia pra um
+        # lead criado nesta mesma chamada — lead.stage ainda seria None em
+        # memória até flush.
+        lead = Lead(company_id=company_id, phone=phone_digits, stage="novo")
         db.add(lead)
     if fields.get("nome"):
         lead.name = str(fields["nome"])
@@ -450,6 +461,9 @@ async def _upsert_lead(
         lead.stage = str(fields["estagio"])
     elif stage_if_new and lead.stage == "novo":
         lead.stage = stage_if_new
+    for flag_name, value in (sticky_flags or {}).items():
+        if value:
+            setattr(lead, flag_name, True)
     await db.flush()
     return lead
 
@@ -467,6 +481,13 @@ def _normalize_text(text: str) -> str:
     frase inteira (ex: 'vou encaminhar'), não só palavras soltas."""
     ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     return re.sub(r"\s+", " ", ascii_text.lower())
+
+
+def _mentions_cancellation(text: str) -> bool:
+    """Detecta "cancelar"/"cancelamento"/"cancelando" etc no motivo que a
+    IA manda ao transferir — só pra métrica, não muda nenhum comportamento
+    da conversa."""
+    return any(token.startswith("cancel") for token in _normalize_tokens(text))
 
 
 def _best_matches(candidates: list[tuple[str, set[str]]], arg_tokens: set[str], threshold: float) -> list[str]:
@@ -746,7 +767,20 @@ async def execute_tool(
         if tool.tool_key == TOOL_KEY_TRANSFER:
             conversation.ai_enabled = False
             conversation.status = "with_human"
-            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "transferido"})
+            # "was_transferred" é permanente pra métrica ("quantos foram
+            # transferidos no total"), mesmo que o stage mude depois de novo
+            # (ex: cliente volta a falar com a IA e é resolvido). Detecta
+            # pedido de cancelamento pelo motivo que a própria IA já manda
+            # ao transferir (critério de transferência já cobre isso) — só
+            # métrica, a IA continua sem poder cancelar de verdade.
+            wants_cancellation = _mentions_cancellation(str(arguments.get("motivo") or ""))
+            await _upsert_lead(
+                db,
+                conversation.company_id,
+                conversation.contact_phone,
+                {"estagio": "transferido"},
+                sticky_flags={"was_transferred": True, "wants_cancellation": wants_cancellation},
+            )
         elif tool.tool_key == TOOL_KEY_END:
             conversation.status = "resolved"
             await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
@@ -765,6 +799,7 @@ async def execute_tool(
                 conversation.contact_phone,
                 {"unidade": arguments["unidade"]},
                 stage_if_new="aluno",
+                sticky_flags={"is_student": True},
             )
 
         # Qualquer ferramenta que consulte um sistema externo e devolva

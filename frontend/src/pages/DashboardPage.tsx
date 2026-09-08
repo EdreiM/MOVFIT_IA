@@ -9,6 +9,9 @@ type Overview = {
   human_resolved: number;
   avg_response_seconds: number | null;
   ai_resolution_rate: number | null;
+  students_total: number;
+  transferred_total: number;
+  cancellation_requests_total: number;
 };
 
 type Health = {
@@ -191,6 +194,9 @@ export default function DashboardPage() {
               ? `${Math.round(overview.ai_resolution_rate * 100)}%`
               : "—",
         },
+        { label: "Alunos", value: overview.students_total },
+        { label: "Transferidos", value: overview.transferred_total },
+        { label: "Pediram cancelamento", value: overview.cancellation_requests_total },
         ...featuredTools.map((t) => ({ label: t.tool_name, value: t.success_calls })),
       ]
     : [];

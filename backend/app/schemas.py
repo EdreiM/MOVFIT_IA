@@ -374,6 +374,9 @@ class LeadOut(BaseModel):
     birthdate: date | None
     unit: str | None
     stage: str
+    is_student: bool
+    was_transferred: bool
+    wants_cancellation: bool
     custom_fields: dict
     created_at: datetime
     updated_at: datetime
@@ -400,6 +403,9 @@ class MetricsOverview(BaseModel):
     human_resolved: int
     avg_response_seconds: float | None
     ai_resolution_rate: float | None
+    students_total: int
+    transferred_total: int
+    cancellation_requests_total: int
 
 
 class MetricsPoint(BaseModel):
@@ -422,3 +428,25 @@ class ToolStats(BaseModel):
     failed_calls: int
     distinct_conversations: int
     success_rate: float | None
+
+
+# API keys (acesso externo, machine-to-machine)
+class ApiKeyCreate(BaseModel):
+    name: str
+
+
+class ApiKeyOut(BaseModel):
+    id: UUID
+    name: str
+    key_prefix: str
+    is_active: bool
+    last_used_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApiKeyCreated(ApiKeyOut):
+    # Só vem preenchida na resposta de criação — não é persistida em
+    # nenhum lugar depois disso, então esse é o único momento que existe.
+    key: str

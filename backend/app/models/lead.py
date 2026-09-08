@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,6 +35,14 @@ class Lead(Base):
     # matriculado, perdido) em vez de enum fixo, porque cada empresa pode
     # querer nomear/adicionar estágios diferentes sem precisar de migração.
     stage: Mapped[str] = mapped_column(String(50), default="novo")
+    # Flags "permanentes" pra métricas — ao contrário de `stage` (um valor
+    # só, sobrescrito a cada mudança), essas nunca voltam a False depois de
+    # viradas True. Existem porque `stage` sozinho não dá pra responder
+    # "quantos são alunos" se um aluno depois for transferido (o stage dele
+    # vira "transferido" e a informação de que é aluno se perderia).
+    is_student: Mapped[bool] = mapped_column(Boolean, default=False)
+    was_transferred: Mapped[bool] = mapped_column(Boolean, default=False)
+    wants_cancellation: Mapped[bool] = mapped_column(Boolean, default=False)
     # Qualquer outro dado que apareça no futuro (ex: profissão, objetivo,
     # indicação) sem precisar criar coluna nova pra cada campo novo.
     custom_fields: Mapped[dict] = mapped_column(JSONB, default=dict)

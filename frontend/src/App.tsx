@@ -12,6 +12,7 @@ import TestChatPage from "./pages/TestChatPage";
 import ToolsPage from "./pages/ToolsPage";
 import CatalogPage from "./pages/CatalogPage";
 import AccountPage from "./pages/AccountPage";
+import ApiKeysPage from "./pages/ApiKeysPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -45,6 +46,7 @@ export default function App() {
                 <Route path="/conversations" element={<ConversationsPage />} />
                 <Route path="/leads" element={<LeadsPage />} />
                 <Route path="/integrations" element={<IntegrationsPage />} />
+                <Route path="/api-keys" element={<ApiKeysPage />} />
                 <Route path="/account" element={<AccountPage />} />
               </Routes>
             </Layout>
