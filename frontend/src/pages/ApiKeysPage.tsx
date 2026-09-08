@@ -84,6 +84,21 @@ export default function ApiKeysPage() {
               Copiar
             </button>
           </div>
+          <p className="pt-2 text-sm text-sand/60">
+            Ou manda direto esse link — quem abrir só vê as métricas, sem nenhum acesso de admin:
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 overflow-x-auto rounded-md border border-white/15 bg-ink px-3 py-2 text-sm">
+              {`${window.location.origin}/metrics-view?key=${newKey}`}
+            </code>
+            <button
+              type="button"
+              onClick={() => navigator.clipboard.writeText(`${window.location.origin}/metrics-view?key=${newKey}`)}
+              className="shrink-0 rounded-md border border-leaf/40 px-3 py-2 text-sm text-lime hover:bg-leaf/10"
+            >
+              Copiar link
+            </button>
+          </div>
           <button
             type="button"
             onClick={() => setNewKey(null)}

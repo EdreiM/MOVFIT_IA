@@ -54,6 +54,26 @@ export async function api<T>(
   return res.json();
 }
 
+// Pra páginas fora do login (ex: PublicMetricsPage) — autentica com uma
+// chave de API (Authorization: Bearer) em vez de sessão de usuário, sem
+// nenhuma das permissões de admin do painel normal.
+export async function apiExternal<T>(path: string, key: string): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (!res.ok) {
+    let detail = "Erro na requisição";
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return res.json();
+}
+
 export async function apiUpload<T>(path: string, file: File): Promise<T> {
   const headers = new Headers();
   const token = getStored("access_token");

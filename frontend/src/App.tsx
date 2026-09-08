@@ -13,6 +13,7 @@ import ToolsPage from "./pages/ToolsPage";
 import CatalogPage from "./pages/CatalogPage";
 import AccountPage from "./pages/AccountPage";
 import ApiKeysPage from "./pages/ApiKeysPage";
+import PublicMetricsPage from "./pages/PublicMetricsPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -31,6 +32,9 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Fora do login de propósito — acesso só com chave de API, sem
+          nenhuma permissão de admin do painel. Ver ApiKeysPage. */}
+      <Route path="/metrics-view" element={<PublicMetricsPage />} />
       <Route
         path="/*"
         element={
