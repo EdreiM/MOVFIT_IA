@@ -46,24 +46,52 @@ async def _find_tool(db, conversation: Conversation, tool_key: str) -> Tool | No
     return tools[-1]
 
 
-async def _generate_followup_text(config, history: list[Message]) -> str | None:
+async def _generate_followup_text(
+    config,
+    history: list[Message],
+    attempt_number: int,
+    max_attempts: int,
+) -> str | None:
+    previous_followups = [
+        m.text
+        for m in history
+        if m.actor == "ai" and isinstance(m.raw_payload, dict) and m.raw_payload.get("is_followup") and m.text
+    ]
+
+    instruction = (
+        "O cliente não responde há um tempo e a conversa ficou parada nesse ponto. "
+        "Gere UMA mensagem CURTA (1-2 frases) pra retomar contato, relevante ao que "
+        "estava sendo tratado. NÃO repita nenhuma informação que você já mandou antes "
+        "(preço, lista de planos, link, horário, texto de qualquer tipo) — o cliente já "
+        "recebeu tudo isso, só faça uma pergunta de acompanhamento sobre aquilo (ex: se "
+        "mandou planos, pergunta se ficou alguma dúvida ou se quer ajuda pra escolher; "
+        "se mandou link de pagamento, pergunta se conseguiu acessar; se só respondeu "
+        "uma pergunta, pergunta se pode ajudar em mais alguma coisa). Não repita "
+        "saudação genérica de início de conversa, não se desculpe por 'incomodar' ou "
+        "'atrapalhar', e não invente nenhuma informação nova."
+    )
+    if previous_followups:
+        instruction += (
+            "\n\nATENÇÃO: essa é a tentativa de follow-up número " + str(attempt_number) + " nessa "
+            "mesma conversa — você já mandou " + str(len(previous_followups)) + " antes, sem "
+            "resposta do cliente. É PROIBIDO repetir a mesma frase ou pergunta de novo, mesmo "
+            "parafraseada — varia completamente o ângulo (ex: se antes perguntou se ficou "
+            "dúvida, agora pode perguntar se ainda tem interesse, oferecer ajuda de outro jeito, "
+            "ou só confirmar se pode ajudar em algo mais). Textos que você JÁ MANDOU nos "
+            "follow-ups anteriores dessa conversa (NÃO repita nada parecido com isso):\n"
+            + "\n".join(f"- {t}" for t in previous_followups)
+        )
+    if attempt_number >= max_attempts:
+        instruction += (
+            "\n\nEssa é a ÚLTIMA tentativa — se o cliente não responder, o atendimento vai ser "
+            "encerrado automaticamente por inatividade. Pode mencionar isso com naturalidade, "
+            "sem soar como ameaça ou cobrança (ex: avisar que vai encerrar por aqui se não tiver "
+            "retorno, deixando a porta aberta pra ele voltar quando quiser)."
+        )
+
     messages = [
         {"role": "system", "content": compose_base_prompt(config)},
-        {
-            "role": "system",
-            "content": (
-                "O cliente não responde há um tempo e a conversa ficou parada nesse ponto. "
-                "Gere UMA mensagem CURTA (1-2 frases) pra retomar contato, relevante ao que "
-                "estava sendo tratado. NÃO repita nenhuma informação que você já mandou antes "
-                "(preço, lista de planos, link, horário, texto de qualquer tipo) — o cliente já "
-                "recebeu tudo isso, só faça uma pergunta de acompanhamento sobre aquilo (ex: se "
-                "mandou planos, pergunta se ficou alguma dúvida ou se quer ajuda pra escolher; "
-                "se mandou link de pagamento, pergunta se conseguiu acessar; se só respondeu "
-                "uma pergunta, pergunta se pode ajudar em mais alguma coisa). Não repita "
-                "saudação genérica de início de conversa, não se desculpe por 'incomodar' ou "
-                "'atrapalhar', e não invente nenhuma informação nova."
-            ),
-        },
+        {"role": "system", "content": instruction},
     ]
     for m in history:
         role = "assistant" if m.actor in {"ai", "human_agent"} else "user"
@@ -140,7 +168,7 @@ async def _process_conversation(db, conversation: Conversation) -> None:
         await _close_conversation_due_to_inactivity(db, conversation)
         return
 
-    text = await _generate_followup_text(config, history)
+    text = await _generate_followup_text(config, history, followups_sent + 1, config.followup_max_attempts)
     if not text:
         return
 
