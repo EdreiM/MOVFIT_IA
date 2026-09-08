@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 SWEEP_INTERVAL_SECONDS = 300  # varredura a cada 5 minutos — a precisão do
 # horário do follow-up não precisa ser fina, é medida em minutos/horas
 
+# Usadas quando a conversa ainda não teve nenhum assunto real discutido
+# (só cumprimento) — ver _process_conversation. Fixas de propósito, pra
+# nunca correr risco de a IA inventar um tema que nunca existiu.
+_GENERIC_NUDGES = [
+    "Oi! Ainda por aqui? Posso ajudar com alguma coisa? 😊",
+    "Vou ficar por aqui caso precise de algo — é só chamar quando quiser! 👋",
+]
+
 
 async def _find_tool(db, conversation: Conversation, tool_key: str) -> Tool | None:
     """Mesmo critério de resolução usado em generate_ai_reply: ferramenta
@@ -68,7 +76,12 @@ async def _generate_followup_text(
         "se mandou link de pagamento, pergunta se conseguiu acessar; se só respondeu "
         "uma pergunta, pergunta se pode ajudar em mais alguma coisa). Não repita "
         "saudação genérica de início de conversa, não se desculpe por 'incomodar' ou "
-        "'atrapalhar', e não invente nenhuma informação nova."
+        "'atrapalhar', e não invente nenhuma informação nova.\n\n"
+        "REGRA CRÍTICA: só mencione algo que está LITERALMENTE escrito no histórico "
+        "abaixo — nunca presuma que planos, links, opções ou qualquer outro material "
+        "foram enviados se isso não aparecer explicitamente nas mensagens anteriores. "
+        "Se não tiver certeza absoluta do que foi tratado, faça uma pergunta bem genérica "
+        "(ex: 'ainda posso ajudar em algo?') em vez de arriscar inventar um assunto."
     )
     if previous_followups:
         instruction += (
@@ -173,7 +186,17 @@ async def _process_conversation(db, conversation: Conversation) -> None:
         await _close_conversation_due_to_inactivity(db, conversation)
         return
 
-    text = await _generate_followup_text(config, history, followups_sent + 1, config.followup_max_attempts)
+    ai_turns = [m for m in history if m.actor in {"ai", "human_agent"}]
+    if len(ai_turns) <= 1:
+        # Só existe a resposta inicial (ex: cliente disse "oi", IA respondeu
+        # "como posso ajudar?") — não tem assunto real pra retomar ainda.
+        # Gerar via LLM aqui arrisca inventar contexto que nunca existiu
+        # (visto em produção: "você analisou as opções que enviei?" sem
+        # nunca ter enviado nada) — usa mensagem fixa genérica em vez de
+        # arriscar, e varia entre tentativas pelo mesmo motivo de sempre.
+        text = _GENERIC_NUDGES[followups_sent % len(_GENERIC_NUDGES)]
+    else:
+        text = await _generate_followup_text(config, history, followups_sent + 1, config.followup_max_attempts)
     if not text:
         return
 
