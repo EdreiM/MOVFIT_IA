@@ -125,6 +125,11 @@ async def _close_conversation_due_to_inactivity(db, conversation: Conversation) 
     else:
         conversation.status = "resolved"
         await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
+    logger.info(
+        "Conversa %s encerrada automaticamente por inatividade (%s ferramenta encerrar_atendimento configurada).",
+        conversation.id,
+        "com" if end_tool and end_tool.webhook_url else "sem",
+    )
 
 
 async def _process_conversation(db, conversation: Conversation) -> None:
