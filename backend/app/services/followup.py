@@ -12,6 +12,7 @@ from app.security import decrypt_secret
 from app.services.llm import chat_completion
 from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
 from app.services.message_flow import (
+    TOOL_KEY_CHECK_SESSION,
     TOOL_KEY_END,
     _upsert_lead,
     compose_base_prompt,
@@ -145,6 +146,25 @@ async def _close_conversation_due_to_inactivity(db, conversation: Conversation) 
     )
 
 
+async def _session_still_pending(db, conversation: Conversation) -> bool:
+    """Se a empresa configurou a ferramenta opcional de verificar sessão
+    (ex: consulta getSessionById no WTS), pergunta pra ela se a sessão do
+    cliente ainda está pendente antes de mandar qualquer follow-up — evita
+    reengajar um atendimento que já foi concluído por fora da Mônica
+    (manualmente na outra plataforma, por exemplo). Sem essa ferramenta
+    configurada, ou se a consulta falhar, assume que está pendente
+    (comportamento de sempre — não trava o follow-up por uma falha técnica
+    numa checagem opcional)."""
+    check_tool = await _find_tool(db, conversation, TOOL_KEY_CHECK_SESSION)
+    if not check_tool or not check_tool.webhook_url:
+        return True
+    result = await execute_tool(db, check_tool, {}, conversation)
+    if not result.get("sucesso"):
+        return True
+    dados = result.get("dados") if isinstance(result.get("dados"), dict) else {}
+    return bool(dados.get("pendente", True))
+
+
 async def _process_conversation(db, conversation: Conversation) -> None:
     config = await resolve_ai_config(db, conversation)
     if not config or not config.followup_enabled or not config.llm_api_key_encrypted:
@@ -168,6 +188,17 @@ async def _process_conversation(db, conversation: Conversation) -> None:
 
     now = datetime.now(timezone.utc)
     if now - last_msg.created_at < timedelta(minutes=config.followup_delay_minutes):
+        return
+
+    if not await _session_still_pending(db, conversation):
+        # Sessão já foi concluída por fora da Mônica (manualmente na outra
+        # plataforma, por exemplo) — sincroniza aqui também e não manda
+        # follow-up nenhum, em vez de reengajar um atendimento encerrado.
+        conversation.status = "resolved"
+        await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
+        logger.info(
+            "Conversa %s sincronizada como encerrada — sessão externa não está mais pendente.", conversation.id
+        )
         return
 
     # last_message_at só é atualizado quando o CLIENTE manda mensagem (ver

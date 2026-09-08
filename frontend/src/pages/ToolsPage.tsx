@@ -48,6 +48,12 @@ const PRESETS: { key: string; label: string; description: string }[] = [
     label: "Consultar aluno",
     description: "Consulta os dados do aluno pelo CPF para ajudar no atendimento.",
   },
+  {
+    key: "verificar_sessao_atendimento",
+    label: "Verificar sessão (follow-up)",
+    description:
+      "Opcional — só pra plataformas que permitem consultar se a sessão do cliente ainda está pendente (ex: WTS). Usada só internamente pelo follow-up antes de mandar mensagem, nunca aparece pra IA chamar. Deve responder {\"sucesso\": true, \"dados\": {\"pendente\": true|false}}.",
+  },
   { key: "", label: "Personalizada", description: "" },
 ];
 

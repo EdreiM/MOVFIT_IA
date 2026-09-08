@@ -342,6 +342,13 @@ def _extract_rag_text(data: dict | list | str) -> str:
 TOOL_KEY_TRANSFER = "transferir_atendimento"
 TOOL_KEY_END = "encerrar_atendimento"
 TOOL_KEY_SEND_PLAN_IMAGES = "enviar_imagens_planos"
+# Opcional — só existe pra empresas cuja plataforma (ex: WTS/GYMBOT) permite
+# consultar se a sessão do cliente ainda está pendente. Usada só
+# internamente pelo follow-up (app/services/followup.py) antes de mandar
+# qualquer mensagem, pra não reengajar um atendimento que já foi concluído
+# por fora da Mônica (manualmente, ou por outro motivo). NUNCA é exposta
+# como função chamável pela IA — ver exclusão em tool_defs abaixo.
+TOOL_KEY_CHECK_SESSION = "verificar_sessao_atendimento"
 
 # Ferramenta interna, sempre disponível pra qualquer empresa — não é um
 # webhook n8n, é tratada 100% dentro do próprio código (grava no cadastro
@@ -1388,7 +1395,12 @@ async def generate_ai_reply(
     for t in sorted(active_tools, key=lambda t: t.integration_id is not None):
         tools_by_key[t.tool_key] = t
     active_tools = list(tools_by_key.values())
-    tool_defs = [_tool_to_openai_schema(t) for t in active_tools] + [SAVE_LEAD_DATA_TOOL_SCHEMA]
+    # TOOL_KEY_CHECK_SESSION é só pro follow-up consultar por conta própria
+    # (ver TOOL_KEY_CHECK_SESSION acima) — nunca deve ser oferecida como uma
+    # função que a IA decide chamar durante a conversa.
+    tool_defs = [
+        _tool_to_openai_schema(t) for t in active_tools if t.tool_key != TOOL_KEY_CHECK_SESSION
+    ] + [SAVE_LEAD_DATA_TOOL_SCHEMA]
 
     assistant_message = await chat_completion(
         provider=config.llm_provider,
