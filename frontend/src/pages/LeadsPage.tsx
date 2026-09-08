@@ -9,6 +9,7 @@ type Lead = {
   cpf: string | null;
   email: string | null;
   birthdate: string | null;
+  unit: string | null;
   stage: string;
   custom_fields: Record<string, unknown>;
   updated_at: string;
@@ -20,7 +21,7 @@ export default function LeadsPage() {
   const [items, setItems] = useState<Lead[]>([]);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Lead | null>(null);
-  const [form, setForm] = useState({ name: "", cpf: "", email: "", birthdate: "", stage: "" });
+  const [form, setForm] = useState({ name: "", cpf: "", email: "", birthdate: "", unit: "", stage: "" });
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
 
@@ -48,6 +49,7 @@ export default function LeadsPage() {
       cpf: lead.cpf ?? "",
       email: lead.email ?? "",
       birthdate: lead.birthdate ?? "",
+      unit: lead.unit ?? "",
       stage: lead.stage,
     });
   };
@@ -65,6 +67,7 @@ export default function LeadsPage() {
           cpf: form.cpf || null,
           email: form.email || null,
           birthdate: form.birthdate || null,
+          unit: form.unit || null,
           stage: form.stage || null,
         }),
       });
@@ -186,6 +189,17 @@ export default function LeadsPage() {
                     className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
                     value={form.birthdate}
                     onChange={(e) => setForm({ ...form, birthdate: e.target.value })}
+                  />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-sm text-sand/60">
+                    Unidade <span className="text-sand/40">(onde já é aluno confirmado)</span>
+                  </span>
+                  <input
+                    className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+                    placeholder="preenchido automaticamente pela IA"
+                    value={form.unit}
+                    onChange={(e) => setForm({ ...form, unit: e.target.value })}
                   />
                 </label>
                 <label className="block space-y-1">

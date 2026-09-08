@@ -27,6 +27,10 @@ class Lead(Base):
     cpf: Mapped[str | None] = mapped_column(String(20))
     email: Mapped[str | None] = mapped_column(String(255))
     birthdate: Mapped[date | None] = mapped_column(Date)
+    # Unidade onde o cliente já é aluno confirmado — vem de uma ferramenta
+    # que consultou sistema externo com "unidade" + "cpf" juntos (sinal de
+    # matrícula real), não do que ele mencionou de passagem na conversa.
+    unit: Mapped[str | None] = mapped_column(String(255))
     # Estágio no funil — texto livre (ex: novo, qualificado, transferido,
     # matriculado, perdido) em vez de enum fixo, porque cada empresa pode
     # querer nomear/adicionar estágios diferentes sem precisar de migração.

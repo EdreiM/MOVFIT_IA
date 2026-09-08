@@ -374,6 +374,10 @@ SAVE_LEAD_DATA_TOOL_SCHEMA = {
                     "type": "string",
                     "description": "Data de nascimento do cliente, no formato AAAA-MM-DD",
                 },
+                "unidade": {
+                    "type": "string",
+                    "description": "Unidade onde o cliente já é aluno confirmado (não a que ele só perguntou de passagem)",
+                },
                 "estagio": {
                     "type": "string",
                     "description": (
@@ -396,10 +400,21 @@ SAVE_LEAD_DATA_TOOL_SCHEMA = {
 _LEAD_ARG_KEYS = {"cpf", "nome", "email", "data_nascimento"}
 
 
-async def _upsert_lead(db: AsyncSession, company_id: UUID, phone: str, fields: dict) -> Lead | None:
+async def _upsert_lead(
+    db: AsyncSession,
+    company_id: UUID,
+    phone: str,
+    fields: dict,
+    stage_if_new: str | None = None,
+) -> Lead | None:
     """Cria ou atualiza o cadastro do cliente (por telefone dentro da
     empresa) com os campos informados — só sobrescreve o que vier
-    preenchido, o resto do cadastro existente fica como estava."""
+    preenchido, o resto do cadastro existente fica como estava.
+
+    `stage_if_new` só é aplicado se não vier "estagio" explícito em `fields`
+    E o estágio atual ainda for o padrão "novo" — usado pra sinalizar "isso
+    aqui prova que o cliente já é aluno" sem sobrescrever um estágio mais
+    avançado que já tenha sido definido (ex: transferido, resolvido)."""
     phone_digits = sanitize_phone_digits(phone)
     if not phone_digits:
         # Conversa sem telefone real (ex: placeholder do Chat de teste) —
@@ -421,8 +436,12 @@ async def _upsert_lead(db: AsyncSession, company_id: UUID, phone: str, fields: d
             lead.birthdate = date.fromisoformat(str(fields["data_nascimento"]))
         except ValueError:
             pass
+    if fields.get("unidade"):
+        lead.unit = str(fields["unidade"])
     if fields.get("estagio"):
         lead.stage = str(fields["estagio"])
+    elif stage_if_new and lead.stage == "novo":
+        lead.stage = stage_if_new
     await db.flush()
     return lead
 
@@ -693,6 +712,22 @@ async def execute_tool(
         elif tool.tool_key == TOOL_KEY_END:
             conversation.status = "resolved"
             await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
+
+        # "unidade" + "cpf" juntos nos argumentos é a assinatura das
+        # ferramentas que consultam sistema externo pra aluno já matriculado
+        # (ex: parcelas em atraso) — sinal forte de que o cliente é aluno
+        # confirmado daquela unidade, não um lead novo. Grava isso no
+        # cadastro pra a IA não perder essa informação se ele mencionar
+        # outra unidade de passagem mais adiante na mesma conversa (ex:
+        # perguntando o horário de uma unidade diferente por curiosidade).
+        if arguments.get("unidade") and arguments.get("cpf"):
+            await _upsert_lead(
+                db,
+                conversation.company_id,
+                conversation.contact_phone,
+                {"unidade": arguments["unidade"]},
+                stage_if_new="aluno",
+            )
 
         # Qualquer ferramenta que consulte um sistema externo e devolva
         # nome/CPF/e-mail/data de nascimento do cliente (ex: consultar
@@ -1240,6 +1275,8 @@ async def generate_ai_reply(
             known_fields.append(f"e-mail: {lead.email}")
         if lead.birthdate:
             known_fields.append(f"data de nascimento: {lead.birthdate.isoformat()}")
+        if lead.unit:
+            known_fields.append(f"unidade onde já é aluno confirmado: {lead.unit}")
         known_fields.append(f"estágio atual: {lead.stage}")
     if known_fields:
         messages.append(
@@ -1250,6 +1287,20 @@ async def generate_ai_reply(
                     "não precisa perguntar de novo): " + "; ".join(known_fields) + ". Se o "
                     "cliente informar um valor diferente pra algum desses campos agora, chame "
                     "salvar_dado_cliente pra atualizar."
+                ),
+            }
+        )
+    if lead and lead.unit:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"Esse cliente já é aluno confirmado da unidade \"{lead.unit}\" (dado "
+                    "confirmado por sistema externo, não pelo que ele digitou). Se ele "
+                    "perguntar sobre horários, planos ou qualquer outro assunto sem "
+                    "especificar outra unidade claramente, assuma que é sobre essa — não use "
+                    "a última unidade que ele citou de passagem em outro contexto (ex: "
+                    "perguntando o horário de uma unidade diferente só por curiosidade)."
                 ),
             }
         )

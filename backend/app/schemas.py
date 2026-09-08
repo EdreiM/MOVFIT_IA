@@ -363,6 +363,7 @@ class LeadOut(BaseModel):
     cpf: str | None
     email: str | None
     birthdate: date | None
+    unit: str | None
     stage: str
     custom_fields: dict
     created_at: datetime
@@ -376,6 +377,7 @@ class LeadUpdate(BaseModel):
     cpf: str | None = None
     email: str | None = None
     birthdate: date | None = None
+    unit: str | None = None
     stage: str | None = None
     custom_fields: dict | None = None
 
