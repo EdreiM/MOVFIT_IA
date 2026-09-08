@@ -30,12 +30,20 @@ async def _reply_after_silence(conversation_id: UUID, company_id: UUID, delay_se
     # Import tardio: message_flow importa este módulo, então importar no topo
     # deste arquivo criaria um ciclo de import.
     from app.database import AsyncSessionLocal
+    from app.services.locks import LOCK_NAMESPACE_CONVERSATION_REPLY, advisory_lock, uuid_lock_key
     from app.services.message_flow import reply_to_pending_messages
 
     async with AsyncSessionLocal() as db:
         try:
-            await reply_to_pending_messages(db, conversation_id, company_id)
-            await db.commit()
+            # `_pending_replies` é em memória, por processo — se um dia
+            # existir mais de uma cópia do backend rodando, cada uma tem seu
+            # próprio dict e poderia disparar esse reply pra mesma conversa
+            # ao mesmo tempo. O lock garante que só uma gera/manda de fato.
+            async with advisory_lock(db, LOCK_NAMESPACE_CONVERSATION_REPLY, uuid_lock_key(conversation_id)) as acquired:
+                if not acquired:
+                    return
+                await reply_to_pending_messages(db, conversation_id, company_id)
+                await db.commit()
         except Exception:  # noqa: BLE001
             await db.rollback()
             logger.exception("Falha ao gerar resposta agregada da conversa %s", conversation_id)

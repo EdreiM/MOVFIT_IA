@@ -10,6 +10,7 @@ from app.database import AsyncSessionLocal
 from app.models import Conversation, Message, Tool
 from app.security import decrypt_secret
 from app.services.llm import chat_completion
+from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
 from app.services.message_flow import (
     TOOL_KEY_END,
     _upsert_lead,
@@ -164,22 +165,30 @@ async def _process_conversation(db, conversation: Conversation) -> None:
 
 
 async def run_followup_sweep() -> None:
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Conversation).where(
-                Conversation.status == "open",
-                Conversation.ai_enabled.is_(True),
-                Conversation.channel != "test_console",
-            )
-        )
-        conversations = result.scalars().all()
-        for conversation in conversations:
-            try:
-                await _process_conversation(db, conversation)
-                await db.commit()
-            except Exception:  # noqa: BLE001
-                logger.exception("Falha ao processar follow-up da conversa %s", conversation.id)
-                await db.rollback()
+    # Sessão dedicada só pra segurar o lock — se hoje só existe um worker
+    # rodando, isso é um no-op; se um dia escalar pra múltiplas cópias do
+    # backend, garante que só uma delas processa a varredura por vez (ver
+    # CLAUDE.md, "Jobs em background").
+    async with AsyncSessionLocal() as lock_db:
+        async with advisory_lock(lock_db, LOCK_NAMESPACE_FOLLOWUP_SWEEP) as acquired:
+            if not acquired:
+                return
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Conversation).where(
+                        Conversation.status == "open",
+                        Conversation.ai_enabled.is_(True),
+                        Conversation.channel != "test_console",
+                    )
+                )
+                conversations = result.scalars().all()
+                for conversation in conversations:
+                    try:
+                        await _process_conversation(db, conversation)
+                        await db.commit()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Falha ao processar follow-up da conversa %s", conversation.id)
+                        await db.rollback()
 
 
 async def periodic_followup_loop() -> None:
