@@ -1653,7 +1653,15 @@ async def reply_to_pending_messages(
     combined_text = "\n".join(pending_texts)
     reply, deferred_end_call = await generate_ai_reply(db, conversation, combined_text)
     if not reply:
-        return None
+        if deferred_end_call:
+            # A IA decidiu encerrar mas não escreveu nenhum texto de
+            # despedida (acontece) — o cliente ainda precisa ser avisado
+            # antes da sessão fechar de verdade, e o encerramento adiado
+            # precisa rodar de qualquer jeito, senão a ferramenta nunca
+            # executa (visto em produção: turno silencioso, nada disparava).
+            reply = "Fico feliz em ajudar! Se precisar de mais alguma coisa, é só chamar por aqui. Até mais! 😊"
+        else:
+            return None
 
     settings = get_settings()
     bubbles = split_into_bubbles(reply, settings.ai_bubble_max_chars)
