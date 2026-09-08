@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
-from app.models import Conversation, Lead, Message, MetricsDaily
-from app.schemas import MetricsOverview, MetricsPoint, StageCount
+from app.models import Conversation, Lead, Message, MetricsDaily, ToolCallLog
+from app.schemas import MetricsOverview, MetricsPoint, StageCount, ToolStats
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -121,3 +121,43 @@ async def leads_funnel(
         .group_by(Lead.stage)
     )
     return [StageCount(stage=stage, count=count) for stage, count in result.all()]
+
+
+@router.get("/tools", response_model=list[ToolStats])
+async def tools_stats(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Uso por ferramenta (link de parcela, planos, transferência etc) —
+    quantas vezes foi chamada, taxa de sucesso, e quantas conversas
+    distintas usaram cada uma. Chat de teste não entra (ToolCallLog nunca
+    grava linha pra ele)."""
+    company_id = await resolve_company_id(current, db)
+    result = await db.execute(
+        select(
+            ToolCallLog.tool_key,
+            func.max(ToolCallLog.tool_name).label("tool_name"),
+            func.count().label("total"),
+            func.sum(case((ToolCallLog.success.is_(True), 1), else_=0)).label("success"),
+            func.count(func.distinct(ToolCallLog.conversation_id)).label("distinct_conv"),
+        )
+        .where(ToolCallLog.company_id == company_id)
+        .group_by(ToolCallLog.tool_key)
+        .order_by(func.count().desc())
+    )
+    rows = result.all()
+    stats = []
+    for tool_key, tool_name, total, success, distinct_conv in rows:
+        success = success or 0
+        stats.append(
+            ToolStats(
+                tool_key=tool_key,
+                tool_name=tool_name,
+                total_calls=total,
+                success_calls=success,
+                failed_calls=total - success,
+                distinct_conversations=distinct_conv,
+                success_rate=(success / total) if total else None,
+            )
+        )
+    return stats

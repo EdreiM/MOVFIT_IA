@@ -403,3 +403,13 @@ class MetricsPoint(BaseModel):
 class StageCount(BaseModel):
     stage: str
     count: int
+
+
+class ToolStats(BaseModel):
+    tool_key: str
+    tool_name: str
+    total_calls: int
+    success_calls: int
+    failed_calls: int
+    distinct_conversations: int
+    success_rate: float | None

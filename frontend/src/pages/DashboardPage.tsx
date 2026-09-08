@@ -31,6 +31,16 @@ type StageCount = {
   count: number;
 };
 
+type ToolStats = {
+  tool_key: string;
+  tool_name: string;
+  total_calls: number;
+  success_calls: number;
+  failed_calls: number;
+  distinct_conversations: number;
+  success_rate: number | null;
+};
+
 // Ordem canônica do funil — estágios conhecidos aparecem nessa ordem;
 // qualquer estágio customizado que a IA ou um usuário crie entra depois,
 // ordenado por volume.
@@ -145,6 +155,7 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<Health | null>(null);
   const [timeseries, setTimeseries] = useState<MetricsPoint[]>([]);
   const [funnel, setFunnel] = useState<StageCount[]>([]);
+  const [toolStats, setToolStats] = useState<ToolStats[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -153,12 +164,14 @@ export default function DashboardPage() {
       api<Health>("/admin/health"),
       api<MetricsPoint[]>("/metrics/timeseries"),
       api<StageCount[]>("/metrics/leads-funnel"),
+      api<ToolStats[]>("/metrics/tools"),
     ])
-      .then(([o, h, ts, f]) => {
+      .then(([o, h, ts, f, t]) => {
         setOverview(o);
         setHealth(h);
         setTimeseries(ts);
         setFunnel(f);
+        setToolStats(t);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -213,6 +226,46 @@ export default function DashboardPage() {
             <StageFunnel stages={funnel} />
           </div>
         </div>
+      </div>
+
+      <div className="border border-white/10 bg-panel px-5 py-4">
+        <p className="text-xs uppercase tracking-wider text-muted">Uso por ferramenta</p>
+        <p className="mt-1 text-sm text-sand/50">
+          Quantas conversas usaram cada ferramenta e a taxa de sucesso — não conta Chat de teste.
+        </p>
+        {toolStats.length === 0 ? (
+          <p className="mt-4 text-sand/45">Nenhuma ferramenta foi chamada em conversas reais ainda.</p>
+        ) : (
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[560px] text-left text-sm">
+              <thead>
+                <tr className="text-xs uppercase tracking-wider text-muted">
+                  <th className="pb-2 pr-4">Ferramenta</th>
+                  <th className="pb-2 pr-4">Conversas</th>
+                  <th className="pb-2 pr-4">Chamadas</th>
+                  <th className="pb-2 pr-4">Sucesso</th>
+                  <th className="pb-2">Falhas</th>
+                </tr>
+              </thead>
+              <tbody>
+                {toolStats.map((t) => (
+                  <tr key={t.tool_key} className="border-t border-white/10">
+                    <td className="py-2 pr-4">
+                      <p className="font-medium text-sand">{t.tool_name}</p>
+                      <p className="text-xs text-sand/45">{t.tool_key}</p>
+                    </td>
+                    <td className="py-2 pr-4">{t.distinct_conversations}</td>
+                    <td className="py-2 pr-4">{t.total_calls}</td>
+                    <td className="py-2 pr-4 text-lime">
+                      {t.success_rate != null ? `${Math.round(t.success_rate * 100)}%` : "—"}
+                    </td>
+                    <td className="py-2 text-ember">{t.failed_calls || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {health && (

@@ -26,6 +26,7 @@ from app.models import (
     Plan,
     RagSource,
     Tool,
+    ToolCallLog,
     Unit,
     WebhookLog,
 )
@@ -659,6 +660,34 @@ def _tool_to_openai_schema(tool: Tool) -> dict:
     }
 
 
+async def _log_tool_call(
+    db: AsyncSession,
+    tool: Tool,
+    conversation: Conversation,
+    arguments: dict,
+    success: bool,
+    error_message: str | None = None,
+) -> None:
+    """Um registro por chamada de ferramenta de verdade, pra métricas tipo
+    "quantos pediram link de parcela" ou "taxa de sucesso por ferramenta" —
+    Chat de teste não gera log, mesmo critério já usado nas outras métricas."""
+    if conversation.channel == "test_console":
+        return
+    db.add(
+        ToolCallLog(
+            company_id=conversation.company_id,
+            conversation_id=conversation.id,
+            tool_id=tool.id,
+            tool_key=tool.tool_key,
+            tool_name=tool.name,
+            success=success,
+            arguments=arguments,
+            error_message=error_message,
+        )
+    )
+    await db.flush()
+
+
 async def execute_tool(
     db: AsyncSession,
     tool: Tool,
@@ -666,6 +695,7 @@ async def execute_tool(
     conversation: Conversation,
 ) -> dict:
     if not tool.webhook_url:
+        await _log_tool_call(db, tool, conversation, arguments, False, "Ferramenta sem webhook configurado.")
         return {"sucesso": False, "mensagem": "Ferramenta sem webhook configurado."}
 
     contexto = {
@@ -699,6 +729,7 @@ async def execute_tool(
                 data = resp.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Ferramenta %s (%s) falhou: %s", tool.name, tool.tool_key, exc)
+            await _log_tool_call(db, tool, conversation, arguments, False, str(exc)[:500])
             return {"sucesso": False, "mensagem": "Falha ao executar a ferramenta agora."}
 
         tool.last_executed_at = datetime.now(timezone.utc)
@@ -738,6 +769,9 @@ async def execute_tool(
         if lead_result_fields:
             await _upsert_lead(db, conversation.company_id, conversation.contact_phone, lead_result_fields)
 
+    await _log_tool_call(
+        db, tool, conversation, arguments, bool(data.get("sucesso")), None if data.get("sucesso") else data.get("mensagem")
+    )
     return data
 
 
@@ -768,11 +802,14 @@ async def _send_single_plan_image(db: AsyncSession, tool: Tool, image: dict, con
                 data = resp.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Ferramenta %s (%s) falhou pra %s: %s", tool.name, tool.tool_key, image["plano"], exc)
+            await _log_tool_call(db, tool, conversation, payload["argumentos"], False, str(exc)[:500])
             return False
         tool.last_executed_at = datetime.now(timezone.utc)
         if not data.get("sucesso"):
+            await _log_tool_call(db, tool, conversation, payload["argumentos"], False, data.get("mensagem"))
             return False
 
+    await _log_tool_call(db, tool, conversation, payload["argumentos"], True)
     await save_message(
         db,
         conversation,
