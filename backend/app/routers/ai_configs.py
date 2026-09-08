@@ -55,7 +55,43 @@ def _to_out(config: AiConfig) -> AiConfigOut:
         has_api_key=has_key,
         temperature=config.temperature,
         operation_mode=config.operation_mode,
+        followup_enabled=config.followup_enabled,
+        followup_delay_minutes=config.followup_delay_minutes,
+        followup_max_attempts=config.followup_max_attempts,
     )
+
+
+async def _get_or_create_integration_config(
+    db: AsyncSession, company_id: UUID, integration_id: UUID, default_config: AiConfig
+) -> AiConfig:
+    """Configuração específica de uma integração — se ainda não existir,
+    nasce como cópia integral da configuração padrão da empresa, pra você
+    já começar personalizando a partir do que já existe, em vez de um
+    formulário em branco."""
+    result = await db.execute(
+        select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id == integration_id)
+    )
+    config = result.scalar_one_or_none()
+    if not config:
+        config = AiConfig(
+            company_id=company_id,
+            integration_id=integration_id,
+            ai_name=default_config.ai_name,
+            tone=default_config.tone,
+            use_emoji=default_config.use_emoji,
+            system_prompt=default_config.system_prompt,
+            llm_provider=default_config.llm_provider,
+            llm_model=default_config.llm_model,
+            llm_api_key_encrypted=default_config.llm_api_key_encrypted,
+            temperature=default_config.temperature,
+            operation_mode=default_config.operation_mode,
+            followup_enabled=default_config.followup_enabled,
+            followup_delay_minutes=default_config.followup_delay_minutes,
+            followup_max_attempts=default_config.followup_max_attempts,
+        )
+        db.add(config)
+        await db.flush()
+    return config
 
 
 async def _get_default_ai_config(db: AsyncSession, company_id: UUID) -> AiConfig:
@@ -89,29 +125,7 @@ async def get_ai_config(
     if integration_id is None:
         return _to_out(default_config)
 
-    result = await db.execute(
-        select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id == integration_id)
-    )
-    config = result.scalar_one_or_none()
-    if not config:
-        # Primeira vez vendo essa integração — nasce como cópia da
-        # configuração padrão, pra você já começar personalizando a partir
-        # do que já existe, em vez de um formulário em branco.
-        config = AiConfig(
-            company_id=company_id,
-            integration_id=integration_id,
-            ai_name=default_config.ai_name,
-            tone=default_config.tone,
-            use_emoji=default_config.use_emoji,
-            system_prompt=default_config.system_prompt,
-            llm_provider=default_config.llm_provider,
-            llm_model=default_config.llm_model,
-            llm_api_key_encrypted=default_config.llm_api_key_encrypted,
-            temperature=default_config.temperature,
-            operation_mode=default_config.operation_mode,
-        )
-        db.add(config)
-        await db.flush()
+    config = await _get_or_create_integration_config(db, company_id, integration_id, default_config)
     return _to_out(config)
 
 
@@ -130,27 +144,8 @@ async def update_ai_config(
     if integration_id is None:
         config = await _get_default_ai_config(db, company_id)
     else:
-        result = await db.execute(
-            select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id == integration_id)
-        )
-        config = result.scalar_one_or_none()
-        if not config:
-            default_config = await _get_default_ai_config(db, company_id)
-            config = AiConfig(
-                company_id=company_id,
-                integration_id=integration_id,
-                ai_name=default_config.ai_name,
-                tone=default_config.tone,
-                use_emoji=default_config.use_emoji,
-                system_prompt=default_config.system_prompt,
-                llm_provider=default_config.llm_provider,
-                llm_model=default_config.llm_model,
-                llm_api_key_encrypted=default_config.llm_api_key_encrypted,
-                temperature=default_config.temperature,
-                operation_mode=default_config.operation_mode,
-            )
-            db.add(config)
-            await db.flush()
+        default_config = await _get_default_ai_config(db, company_id)
+        config = await _get_or_create_integration_config(db, company_id, integration_id, default_config)
 
     data = payload.model_dump(exclude_unset=True)
     api_key = data.pop("llm_api_key", None)

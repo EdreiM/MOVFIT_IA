@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
+from app.services.followup import periodic_followup_loop
 
 # Sem isso, todo logger.info(...) do app (ex: diagnóstico de execução de
 # ferramentas) é descartado silenciosamente — o nível padrão do root logger
@@ -30,7 +32,13 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Varredura periódica de follow-up (in-process, sem broker externo —
+    # mesma filosofia do debounce.py). Assume um único worker uvicorn, como
+    # já é o caso hoje (ver Dockerfile/docker-compose); com múltiplos
+    # workers/réplicas isso duplicaria as varreduras.
+    followup_task = asyncio.create_task(periodic_followup_loop())
     yield
+    followup_task.cancel()
 
 
 app = FastAPI(

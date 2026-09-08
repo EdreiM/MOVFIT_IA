@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint, func, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -51,6 +51,12 @@ class AiConfig(Base):
     llm_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
     temperature: Mapped[float] = mapped_column(Float, default=0.3)
     operation_mode: Mapped[str] = mapped_column(String(50), default="auto")  # auto | suggest | off
+    # Follow-up de cliente inativo: reengaja depois de X minutos sem resposta
+    # do cliente, até um número máximo de tentativas — depois disso, encerra
+    # sozinha. Configurável por integração, igual o resto da personalidade.
+    followup_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    followup_delay_minutes: Mapped[int] = mapped_column(Integer, default=120)
+    followup_max_attempts: Mapped[int] = mapped_column(Integer, default=2)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

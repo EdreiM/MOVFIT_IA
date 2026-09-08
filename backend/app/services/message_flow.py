@@ -1006,14 +1006,10 @@ async def _auto_send_plan_images(
     )
 
 
-async def generate_ai_reply(
-    db: AsyncSession,
-    conversation: Conversation,
-    user_text: str,
-) -> str | None:
-    if not conversation.ai_enabled:
-        return None
-
+async def resolve_ai_config(db: AsyncSession, conversation: Conversation) -> AiConfig | None:
+    """Personalização da integração da conversa, com fallback pra
+    configuração padrão da empresa — mesma regra usada tanto pra gerar
+    resposta normal quanto follow-up de inatividade."""
     config = None
     if conversation.integration_id:
         result = await db.execute(
@@ -1024,8 +1020,6 @@ async def generate_ai_reply(
         )
         config = result.scalar_one_or_none()
     if not config:
-        # Sem personalização própria pra essa integração (ou conversa sem
-        # integração conhecida) — usa a configuração padrão da empresa.
         result = await db.execute(
             select(AiConfig).where(
                 AiConfig.company_id == conversation.company_id,
@@ -1033,6 +1027,31 @@ async def generate_ai_reply(
             )
         )
         config = result.scalar_one_or_none()
+    return config
+
+
+def compose_base_prompt(config: AiConfig) -> str:
+    """Nome, tom de voz e uso de emoji são campos estruturados (editáveis sem
+    mexer em prompt) — o prompt "de verdade" é montado a partir deles aqui."""
+    ai_name = config.ai_name or "assistente virtual"
+    tone_text = (config.tone or "cordial, objetiva e útil").strip()
+    emoji_instruction = (
+        "Pode usar emoji com moderação, de acordo com o contexto."
+        if config.use_emoji
+        else "Não use emoji nas respostas."
+    )
+    return f"Você é a {ai_name}, assistente virtual da Mov Fit. Seu tom de voz: {tone_text}. {emoji_instruction}"
+
+
+async def generate_ai_reply(
+    db: AsyncSession,
+    conversation: Conversation,
+    user_text: str,
+) -> str | None:
+    if not conversation.ai_enabled:
+        return None
+
+    config = await resolve_ai_config(db, conversation)
     if not config or config.operation_mode == "off":
         return None
     if not config.llm_api_key_encrypted:
@@ -1052,17 +1071,9 @@ async def generate_ai_reply(
     is_first_contact = not any(m.actor in {"ai", "human_agent"} for m in history)
 
     ai_name = config.ai_name or "assistente virtual"
-    # Nome, tom de voz e uso de emoji são campos estruturados (editáveis sem
-    # mexer em prompt) — o prompt "de verdade" é montado a partir deles aqui.
     # system_prompt vira só um espaço pra instrução extra opcional, além do
-    # que os campos estruturados já cobrem.
-    tone_text = (config.tone or "cordial, objetiva e útil").strip()
-    emoji_instruction = (
-        "Pode usar emoji com moderação, de acordo com o contexto."
-        if config.use_emoji
-        else "Não use emoji nas respostas."
-    )
-    base_prompt = f"Você é a {ai_name}, assistente virtual da Mov Fit. Seu tom de voz: {tone_text}. {emoji_instruction}"
+    # que os campos estruturados (nome/tom/emoji) já cobrem.
+    base_prompt = compose_base_prompt(config)
     extra_instructions = (config.system_prompt or "").replace("{ai_name}", ai_name).strip()
     system_prompt = f"{base_prompt}\n\n{extra_instructions}" if extra_instructions else base_prompt
     messages = [{"role": "system", "content": system_prompt}]

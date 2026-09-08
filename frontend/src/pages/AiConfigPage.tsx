@@ -16,6 +16,9 @@ type AiConfig = {
   has_api_key: boolean;
   temperature: number;
   operation_mode: string;
+  followup_enabled: boolean;
+  followup_delay_minutes: number;
+  followup_max_attempts: number;
 };
 
 type Integration = {
@@ -80,6 +83,9 @@ export default function AiConfigPage() {
         llm_model: config.llm_model,
         temperature: config.temperature,
         operation_mode: config.operation_mode,
+        followup_enabled: config.followup_enabled,
+        followup_delay_minutes: config.followup_delay_minutes,
+        followup_max_attempts: config.followup_max_attempts,
       };
       if (apiKey.trim()) body.llm_api_key = apiKey.trim();
       const updated = await api<AiConfig>(`/ai-configs/${companyId}${qs}`, {
@@ -320,6 +326,48 @@ export default function AiConfigPage() {
             <option value="off">Desligado</option>
           </select>
         </label>
+
+        <fieldset className="space-y-3 rounded-md border border-white/10 p-3">
+          <legend className="px-1 text-sm text-sand/60">Follow-up de cliente inativo</legend>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={config.followup_enabled}
+              onChange={(e) => setConfig({ ...config, followup_enabled: e.target.checked })}
+            />
+            <span className="text-sm text-sand/60">
+              Reengajar cliente que parou de responder, e encerrar sozinha se ele continuar sumido
+            </span>
+          </label>
+          {config.followup_enabled && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block space-y-1">
+                <span className="text-sm text-sand/60">Minutos de silêncio antes de cada tentativa</span>
+                <input
+                  type="number"
+                  min="1"
+                  className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+                  value={config.followup_delay_minutes}
+                  onChange={(e) =>
+                    setConfig({ ...config, followup_delay_minutes: Number(e.target.value) })
+                  }
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-sm text-sand/60">Máximo de tentativas antes de encerrar</span>
+                <input
+                  type="number"
+                  min="1"
+                  className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+                  value={config.followup_max_attempts}
+                  onChange={(e) =>
+                    setConfig({ ...config, followup_max_attempts: Number(e.target.value) })
+                  }
+                />
+              </label>
+            </div>
+          )}
+        </fieldset>
 
         <details className="rounded-md border border-white/10 p-3">
           <summary className="cursor-pointer text-sm text-sand/60">

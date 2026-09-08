@@ -158,6 +158,9 @@ class AiConfigUpdate(BaseModel):
     llm_api_key: str | None = None
     temperature: float | None = None
     operation_mode: str | None = None
+    followup_enabled: bool | None = None
+    followup_delay_minutes: int | None = None
+    followup_max_attempts: int | None = None
 
 
 class AiConfigOut(BaseModel):
@@ -174,6 +177,9 @@ class AiConfigOut(BaseModel):
     has_api_key: bool = False
     temperature: float
     operation_mode: str
+    followup_enabled: bool
+    followup_delay_minutes: int
+    followup_max_attempts: int
 
     model_config = {"from_attributes": True}
 
