@@ -146,23 +146,31 @@ async def _close_conversation_due_to_inactivity(db, conversation: Conversation) 
     )
 
 
-async def _session_still_pending(db, conversation: Conversation) -> bool:
+async def _check_session_status(db, conversation: Conversation) -> tuple[bool, str | None]:
     """Se a empresa configurou a ferramenta opcional de verificar sessão
     (ex: consulta getSessionById no WTS), pergunta pra ela se a sessão do
     cliente ainda está pendente antes de mandar qualquer follow-up — evita
-    reengajar um atendimento que já foi concluído por fora da Mônica
-    (manualmente na outra plataforma, por exemplo). Sem essa ferramenta
+    reengajar um atendimento que já foi concluído OU assumido por um
+    atendente humano por fora da Mônica (direto na outra plataforma, sem
+    passar pela ferramenta transferir_atendimento). Sem essa ferramenta
     configurada, ou se a consulta falhar, assume que está pendente
     (comportamento de sempre — não trava o follow-up por uma falha técnica
-    numa checagem opcional)."""
+    numa checagem opcional).
+
+    Retorna (pendente, motivo) — motivo só importa quando pendente é False:
+    "transferido" (humano assumiu por fora) ou "concluido"/None (encerrado
+    sem passar por atendente) — usado pra decidir o status certo a
+    registrar na conversa."""
     check_tool = await _find_tool(db, conversation, TOOL_KEY_CHECK_SESSION)
     if not check_tool or not check_tool.webhook_url:
-        return True
+        return True, None
     result = await execute_tool(db, check_tool, {}, conversation)
     if not result.get("sucesso"):
-        return True
+        return True, None
     dados = result.get("dados") if isinstance(result.get("dados"), dict) else {}
-    return bool(dados.get("pendente", True))
+    pendente = bool(dados.get("pendente", True))
+    motivo = dados.get("motivo") if isinstance(dados.get("motivo"), str) else None
+    return pendente, motivo
 
 
 async def _process_conversation(db, conversation: Conversation) -> None:
@@ -190,15 +198,25 @@ async def _process_conversation(db, conversation: Conversation) -> None:
     if now - last_msg.created_at < timedelta(minutes=config.followup_delay_minutes):
         return
 
-    if not await _session_still_pending(db, conversation):
-        # Sessão já foi concluída por fora da Mônica (manualmente na outra
-        # plataforma, por exemplo) — sincroniza aqui também e não manda
-        # follow-up nenhum, em vez de reengajar um atendimento encerrado.
-        conversation.status = "resolved"
-        await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
-        logger.info(
-            "Conversa %s sincronizada como encerrada — sessão externa não está mais pendente.", conversation.id
-        )
+    pendente, motivo = await _check_session_status(db, conversation)
+    if not pendente:
+        # Sessão já não está mais com a IA por fora da Mônica — sincroniza
+        # aqui também e não manda follow-up nenhum, em vez de reengajar um
+        # atendimento que já não é mais dela.
+        if motivo == "transferido":
+            conversation.ai_enabled = False
+            conversation.status = "with_human"
+            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "transferido"})
+            logger.info(
+                "Conversa %s sincronizada como transferida — atendente assumiu na plataforma externa.",
+                conversation.id,
+            )
+        else:
+            conversation.status = "resolved"
+            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
+            logger.info(
+                "Conversa %s sincronizada como encerrada — sessão externa não está mais pendente.", conversation.id
+            )
         return
 
     # last_message_at só é atualizado quando o CLIENTE manda mensagem (ver

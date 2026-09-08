@@ -52,7 +52,7 @@ const PRESETS: { key: string; label: string; description: string }[] = [
     key: "verificar_sessao_atendimento",
     label: "Verificar sessão (follow-up)",
     description:
-      "Opcional — só pra plataformas que permitem consultar se a sessão do cliente ainda está pendente (ex: WTS). Usada só internamente pelo follow-up antes de mandar mensagem, nunca aparece pra IA chamar. Deve responder {\"sucesso\": true, \"dados\": {\"pendente\": true|false}}.",
+      "Opcional — só pra plataformas que permitem consultar se a sessão do cliente ainda está pendente (ex: WTS). Usada só internamente pelo follow-up antes de mandar mensagem, nunca aparece pra IA chamar. Deve responder {\"sucesso\": true, \"dados\": {\"pendente\": true|false, \"motivo\": \"transferido\"|\"concluido\"}} — motivo só é lido quando pendente for false.",
   },
   { key: "", label: "Personalizada", description: "" },
 ];
