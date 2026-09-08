@@ -1047,16 +1047,21 @@ async def generate_ai_reply(
     db: AsyncSession,
     conversation: Conversation,
     user_text: str,
-) -> str | None:
+) -> tuple[str | None, tuple[Tool, dict] | None]:
+    """Retorna (texto_final, chamada_de_encerramento_adiada). O segundo item
+    só vem preenchido quando a IA decidiu encerrar o atendimento nessa
+    resposta — quem chamou essa função é responsável por executar essa
+    ferramenta de verdade DEPOIS de mandar o texto_final ao cliente (ver
+    reply_to_pending_messages)."""
     if not conversation.ai_enabled:
-        return None
+        return None, None
 
     config = await resolve_ai_config(db, conversation)
     if not config or config.operation_mode == "off":
-        return None
+        return None, None
     if not config.llm_api_key_encrypted:
         logger.warning("Empresa %s sem API key LLM", conversation.company_id)
-        return None
+        return None, None
 
     api_key = decrypt_secret(config.llm_api_key_encrypted)
     rag_context = await fetch_rag_context(db, conversation.company_id, user_text)
@@ -1395,6 +1400,12 @@ async def generate_ai_reply(
     )
 
     touched_units: set[str] = set()
+    # encerrar_atendimento fecha a sessão de verdade no sistema externo (ex:
+    # WTS/GYMBOT) — se isso rodar ANTES da mensagem final ser mandada, o
+    # próprio envio da mensagem de despedida reabre uma sessão nova (visto
+    # acontecer em produção). Por isso a execução real é adiada pra depois
+    # do texto final ser enviado ao cliente — ver reply_to_pending_messages.
+    deferred_end_call: tuple[Tool, dict] | None = None
     max_tool_rounds = 4
     rounds = 0
     while assistant_message.get("tool_calls") and rounds < max_tool_rounds:
@@ -1456,7 +1467,13 @@ async def generate_ai_reply(
                 continue
 
             tool = tools_by_key.get(key)
-            if tool:
+            if key == TOOL_KEY_END and tool and tool.webhook_url:
+                # Não executa agora — só guarda pra rodar depois que a
+                # mensagem final for enviada (ver comentário acima). A IA
+                # segue o fluxo normal como se já tivesse funcionado.
+                deferred_end_call = (tool, arguments)
+                result = {"sucesso": True, "mensagem": "Atendimento será encerrado após a resposta final."}
+            elif tool:
                 result = await execute_tool(db, tool, arguments, conversation)
             else:
                 result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
@@ -1498,7 +1515,7 @@ async def generate_ai_reply(
             conversation,
         )
 
-    return final_text
+    return final_text, deferred_end_call
 
 
 async def send_outbound(
@@ -1634,7 +1651,7 @@ async def reply_to_pending_messages(
         return None
 
     combined_text = "\n".join(pending_texts)
-    reply = await generate_ai_reply(db, conversation, combined_text)
+    reply, deferred_end_call = await generate_ai_reply(db, conversation, combined_text)
     if not reply:
         return None
 
@@ -1664,6 +1681,13 @@ async def reply_to_pending_messages(
             await send_outbound(db, company_id, conversation, bubble_text)
         if i < len(bubbles) - 1:
             await asyncio.sleep(settings.ai_bubble_delay_seconds)
+
+    if deferred_end_call:
+        # Só encerra de verdade (fecha a sessão no sistema externo) DEPOIS
+        # de mandar a mensagem final — encerrar antes faz o próprio envio
+        # reabrir uma sessão nova em plataformas tipo WTS/GYMBOT.
+        end_tool, end_arguments = deferred_end_call
+        await execute_tool(db, end_tool, end_arguments, conversation)
 
     return reply
 
