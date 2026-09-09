@@ -175,6 +175,19 @@ export default function ApiKeysPage() {
             destacadas
           </li>
         </ul>
+
+        <div className="space-y-2 pt-2">
+          <p className="text-sm text-sand/60">Exemplo de requisição de verdade (com curl):</p>
+          <pre className="overflow-x-auto rounded-md border border-white/10 bg-ink px-3 py-2 text-xs text-sand/80">
+            {`curl -H "Authorization: Bearer SUA_CHAVE" \\
+  "${window.location.origin}/api/v1/leads?updated_since=2026-01-01T00:00:00Z&limit=50"`}
+          </pre>
+          <p className="text-xs text-sand/40">
+            Resposta é uma lista de objetos JSON, um por cliente — mesmos campos da tela Clientes
+            (phone, name, cpf, email, unit, stage, is_student, was_transferred,
+            wants_cancellation...). Sem <code>updated_since</code>, retorna os mais recentes primeiro.
+          </p>
+        </div>
       </section>
     </div>
   );
