@@ -1472,6 +1472,26 @@ async def generate_ai_reply(
             except json.JSONDecodeError:
                 arguments = {}
 
+            if lead and key != TOOL_KEY_SAVE_LEAD_DATA:
+                # Preenche automaticamente com dado já cadastrado do cliente
+                # (nome, CPF, e-mail, data de nascimento) quando a ferramenta
+                # pede um desses campos e a IA não preencheu — evita
+                # perguntar de novo algo que já sabemos, e garante o valor
+                # certo mesmo se a IA "esquecer" de usar o que já está
+                # salvo (garantia no código, não só instrução no prompt).
+                autofill_tool = tools_by_key.get(key)
+                if autofill_tool:
+                    declared_params = {p.get("name") for p in (autofill_tool.parameters or [])}
+                    known_values = {
+                        "cpf": lead.cpf,
+                        "nome": lead.name,
+                        "email": lead.email,
+                        "data_nascimento": lead.birthdate.isoformat() if lead.birthdate else None,
+                    }
+                    for arg_name, known_value in known_values.items():
+                        if known_value and arg_name in declared_params and not arguments.get(arg_name):
+                            arguments[arg_name] = known_value
+
             if key != TOOL_KEY_SAVE_LEAD_DATA:
                 # Rede de segurança: qualquer ferramenta que receba CPF, nome,
                 # e-mail ou data de nascimento como argumento já salva isso no
