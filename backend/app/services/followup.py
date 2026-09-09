@@ -36,6 +36,15 @@ _GENERIC_NUDGES = [
     "Vou ficar por aqui caso precise de algo — é só chamar quando quiser! 👋",
 ]
 
+# Sempre anexado (não pedido ao modelo) na última tentativa antes do
+# encerramento automático — garante que o cliente é avisado, em vez de
+# depender do modelo lembrar de mencionar isso (instrução em prompt sozinha
+# já se mostrou não confiável o bastante nesse ponto específico).
+_LAST_ATTEMPT_NOTICE = (
+    "\n\nSe eu não tiver retorno, vou encerrar esse atendimento por aqui — mas fico à "
+    "disposição sempre que você quiser voltar a falar comigo! 😊"
+)
+
 
 async def _find_tool(db, conversation: Conversation, tool_key: str) -> Tool | None:
     """Mesmo critério de resolução usado em generate_ai_reply: ferramenta
@@ -96,11 +105,16 @@ async def _generate_followup_text(
             + "\n".join(f"- {t}" for t in previous_followups)
         )
     if attempt_number >= max_attempts:
+        # O aviso de encerramento em si é adicionado depois, no código,
+        # sempre igual — não pedimos pro modelo escrever isso (visto em
+        # produção: instrução em tom de "pode mencionar" não é confiável o
+        # bastante, às vezes ela simplesmente não menciona). Só orienta a
+        # não tentar antecipar isso na resposta, pra não ficar redundante.
         instruction += (
-            "\n\nEssa é a ÚLTIMA tentativa — se o cliente não responder, o atendimento vai ser "
-            "encerrado automaticamente por inatividade. Pode mencionar isso com naturalidade, "
-            "sem soar como ameaça ou cobrança (ex: avisar que vai encerrar por aqui se não tiver "
-            "retorno, deixando a porta aberta pra ele voltar quando quiser)."
+            "\n\nEssa é a ÚLTIMA tentativa antes do atendimento encerrar automaticamente por "
+            "inatividade — mas NÃO mencione encerramento, despedida ou qualquer coisa nesse "
+            "sentido na sua mensagem. Isso já vai ser avisado separadamente depois. Só foque "
+            "na sua pergunta de acompanhamento normal, como nas outras tentativas."
         )
 
     messages = [
@@ -254,6 +268,11 @@ async def _process_conversation(db, conversation: Conversation) -> None:
         text = await _generate_followup_text(config, history, followups_sent + 1, config.followup_max_attempts)
     if not text:
         return
+
+    if followups_sent + 1 >= config.followup_max_attempts:
+        # Garantido no código, não só pedido no prompt — ver
+        # _LAST_ATTEMPT_NOTICE.
+        text = text + _LAST_ATTEMPT_NOTICE
 
     settings = get_settings()
     bubbles = split_into_bubbles(text, settings.ai_bubble_max_chars)
