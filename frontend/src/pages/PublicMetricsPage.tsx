@@ -60,10 +60,14 @@ export default function PublicMetricsPage() {
     if (!key) return;
     setLoading(true);
     setError("");
+    // Sem "/api" aqui: essa chamada já passa por API_URL, que em produção
+    // já inclui "/api" (mesmo mecanismo do resto do painel) — repetir
+    // duplicaria o prefixo. Sistemas externos (n8n) continuam usando
+    // /api/v1/... normalmente, ver backend/app/routers/public_api.py.
     Promise.all([
-      apiExternal<Overview>("/api/v1/metrics/overview", key),
-      apiExternal<StageCount[]>("/api/v1/metrics/leads-funnel", key),
-      apiExternal<ToolStats[]>("/api/v1/metrics/tools", key),
+      apiExternal<Overview>("/v1/metrics/overview", key),
+      apiExternal<StageCount[]>("/v1/metrics/leads-funnel", key),
+      apiExternal<ToolStats[]>("/v1/metrics/tools", key),
     ])
       .then(([o, f, t]) => {
         setOverview(o);

@@ -16,7 +16,12 @@ from app.routers.metrics import (
 )
 from app.schemas import LeadOut, MetricsOverview, StageCount, ToolStats
 
-router = APIRouter(prefix="/api/v1", tags=["public-api"])
+# Sem "/api" aqui de propósito — em produção isso já é adicionado (e
+# descascado) pelo proxy reverso na frente do backend, igual todo resto
+# da API (ver /leads, /metrics, etc. nos outros routers). Só com prefixo
+# "/v1", o caminho público final (depois do proxy) fica /api/v1/... —
+# que é o que sistemas externos devem chamar, ver ApiKeysPage "Como usar".
+router = APIRouter(prefix="/v1", tags=["public-api"])
 
 
 @router.get("/leads", response_model=list[LeadOut])
