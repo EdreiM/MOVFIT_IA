@@ -10,9 +10,11 @@ from app.services.message_flow import (
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
     _confirms_is_student,
     _extract_cpf_from_text,
+    _format_guest_tool_reply,
     _history_text_for_llm,
     _is_guest_info_question,
     _is_guest_operational_check,
+    _is_guest_who_followup,
     _is_valid_openai_tool,
     _pick_student_operational_tool,
     _plan_flow_active,
@@ -146,6 +148,47 @@ async def test_student_pipeline_asks_cpf_not_unit(db_session, company):
     assert "CPF" in reply
     assert "unidade" not in reply.lower()
     assert "matriculado" not in reply.lower()
+
+
+def test_guest_tool_reply_includes_names():
+    result = {
+        "sucesso": True,
+        "mensagem": "Cliente usou 1 de 4 convites neste mês e ainda pode levar mais 3.",
+        "dados": {
+            "limite_mensal": 4,
+            "convites_usados": 1,
+            "convites_restantes": 3,
+            "convidados_do_mes": ["SABRINA LOPES TURMINA"],
+        },
+    }
+    reply = _format_guest_tool_reply(result)
+    assert reply is not None
+    assert "SABRINA LOPES TURMINA" in reply
+    assert "1 de 4" in reply or "mais 3" in reply
+
+
+def test_guest_who_followup_reply():
+    result = {
+        "sucesso": True,
+        "mensagem": "Cliente usou 1 de 4 convites neste mês.",
+        "dados": {"convidados_do_mes": ["SABRINA LOPES TURMINA"]},
+    }
+    reply = _format_guest_tool_reply(result, who_question=True)
+    assert reply is not None
+    assert "SABRINA LOPES TURMINA" in reply
+
+
+def test_guest_who_followup_triggers_pipeline():
+    from app.models import Lead
+
+    lead = Lead(
+        company_id=__import__("uuid").uuid4(),
+        phone="559999",
+        cpf="03062299274",
+        unit="Santarém - 24 horas",
+        is_student=True,
+    )
+    assert _is_guest_who_followup("Quem que eu levei?", [], lead) is True
 
 
 def test_pick_guest_tool_by_keyword():

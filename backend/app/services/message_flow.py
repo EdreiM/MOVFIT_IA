@@ -852,6 +852,76 @@ def _format_tool_result_as_reply(result: dict) -> str | None:
     return None
 
 
+def _is_guest_tool(tool: Tool) -> bool:
+    haystack = _normalize_tokens(f"{tool.tool_key} {tool.name or ''}")
+    return bool(haystack & {"convidado", "convidados", "convite", "convites", "guest"})
+
+
+def _guest_names_from_dados(dados: dict) -> list[str]:
+    raw = dados.get("convidados_do_mes") or dados.get("convidados") or []
+    names: list[str] = []
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    if not isinstance(raw, list):
+        return names
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            names.append(item.strip())
+        elif isinstance(item, dict):
+            name = item.get("nome") or item.get("name")
+            if name:
+                names.append(str(name).strip())
+    return names
+
+
+def _format_guest_tool_reply(result: dict, *, who_question: bool = False) -> str | None:
+    """Usa mensagem + convidados_do_mes retornados pelo n8n."""
+    if not result.get("sucesso"):
+        return _format_tool_result_as_reply(result)
+    dados = result.get("dados")
+    names: list[str] = []
+    if isinstance(dados, dict):
+        names = _guest_names_from_dados(dados)
+    if who_question:
+        if not names:
+            base = _format_tool_result_as_reply(result)
+            return base or "Não encontrei convidados registrados no seu nome neste mês."
+        if len(names) == 1:
+            return f"Este mês você levou *{names[0]}* como convidado. 😊"
+        listed = "\n".join(f"• {name}" for name in names)
+        return f"Este mês você levou estes convidados:\n{listed}"
+    base = _format_tool_result_as_reply(result) or ""
+    if not names:
+        return base or None
+    if len(names) == 1:
+        extra = f"\n\n👤 Convidado registrado este mês: *{names[0]}*."
+    else:
+        listed = "\n".join(f"• {name}" for name in names)
+        extra = f"\n\n👤 Convidados registrados este mês:\n{listed}"
+    return (base + extra).strip()
+
+
+def _is_guest_who_followup(
+    text: str,
+    recent_customer_texts: list[str] | None,
+    lead: Lead | None,
+) -> bool:
+    """Ex.: 'Quem que eu levei?' depois de consultar convidados."""
+    tokens = _normalize_tokens(text)
+    if "quem" not in tokens and "nome" not in tokens:
+        return False
+    if not tokens & {"levei", "levou", "troux", "convidado", "convidados", "convite", "convites", "nomes"}:
+        return False
+    if lead and (lead.is_student or lead.unit) and lead.cpf:
+        return True
+    prior = [t for t in (recent_customer_texts or []) if t and t.strip() != (text or "").strip()]
+    return any(
+        _is_guest_operational_check(t, lead)
+        or _student_operational_action(t, lead)
+        for t in prior[-8:]
+    )
+
+
 def _pick_student_operational_tool(
     user_text: str,
     tools_by_key: dict[str, Tool],
@@ -871,7 +941,9 @@ def _pick_student_operational_tool(
 
 def _pick_student_operational_tool_from_text(user_text: str, tools_by_key: dict[str, Tool]) -> Tool | None:
     tokens = _normalize_tokens(user_text)
-    wants_guests = bool(tokens & {"convidado", "convidados", "convite", "convites"})
+    wants_guests = bool(tokens & {"convidado", "convidados", "convite", "convites"}) or (
+        "quem" in tokens and tokens & {"levei", "levou", "troux", "convidado", "convite", "nome", "nomes"}
+    )
     wants_billing = bool(
         tokens & {"parcela", "parcelas", "atrasad", "atraso", "inadimpl", "boleto", "boletos", "carne", "multa"}
     )
@@ -994,7 +1066,11 @@ async def _run_student_operational_pipeline(
             args["Unidade"] = unit
 
     op_result = await execute_tool(db, op_tool, args, conversation)
-    reply = _format_tool_result_as_reply(op_result)
+    who_question = _is_guest_who_followup(user_text, recent_customer_texts, lead)
+    if _is_guest_tool(op_tool):
+        reply = _format_guest_tool_reply(op_result, who_question=who_question)
+    else:
+        reply = _format_tool_result_as_reply(op_result)
     if reply is None:
         reply = await _transfer_and_notify_tool_failure(
             db, conversation, tools_by_key, f"ferramenta {op_tool.tool_key} falhou"
@@ -1641,8 +1717,9 @@ async def generate_ai_reply(
 
     ai_name = config.ai_name or "assistente virtual"
 
+    guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
     student_pipeline_active = has_verify_unit_tool and (
-        (student_operational and not plan_intent_active)
+        ((student_operational or guest_who_followup) and not plan_intent_active)
         or _student_operational_followup(user_text, recent_customer_texts, lead)
     )
     if student_pipeline_active:
