@@ -23,7 +23,7 @@ type Integration = {
 };
 
 const POLL_INTERVAL_MS = 1200;
-const POLL_MAX_ATTEMPTS = 40; // ~48s: cobre o debounce (padrão 8s) + latência da LLM + follow-ups rápidos
+const POLL_MAX_ATTEMPTS = 60; // ~72s: debounce curto no teste + RAG + LLM + retry de lock
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,11 +77,20 @@ export default function TestChatPage() {
     pollingRef.current = true;
     setAwaitingReply(true);
     try {
+      let gotReply = false;
       for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
         await sleep(POLL_INTERVAL_MS);
         const list = await load();
         const last = list[list.length - 1];
-        if (!last || last.actor !== "customer") break;
+        if (!last || last.actor !== "customer") {
+          gotReply = true;
+          break;
+        }
+      }
+      if (!gotReply) {
+        setError(
+          "A IA demorou demais para responder. Tente enviar de novo — se persistir, veja os logs do backend."
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao aguardar resposta");

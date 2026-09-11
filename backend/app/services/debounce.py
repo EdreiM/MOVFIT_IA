@@ -21,6 +21,30 @@ def schedule_ai_reply(conversation_id: UUID, company_id: UUID, delay_seconds: fl
     )
 
 
+async def _try_reply_once(conversation_id: UUID, company_id: UUID) -> bool:
+    """Tenta gerar a resposta agregada. Retorna True se rodou, False se o lock
+    estava ocupado (outro turno ainda processando RAG/LLM/envio de bolhas)."""
+    from app.database import AsyncSessionLocal
+    from app.services.locks import LOCK_NAMESPACE_CONVERSATION_REPLY, advisory_lock, uuid_lock_key
+    from app.services.message_flow import reply_to_pending_messages
+
+    async with AsyncSessionLocal() as db:
+        try:
+            async with advisory_lock(
+                db, LOCK_NAMESPACE_CONVERSATION_REPLY, uuid_lock_key(conversation_id)
+            ) as acquired:
+                if not acquired:
+                    return False
+                await reply_to_pending_messages(db, conversation_id, company_id)
+                await db.commit()
+                return True
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            logger.exception("Falha ao gerar resposta agregada da conversa %s", conversation_id)
+            return True  # erro já logado — não ficar retentando o mesmo turno
+    return False
+
+
 async def _reply_after_silence(conversation_id: UUID, company_id: UUID, delay_seconds: float) -> None:
     try:
         await asyncio.sleep(delay_seconds)
@@ -29,23 +53,27 @@ async def _reply_after_silence(conversation_id: UUID, company_id: UUID, delay_se
 
     # Import tardio: message_flow importa este módulo, então importar no topo
     # deste arquivo criaria um ciclo de import.
-    from app.database import AsyncSessionLocal
-    from app.services.locks import LOCK_NAMESPACE_CONVERSATION_REPLY, advisory_lock, uuid_lock_key
-    from app.services.message_flow import reply_to_pending_messages
-
-    async with AsyncSessionLocal() as db:
+    max_lock_attempts = 8
+    for attempt in range(max_lock_attempts):
+        if await _try_reply_once(conversation_id, company_id):
+            break
+        wait = min(2.0 * (attempt + 1), 12.0)
+        logger.warning(
+            "Resposta da conversa %s adiada — outro turno ainda em processamento "
+            "(tentativa %s/%s, nova tentativa em %.0fs)",
+            conversation_id,
+            attempt + 1,
+            max_lock_attempts,
+            wait,
+        )
         try:
-            # `_pending_replies` é em memória, por processo — se um dia
-            # existir mais de uma cópia do backend rodando, cada uma tem seu
-            # próprio dict e poderia disparar esse reply pra mesma conversa
-            # ao mesmo tempo. O lock garante que só uma gera/manda de fato.
-            async with advisory_lock(db, LOCK_NAMESPACE_CONVERSATION_REPLY, uuid_lock_key(conversation_id)) as acquired:
-                if not acquired:
-                    return
-                await reply_to_pending_messages(db, conversation_id, company_id)
-                await db.commit()
-        except Exception:  # noqa: BLE001
-            await db.rollback()
-            logger.exception("Falha ao gerar resposta agregada da conversa %s", conversation_id)
-        finally:
-            _pending_replies.pop(conversation_id, None)
+            await asyncio.sleep(wait)
+        except asyncio.CancelledError:
+            return
+    else:
+        logger.error(
+            "Conversa %s ficou sem resposta automática — lock ocupado após %s tentativas",
+            conversation_id,
+            max_lock_attempts,
+        )
+    _pending_replies.pop(conversation_id, None)

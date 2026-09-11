@@ -361,11 +361,12 @@ async def test_chat(
     )
     await save_message(db, conv, inbound)
 
-    # Mesmo caminho de debounce do WhatsApp real: se você mandar mensagens em
-    # sequência aqui no chat de teste, a Mônica agrega tudo numa resposta só,
-    # depois do período de silêncio configurado.
+    # Debounce curto no playground: agrega rajadas rápidas sem imitar os 8s
+    # do WhatsApp — e libera o lock mais cedo pro turno seguinte (horário →
+    # estacionamento etc.).
     settings = get_settings()
-    schedule_ai_reply(conv.id, company_id, settings.ai_reply_debounce_seconds)
+    test_debounce = min(settings.ai_reply_debounce_seconds, 1.5)
+    schedule_ai_reply(conv.id, company_id, test_debounce)
 
     return TestChatResponse(conversation_id=conv.id, reply=None)
 

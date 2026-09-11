@@ -266,7 +266,9 @@ async def fetch_rag_context(db: AsyncSession, company_id: UUID, query: str) -> s
         select(RagSource).where(RagSource.company_id == company_id, RagSource.is_active.is_(True))
     )
     sources = result.scalars().all()
-    chunks: list[str] = []
+    if not sources:
+        return ""
+
     # Formato do webhook n8n Mov Fit
     # - pergunta: texto usado na busca semântica
     # - contexto.plano_em_negociacao: opcional; só preencher quando soubermos o plano
@@ -276,21 +278,36 @@ async def fetch_rag_context(db: AsyncSession, company_id: UUID, query: str) -> s
             "plano_em_negociacao": None,
         },
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for source in sources:
-            try:
-                started = datetime.now(timezone.utc)
+
+    async def _fetch_one(source: RagSource) -> str | None:
+        try:
+            started = datetime.now(timezone.utc)
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 resp = await client.post(source.webhook_url, json=payload)
-                latency = (datetime.now(timezone.utc) - started).total_seconds() * 1000
-                source.last_latency_ms = latency
-                if resp.status_code < 400:
-                    source.last_success_at = datetime.now(timezone.utc)
-                    data = resp.json()
-                    text = _extract_rag_text(data)
-                    if text:
-                        chunks.append(f"[{source.name}]\n{text}")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("RAG %s falhou: %s", source.name, exc)
+            latency = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+            source.last_latency_ms = latency
+            if resp.status_code < 400:
+                source.last_success_at = datetime.now(timezone.utc)
+                data = resp.json()
+                text = _extract_rag_text(data)
+                if text:
+                    return f"[{source.name}]\n{text}"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("RAG %s falhou: %s", source.name, exc)
+        return None
+
+    chunks: list[str] = []
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_fetch_one(s) for s in sources], return_exceptions=True),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("RAG timeout global (20s) para empresa %s — segue sem contexto extra", company_id)
+        results = []
+    for item in results:
+        if isinstance(item, str) and item:
+            chunks.append(item)
     return "\n\n".join(chunks)
 
 
@@ -1431,6 +1448,33 @@ async def generate_ai_reply(
                 "content": f"Contexto da base de conhecimento:\n{rag_context}",
             }
         )
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Ferramentas e RAG: se uma ferramenta não existir, falhar (sucesso=false) "
+                "ou não retornar dados úteis, NÃO fique em silêncio — responda em texto "
+                "usando a base de conhecimento (RAG) e o histórico desta conversa. Se "
+                "ainda não tiver a informação, diga honestamente que não conseguiu "
+                "verificar no sistema agora e peça para reformular ou ofereça transferir "
+                "pra um atendente. Perguntas simples (horário, endereço, estacionamento, "
+                "estrutura) devem ser respondidas pelo RAG/histórico — não peça CPF nem "
+                "chame ferramentas de aluno só por causa disso."
+            ),
+        }
+    )
+    if _text_has_non_plan_topic(user_text):
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "NESTE TURNO o assunto é informativo (horário, endereço, estacionamento, "
+                    "estrutura etc.) — responda com RAG e o que já foi dito nesta conversa "
+                    "(incluindo unidade já mencionada). Não mude de assunto pra planos nem "
+                    "peça CPF. Sempre mande texto pro cliente neste turno."
+                ),
+            }
+        )
     units_result = await db.execute(
         select(Unit.name, Unit.city).where(Unit.company_id == conversation.company_id, Unit.is_active.is_(True))
     )
@@ -1539,6 +1583,19 @@ async def generate_ai_reply(
                     "o CPF se ainda não tiver, chame a ferramenta, e só então use a ferramenta "
                     "específica do pedido. Sempre responda com texto — nunca deixe o cliente "
                     "sem resposta."
+                ),
+            }
+        )
+    elif student_operational and not confirmed_student and not has_verify_unit_tool:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "NESTE TURNO o cliente pediu algo que normalmente exige consulta no sistema "
+                    "(parcelas, convidados do mês etc.), mas as ferramentas de aluno NÃO estão "
+                    "disponíveis nesta conversa. Responda com o que souber da base de "
+                    "conhecimento; se não puder consultar o sistema, explique isso claramente "
+                    "e ofereça transferir — nunca fique em silêncio."
                 ),
             }
         )
@@ -2045,9 +2102,19 @@ async def reply_to_pending_messages(
     deferred_end_call: tuple[Tool, dict] | None = None
     delivered_via_tools = False
     try:
-        reply, deferred_end_call, delivered_via_tools = await generate_ai_reply(
-            db, conversation, combined_text
+        reply, deferred_end_call, delivered_via_tools = await asyncio.wait_for(
+            generate_ai_reply(db, conversation, combined_text),
+            timeout=90.0,
         )
+    except asyncio.TimeoutError:
+        logger.error(
+            "Timeout (90s) ao gerar resposta da conversa %s (pendente: %r)",
+            conversation_id,
+            combined_text[:300],
+        )
+        reply = None
+        deferred_end_call = None
+        delivered_via_tools = False
     except Exception:  # noqa: BLE001
         logger.exception(
             "Exceção ao gerar resposta da conversa %s (pendente: %r)",
@@ -2111,7 +2178,9 @@ async def reply_to_pending_messages(
         await save_message(db, conversation, out_event)
         if not is_test:
             await send_outbound(db, company_id, conversation, bubble_text)
-        if i < len(bubbles) - 1:
+        # No chat de teste não espera entre bolhas — libera o lock mais cedo
+        # pro próximo turno do cliente (visto travar follow-up tipo estacionamento).
+        if not is_test and i < len(bubbles) - 1:
             await asyncio.sleep(settings.ai_bubble_delay_seconds)
 
     if deferred_end_call:
