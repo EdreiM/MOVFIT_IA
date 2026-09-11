@@ -604,16 +604,64 @@ _PLAN_INTENT_KEYWORDS = {
     "matricula", "matricular", "assinar", "assinatura", "contratar", "contrato",
 }
 
+# Assuntos que encerram o fluxo de planos — mesmo que o cliente tenha pedido
+# planos antes, a mensagem ATUAL muda de assunto (horário, parcela etc.).
+_NON_PLAN_TOPIC_KEYWORDS = {
+    "horario", "horarios", "funcionamento", "abre", "aberta", "aberto", "fecha",
+    "endereco", "localizacao", "onde", "fica", "estacionamento", "estrutura",
+    "parcela", "parcelas", "atrasad", "atraso", "inadimpl", "boleto", "boletos",
+    "convidado", "convidados", "convite", "convites", "acesso", "entrada",
+    "cancelar", "cancelamento", "trancar", "trancamento", "congelar",
+    "carne", "carnê", "multa", "pagar", "pagamento",
+}
+
+_STUDENT_ACTION_KEYWORDS = {
+    "parcela", "parcelas", "atrasad", "atraso", "inadimpl", "boleto", "boletos",
+    "convidado", "convidados", "convite", "convites", "acesso", "entrada",
+    "carne", "carnê", "multa", "minha", "matricula", "matriculado", "aluno",
+}
+
+
+def _text_has_plan_intent(text: str) -> bool:
+    return bool(_normalize_tokens(text) & _PLAN_INTENT_KEYWORDS)
+
+
+def _text_has_non_plan_topic(text: str) -> bool:
+    return bool(_normalize_tokens(text) & _NON_PLAN_TOPIC_KEYWORDS)
+
+
+def _wants_student_action(text: str, recent_customer_texts: list[str] | None = None) -> bool:
+    """Verdadeiro quando o assunto é ação de aluno (parcela, convidados etc.)."""
+    for chunk in [text, *(recent_customer_texts or [])]:
+        if chunk and _normalize_tokens(chunk) & _STUDENT_ACTION_KEYWORDS:
+            # "matricula" sozinha pode ser lead novo — exige contexto de aluno.
+            tokens = _normalize_tokens(chunk)
+            if tokens & {"parcela", "parcelas", "atrasad", "atraso", "inadimpl", "convidado", "convidados", "convite", "convites"}:
+                return True
+            if "matricula" in tokens or "matriculado" in tokens or "aluno" in tokens:
+                if tokens & {"minha", "meu", "minhas", "meus", "atrasad", "atraso", "cancelar", "pagar"}:
+                    return True
+    return False
+
+
+def _plan_flow_active(text: str, recent_customer_texts: list[str] | None = None) -> bool:
+    """Verdadeiro enquanto o cliente ainda está no fluxo de planos/preços.
+
+    Turno 1 "quero planos" + turno 2 "Santarém - 24 horas" → True.
+    Depois "quais os horários?" → False, mesmo tendo pedido planos antes."""
+    if _text_has_plan_intent(text):
+        return True
+    if _text_has_non_plan_topic(text):
+        return False
+    if not recent_customer_texts:
+        return False
+    prior = [t for t in recent_customer_texts if t and t.strip() != (text or "").strip()]
+    return any(_text_has_plan_intent(t) for t in prior)
+
 
 def _wants_plan_info(text: str, recent_customer_texts: list[str] | None = None) -> bool:
-    """Verdadeiro quando o CLIENTE pediu plano/preço nesta mensagem ou numa
-    recente da mesma conversa — ex: turno 1 "quero planos", turno 2 só manda
-    o nome da unidade. Mencionar unidade por outro motivo (horário) não
-    basta sozinho."""
-    for chunk in [text, *(recent_customer_texts or [])]:
-        if chunk and _normalize_tokens(chunk) & _PLAN_INTENT_KEYWORDS:
-            return True
-    return False
+    """Alias de _plan_flow_active — rede de segurança de envio de imagens."""
+    return _plan_flow_active(text, recent_customer_texts)
 
 
 _TRANSFER_PROMISE_PHRASES = [
@@ -686,11 +734,11 @@ def _tool_to_openai_schema(tool: Tool) -> dict:
     elif tool.tool_key == TOOL_KEY_VERIFY_UNIT_BY_CPF:
         description = (
             description + " Use SEMPRE que precisar da unidade do ALUNO e ela ainda não estiver "
-            "no cadastro — peça o CPF se ainda não tiver, depois chame esta ferramenta. NÃO "
-            "pergunte a unidade verbalmente se puder descobrir pelo CPF. NÃO chame quando o "
-            "cliente só quiser planos/preços/matrícula de lead novo: nesse caso pergunte de "
-            "qual unidade ele quer saber os planos. Depois do sucesso, use dados.unidade nas "
-            "próximas ferramentas sem perguntar de novo."
+            "no cadastro — peça SOMENTE o CPF se ainda não tiver (nunca peça a unidade junto), "
+            "depois chame esta ferramenta. NÃO pergunte a unidade verbalmente se puder descobrir "
+            "pelo CPF. NÃO chame quando o cliente só quiser planos/preços/matrícula de lead novo: "
+            "nesse caso pergunte de qual unidade ele quer saber os planos. Depois do sucesso, use "
+            "dados.unidade nas próximas ferramentas sem perguntar de novo."
         )
     elif tool.tool_key == TOOL_KEY_TRANSFER:
         description = (
@@ -1159,7 +1207,8 @@ async def generate_ai_reply(
     history = list(reversed(history_result.scalars().all()))
     is_first_contact = not any(m.actor in {"ai", "human_agent"} for m in history)
     recent_customer_texts = [m.text for m in history if m.actor == "customer" and m.text]
-    plan_intent_active = _wants_plan_info(user_text, recent_customer_texts)
+    plan_intent_active = _plan_flow_active(user_text, recent_customer_texts)
+    student_action_active = _wants_student_action(user_text, recent_customer_texts)
 
     # Resolve ferramentas cedo — o prompt de unidade muda se
     # verificar_unidade_por_cpf estiver ativa nesta integração.
@@ -1369,10 +1418,10 @@ async def generate_ai_reply(
                         "(lead novo) — se ainda não souber de qual unidade ele quer saber os planos, "
                         "PERGUNTE a unidade; NÃO use verificar_unidade_por_cpf pra isso. (2) Ação "
                         "de ALUNO (parcela, convidados, acesso, ou qualquer ferramenta que precise "
-                        "da unidade onde ele é matriculado) — NÃO pergunte a unidade; se não tiver "
-                        "CPF, confirme se é aluno e peça o CPF, depois chame verificar_unidade_por_cpf "
-                        "antes das outras ferramentas. (3) Horário/endereço/estrutura sem ser aluno "
-                        "confirmado — pergunte a unidade normalmente."
+                        "da unidade onde ele é matriculado) — NÃO pergunte a unidade; peça SOMENTE "
+                        "o CPF (se ainda não tiver), confirme se é aluno se necessário, depois chame "
+                        "verificar_unidade_por_cpf antes das outras ferramentas. (3) Horário/endereço/"
+                        "estrutura sem ser aluno confirmado — pergunte a unidade normalmente."
                         if has_verify_unit_tool
                         else (
                             " Se o cliente perguntar algo assim e ainda não tiver dito nesta "
@@ -1392,9 +1441,22 @@ async def generate_ai_reply(
                     "Ferramenta verificar_unidade_por_cpf: descubra a unidade do aluno pelo CPF "
                     "sempre que uma ação/ferramenta precisar dessa unidade e ela ainda não estiver "
                     "no cadastro. Fluxo: se não souber se é aluno, pergunte; se for aluno e não "
-                    "tiver CPF, peça o CPF; com o CPF, chame a ferramenta e use dados.unidade daí "
-                    "em diante. Exceção: quem só pergunta planos/preços — aí pergunte a unidade "
-                    "do interesse dele, sem buscar por CPF."
+                    "tiver CPF, peça SOMENTE o CPF — NUNCA peça a unidade junto, a ferramenta "
+                    "descobre sozinha; com o CPF, chame verificar_unidade_por_cpf e use "
+                    "dados.unidade daí em diante. Exceção: quem só pergunta planos/preços — aí "
+                    "pergunte a unidade do interesse dele, sem buscar por CPF."
+                ),
+            }
+        )
+    if has_verify_unit_tool and student_action_active and not (lead and lead.unit):
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "NESTE TURNO o cliente pediu algo de ALUNO (ex: parcelas, convidados). "
+                    "Com verificar_unidade_por_cpf disponível, NÃO peça em qual unidade ele está "
+                    "matriculado — peça SOMENTE o CPF se ainda não tiver, chame a ferramenta, e "
+                    "só então use a ferramenta específica do pedido dele."
                 ),
             }
         )

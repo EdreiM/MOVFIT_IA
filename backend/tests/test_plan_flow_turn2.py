@@ -7,8 +7,10 @@ import pytest_asyncio
 from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
     _is_valid_openai_tool,
+    _plan_flow_active,
     _tool_to_openai_schema,
     _wants_plan_info,
+    _wants_student_action,
 )
 from app.models import Tool
 
@@ -19,6 +21,17 @@ def test_wants_plan_info_from_recent_customer_message():
         "Santarém - 24 horas",
         recent_customer_texts=["oi, quero ver os planos"],
     ) is True
+
+
+def test_plan_flow_not_active_when_topic_changes_to_hours():
+    assert _plan_flow_active(
+        "Quais os horarios de funcionamento?",
+        ["quero ver os planos", "Santarém - 24 horas"],
+    ) is False
+
+
+def test_student_action_detects_overdue_installments():
+    assert _wants_student_action("Quero ver as parcelas atrasadas") is True
 
 
 def test_invalid_tool_key_is_filtered_from_openai_schema():
