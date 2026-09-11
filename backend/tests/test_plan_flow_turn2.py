@@ -8,12 +8,18 @@ from app.models import Message, Tool
 from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
+    _confirms_is_student,
+    _extract_cpf_from_text,
     _history_text_for_llm,
     _is_guest_info_question,
+    _is_guest_operational_check,
     _is_valid_openai_tool,
+    _pick_student_operational_tool,
     _plan_flow_active,
+    _run_student_operational_pipeline,
     _safe_tool_result_json,
     _student_operational_action,
+    _student_operational_followup,
     _tool_to_openai_schema,
     _wants_plan_info,
     _wants_student_action,
@@ -44,9 +50,125 @@ def test_guest_info_question_is_not_operational_student_action():
     assert _student_operational_action("Entendi, e para levar convidados?") is False
 
 
-def test_counting_guests_is_operational():
+def test_counting_guests_this_month_is_operational():
     assert _is_guest_info_question("Quantos convidados posso levar esse mês?") is False
+    assert _is_guest_operational_check("Quantos convidados posso levar esse mês?") is True
     assert _student_operational_action("Quantos convidados posso levar esse mês?") is True
+
+
+def test_generic_guest_count_is_info_not_operational():
+    assert _is_guest_info_question("Quero saber quantos convidados posos levar") is True
+    assert _is_guest_operational_check("Quero saber quantos convidados posos levar") is False
+    assert _student_operational_action("Quero saber quantos convidados posos levar") is False
+
+
+def test_confirmed_student_guest_count_is_operational():
+    from app.models import Lead
+
+    lead = Lead(company_id=__import__("uuid").uuid4(), phone="559999", unit="Santarém - 24 horas")
+    assert _is_guest_operational_check("Quero saber quantos convidados posso levar", lead) is True
+    assert _student_operational_action("Quero saber quantos convidados posso levar", lead) is True
+
+
+def test_cpf_followup_after_guest_question():
+    assert _student_operational_followup(
+        "52998224725",
+        ["Quero saber quantos convidados posso levar"],
+    ) is True
+    assert _extract_cpf_from_text("529.982.247-25") == "52998224725"
+
+
+def test_student_confirmation_after_guest_info():
+    assert _confirms_is_student("Sim, sou aluno") is True
+    assert _student_operational_followup(
+        "Sim, sou aluno",
+        ["Quero saber quantos convidados posso levar"],
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_student_pipeline_asks_cpf_not_unit(db_session, company):
+    from app.models import AiConfig, Conversation, Tool
+    from app.security import encrypt_secret
+
+    config = AiConfig(
+        company_id=company.id,
+        ai_name="Mônica",
+        llm_api_key_encrypted=encrypt_secret("sk-test"),
+    )
+    db_session.add(config)
+    await db_session.flush()
+    verify = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Verificar unidade",
+        tool_key=TOOL_KEY_VERIFY_UNIT_BY_CPF,
+        description="Descobre unidade",
+        parameters=[{"name": "cpf", "type": "string", "required": True}],
+        webhook_url="https://example.com/verify",
+        is_active=True,
+    )
+    guests = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Convidados do mês",
+        tool_key="verificar_convidados_mes",
+        description="Consulta convidados",
+        parameters=[
+            {"name": "cpf", "type": "string", "required": True},
+            {"name": "unidade", "type": "string", "required": True},
+        ],
+        webhook_url="https://example.com/guests",
+        is_active=True,
+    )
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5593999887766",
+        channel="whatsapp",
+        status="open",
+        ai_enabled=True,
+    )
+    db_session.add_all([verify, guests, conv])
+    await db_session.commit()
+
+    tools_by_key = {verify.tool_key: verify, guests.tool_key: guests}
+    reply, _ = await _run_student_operational_pipeline(
+        db_session,
+        conv,
+        "Quantos convidados posso levar esse mês?",
+        tools_by_key,
+        None,
+        is_first_contact=True,
+        ai_name="Mônica",
+    )
+
+    assert reply is not None
+    assert "CPF" in reply
+    assert "unidade" not in reply.lower()
+    assert "matriculado" not in reply.lower()
+
+
+def test_pick_guest_tool_by_keyword():
+    verify = Tool(
+        name="Verificar unidade",
+        tool_key=TOOL_KEY_VERIFY_UNIT_BY_CPF,
+        description="x",
+        parameters=[],
+        webhook_url="https://example.com/verify",
+    )
+    guests = Tool(
+        name="Convidados do mês",
+        tool_key="verificar_convidados_mes",
+        description="x",
+        parameters=[],
+        webhook_url="https://example.com/guests",
+    )
+    picked = _pick_student_operational_tool(
+        "Quero saber quantos convidados posso levar",
+        {verify.tool_key: verify, guests.tool_key: guests},
+    )
+    assert picked is not None
+    assert picked.tool_key == "verificar_convidados_mes"
 
 
 def test_history_compacts_long_plan_captions():

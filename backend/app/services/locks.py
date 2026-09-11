@@ -41,9 +41,27 @@ async def advisory_lock(db: AsyncSession, namespace: int, key: int = 0):
         logger.debug("Lock (namespace=%s, key=%s) já está em uso por outro processo.", namespace, key)
     try:
         yield acquired
+    except BaseException:
+        if acquired:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Rollback após erro dentro do advisory_lock (namespace=%s, key=%s)",
+                    namespace,
+                    key,
+                )
+        raise
     finally:
         if acquired:
-            await db.execute(select(func.pg_advisory_unlock(namespace, key)))
+            try:
+                await db.execute(select(func.pg_advisory_unlock(namespace, key)))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Falha ao liberar advisory_lock (namespace=%s, key=%s)",
+                    namespace,
+                    key,
+                )
 
 
 def uuid_lock_key(value) -> int:
