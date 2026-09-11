@@ -36,10 +36,19 @@ Quando a IA decide usar uma ferramenta durante a conversa, a Mônica chama o web
 
 ## Ferramentas com efeito interno no painel
 
-Três chaves são especiais — além de chamar o webhook, o backend da Mônica também faz algo a mais:
+Quatro chaves são especiais — além de chamar o webhook, o backend da Mônica também faz algo a mais:
 
 - `transferir_atendimento`: quando `sucesso: true`, desliga a IA da conversa e marca como "com atendente humano".
 - `encerrar_atendimento`: quando `sucesso: true`, marca a conversa como resolvida.
+- `verificar_unidade_por_cpf`: quando `sucesso: true` e `dados.unidade` vem preenchido, grava essa unidade no cadastro do cliente (Lead), marca como aluno (`is_student`) e passa a usar essa unidade nas próximas ferramentas de aluno — sem perguntar de novo. Resposta esperada:
+  ```json
+  {
+    "sucesso": true,
+    "mensagem": "Aluno encontrado na unidade Santarém - 24 horas.",
+    "dados": { "cpf": "12345678900", "unidade": "Santarém - 24 horas" }
+  }
+  ```
+  Use o nome **exato** da unidade como no catálogo do painel. Não use essa ferramenta pra quem só pede planos/preços (aí a IA pergunta de qual unidade o lead quer saber).
 - `enviar_imagens_planos`: antes de chamar o webhook, o backend cruza o que a IA extraiu (nome da unidade, em qualquer parâmetro que você tenha configurado) com o catálogo de **Unidades & Planos** do painel, e manda as URLs de imagem reais em `contexto.imagens_planos`:
   ```json
   "imagens_planos": [

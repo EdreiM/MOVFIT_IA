@@ -342,6 +342,11 @@ def _extract_rag_text(data: dict | list | str) -> str:
 TOOL_KEY_TRANSFER = "transferir_atendimento"
 TOOL_KEY_END = "encerrar_atendimento"
 TOOL_KEY_SEND_PLAN_IMAGES = "enviar_imagens_planos"
+# Descobre em qual unidade o CPF está matriculado (cascade Pacto/n8n).
+# Efeito interno: com sucesso + dados.unidade, grava unidade no Lead e
+# marca is_student — pra próximas tools (parcela, convidados etc.) não
+# precisarem perguntar a unidade de novo. NÃO usar pra quem só pede planos.
+TOOL_KEY_VERIFY_UNIT_BY_CPF = "verificar_unidade_por_cpf"
 # Opcional — só existe pra empresas cuja plataforma (ex: WTS/GYMBOT) permite
 # consultar se a sessão do cliente ainda está pendente. Usada só
 # internamente pelo follow-up (app/services/followup.py) antes de mandar
@@ -659,6 +664,15 @@ def _tool_to_openai_schema(tool: Tool) -> dict:
             "valores ou matrícula nesta mensagem — nunca chame só porque confirmou a unidade pra "
             "responder outra pergunta (horário, endereço, estrutura etc)."
         )
+    elif tool.tool_key == TOOL_KEY_VERIFY_UNIT_BY_CPF:
+        description = (
+            description + " Use SEMPRE que precisar da unidade do ALUNO e ela ainda não estiver "
+            "no cadastro — peça o CPF se ainda não tiver, depois chame esta ferramenta. NÃO "
+            "pergunte a unidade verbalmente se puder descobrir pelo CPF. NÃO chame quando o "
+            "cliente só quiser planos/preços/matrícula de lead novo: nesse caso pergunte de "
+            "qual unidade ele quer saber os planos. Depois do sucesso, use dados.unidade nas "
+            "próximas ferramentas sem perguntar de novo."
+        )
     elif tool.tool_key == TOOL_KEY_TRANSFER:
         description = (
             description + " Se existir uma ferramenta específica pra resolver o pedido (ex: "
@@ -785,23 +799,6 @@ async def execute_tool(
             conversation.status = "resolved"
             await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
 
-        # "unidade" + "cpf" juntos nos argumentos é a assinatura das
-        # ferramentas que consultam sistema externo pra aluno já matriculado
-        # (ex: parcelas em atraso) — sinal forte de que o cliente é aluno
-        # confirmado daquela unidade, não um lead novo. Grava isso no
-        # cadastro pra a IA não perder essa informação se ele mencionar
-        # outra unidade de passagem mais adiante na mesma conversa (ex:
-        # perguntando o horário de uma unidade diferente por curiosidade).
-        if arguments.get("unidade") and arguments.get("cpf"):
-            await _upsert_lead(
-                db,
-                conversation.company_id,
-                conversation.contact_phone,
-                {"unidade": arguments["unidade"]},
-                stage_if_new="aluno",
-                sticky_flags={"is_student": True},
-            )
-
         # Qualquer ferramenta que consulte um sistema externo e devolva
         # nome/CPF/e-mail/data de nascimento do cliente (ex: consultar
         # parcelas) já atualiza o cadastro com esse dado — vem confirmado
@@ -810,6 +807,31 @@ async def execute_tool(
         lead_result_fields = {k: v for k, v in {**data, **dados_extra}.items() if k in _LEAD_ARG_KEYS and v}
         if lead_result_fields:
             await _upsert_lead(db, conversation.company_id, conversation.contact_phone, lead_result_fields)
+
+        # Unidade do aluno confirmada: (a) tool mandou unidade+cpf juntos
+        # nos argumentos (ex: consultar parcela), ou (b) a tool devolveu
+        # unidade em dados (ex: verificar_unidade_por_cpf). Nos dois casos
+        # grava no Lead + is_student — reforço no código, não só prompt.
+        unidade_confirmada = None
+        cpf_ref = arguments.get("cpf") or dados_extra.get("cpf") or data.get("cpf")
+        if arguments.get("unidade") and arguments.get("cpf"):
+            unidade_confirmada = arguments["unidade"]
+        elif dados_extra.get("unidade") and (
+            cpf_ref or tool.tool_key == TOOL_KEY_VERIFY_UNIT_BY_CPF
+        ):
+            unidade_confirmada = dados_extra["unidade"]
+        if unidade_confirmada:
+            unit_fields: dict = {"unidade": unidade_confirmada}
+            if cpf_ref:
+                unit_fields["cpf"] = cpf_ref
+            await _upsert_lead(
+                db,
+                conversation.company_id,
+                conversation.contact_phone,
+                unit_fields,
+                stage_if_new="aluno",
+                sticky_flags={"is_student": True},
+            )
 
     await _log_tool_call(
         db, tool, conversation, arguments, bool(data.get("sucesso")), None if data.get("sucesso") else data.get("mensagem")
@@ -1117,6 +1139,24 @@ async def generate_ai_reply(
     history = list(reversed(history_result.scalars().all()))
     is_first_contact = not any(m.actor in {"ai", "human_agent"} for m in history)
 
+    # Resolve ferramentas cedo — o prompt de unidade muda se
+    # verificar_unidade_por_cpf estiver ativa nesta integração.
+    tools_result = await db.execute(
+        select(Tool).where(
+            Tool.company_id == conversation.company_id,
+            Tool.is_active.is_(True),
+            or_(Tool.integration_id.is_(None), Tool.integration_id == conversation.integration_id),
+        )
+    )
+    active_tools = tools_result.scalars().all()
+    # Se uma ferramenta global e uma escopada pra essa integração dividem o
+    # mesmo tool_key, a escopada vence — é o webhook certo pra essa conversa.
+    tools_by_key: dict[str, Tool] = {}
+    for t in sorted(active_tools, key=lambda t: t.integration_id is not None):
+        tools_by_key[t.tool_key] = t
+    active_tools = list(tools_by_key.values())
+    has_verify_unit_tool = TOOL_KEY_VERIFY_UNIT_BY_CPF in tools_by_key
+
     ai_name = config.ai_name or "assistente virtual"
     # system_prompt vira só um espaço pra instrução extra opcional, além do
     # que os campos estruturados (nome/tom/emoji) já cobrem.
@@ -1297,13 +1337,42 @@ async def generate_ai_reply(
                     "ignore qualquer outro nome de unidade citado antes nesta conversa, mesmo por "
                     "você mesma, se ele não estiver nesta lista): " + ", ".join(active_unit_names) + "." +
                     ambiguous_note + " Informações como horário de funcionamento, endereço, estrutura, "
-                    "estacionamento, aulas e planos variam de unidade para unidade. Se o cliente "
-                    "perguntar algo assim e ainda não tiver dito nesta conversa, de forma inequívoca, "
-                    "qual unidade específica é a dele, PERGUNTE primeiro qual unidade antes de "
-                    "responder — como um atendente humano faria. NUNCA responda com informação de "
-                    "mais de uma unidade na mesma mensagem — isso satura o cliente. Se o cliente já "
-                    "informou a unidade antes na conversa sem ambiguidade, não pergunte de novo, use "
-                    "a que ele já disse."
+                    "estacionamento, aulas e planos variam de unidade para unidade. NUNCA responda "
+                    "com informação de mais de uma unidade na mesma mensagem — isso satura o "
+                    "cliente. Se o cliente já informou a unidade antes na conversa sem ambiguidade, "
+                    "ou ela já está no cadastro dele como aluno, não pergunte de novo — use a que "
+                    "já sabemos."
+                    + (
+                        " REGRA DE DESCOBERTA DE UNIDADE: (1) Pedido de PLANOS/preços/matrícula "
+                        "(lead novo) — se ainda não souber de qual unidade ele quer saber os planos, "
+                        "PERGUNTE a unidade; NÃO use verificar_unidade_por_cpf pra isso. (2) Ação "
+                        "de ALUNO (parcela, convidados, acesso, ou qualquer ferramenta que precise "
+                        "da unidade onde ele é matriculado) — NÃO pergunte a unidade; se não tiver "
+                        "CPF, confirme se é aluno e peça o CPF, depois chame verificar_unidade_por_cpf "
+                        "antes das outras ferramentas. (3) Horário/endereço/estrutura sem ser aluno "
+                        "confirmado — pergunte a unidade normalmente."
+                        if has_verify_unit_tool
+                        else (
+                            " Se o cliente perguntar algo assim e ainda não tiver dito nesta "
+                            "conversa, de forma inequívoca, qual unidade específica é a dele, "
+                            "PERGUNTE primeiro qual unidade antes de responder — como um "
+                            "atendente humano faria."
+                        )
+                    )
+                ),
+            }
+        )
+    if has_verify_unit_tool:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Ferramenta verificar_unidade_por_cpf: descubra a unidade do aluno pelo CPF "
+                    "sempre que uma ação/ferramenta precisar dessa unidade e ela ainda não estiver "
+                    "no cadastro. Fluxo: se não souber se é aluno, pergunte; se for aluno e não "
+                    "tiver CPF, peça o CPF; com o CPF, chame a ferramenta e use dados.unidade daí "
+                    "em diante. Exceção: quem só pergunta planos/preços — aí pergunte a unidade "
+                    "do interesse dele, sem buscar por CPF."
                 ),
             }
         )
@@ -1320,7 +1389,10 @@ async def generate_ai_reply(
                     "unidade pra responder OUTRA pergunta (horário, endereço, estrutura, "
                     "estacionamento etc), responda SÓ essa pergunta — não aproveite pra oferecer "
                     "planos por conta própria, mesmo que pareça prestativo; isso confunde o "
-                    "cliente que só queria uma informação simples.\n\n"
+                    "cliente que só queria uma informação simples.\n"
+                    "Pra planos: se ele ainda não disse de qual unidade quer saber, PERGUNTE a "
+                    "unidade do interesse — não use CPF/verificar_unidade_por_cpf pra descobrir "
+                    "(quem pergunta plano costuma ser lead novo, não aluno matriculado).\n\n"
                     "Catálogo oficial de unidades e planos, sempre atualizado — use isso, "
                     "não invente valores fora daqui. Isso vale MAIS que qualquer coisa dita "
                     "antes nesta conversa (inclusive por você mesma): se uma unidade, plano ou "
@@ -1399,6 +1471,17 @@ async def generate_ai_reply(
                 ),
             }
         )
+    elif has_verify_unit_tool and lead and lead.cpf and not lead.unit:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Esse cliente já tem CPF no cadastro, mas ainda sem unidade de aluno. "
+                    "Antes de chamar qualquer ferramenta que precise da unidade dele, chame "
+                    f"{TOOL_KEY_VERIFY_UNIT_BY_CPF} com esse CPF — não pergunte a unidade."
+                ),
+            }
+        )
     messages.append(
         {
             "role": "system",
@@ -1416,20 +1499,6 @@ async def generate_ai_reply(
         if m.text:
             messages.append({"role": role, "content": m.text})
 
-    tools_result = await db.execute(
-        select(Tool).where(
-            Tool.company_id == conversation.company_id,
-            Tool.is_active.is_(True),
-            or_(Tool.integration_id.is_(None), Tool.integration_id == conversation.integration_id),
-        )
-    )
-    active_tools = tools_result.scalars().all()
-    # Se uma ferramenta global e uma escopada pra essa integração dividem o
-    # mesmo tool_key, a escopada vence — é o webhook certo pra essa conversa.
-    tools_by_key: dict[str, Tool] = {}
-    for t in sorted(active_tools, key=lambda t: t.integration_id is not None):
-        tools_by_key[t.tool_key] = t
-    active_tools = list(tools_by_key.values())
     # TOOL_KEY_CHECK_SESSION é só pro follow-up consultar por conta própria
     # (ver TOOL_KEY_CHECK_SESSION acima) — nunca deve ser oferecida como uma
     # função que a IA decide chamar durante a conversa.
@@ -1464,7 +1533,13 @@ async def generate_ai_reply(
                 "tool_calls": assistant_message["tool_calls"],
             }
         )
-        for call in assistant_message["tool_calls"]:
+        for call in sorted(
+            assistant_message["tool_calls"],
+            # Descobrir unidade pelo CPF antes das outras tools da mesma
+            # rodada — senão parcela/convidados rodam sem unidade e o
+            # autofill ainda não tem o Lead atualizado.
+            key=lambda c: 0 if (c.get("function") or {}).get("name") == TOOL_KEY_VERIFY_UNIT_BY_CPF else 1,
+        ):
             fn = call.get("function") or {}
             key = fn.get("name")
             try:
@@ -1488,6 +1563,13 @@ async def generate_ai_reply(
                         "email": lead.email,
                         "data_nascimento": lead.birthdate.isoformat() if lead.birthdate else None,
                     }
+                    # Unidade confirmada (ex: via verificar_unidade_por_cpf) —
+                    # preenche tools de aluno. NÃO preenche enviar_imagens_planos:
+                    # pedido de plano pergunta a unidade de interesse (lead novo),
+                    # que pode ser outra da unidade onde ele já treina.
+                    if lead.unit and key != TOOL_KEY_SEND_PLAN_IMAGES:
+                        known_values["unidade"] = lead.unit
+                        known_values["Unidade"] = lead.unit
                     for arg_name, known_value in known_values.items():
                         if known_value and arg_name in declared_params and not arguments.get(arg_name):
                             arguments[arg_name] = known_value
@@ -1501,12 +1583,16 @@ async def generate_ai_reply(
                 # visto não acontecer na prática).
                 lead_fields = {k: v for k, v in arguments.items() if k in _LEAD_ARG_KEYS and v}
                 if lead_fields:
-                    await _upsert_lead(db, conversation.company_id, conversation.contact_phone, lead_fields)
+                    lead = await _upsert_lead(
+                        db, conversation.company_id, conversation.contact_phone, lead_fields
+                    ) or lead
 
             if key == TOOL_KEY_SAVE_LEAD_DATA:
                 # Ferramenta interna — não passa por webhook nenhum, grava
                 # direto no cadastro do cliente.
-                await _upsert_lead(db, conversation.company_id, conversation.contact_phone, arguments)
+                lead = await _upsert_lead(
+                    db, conversation.company_id, conversation.contact_phone, arguments
+                ) or lead
                 result = {"sucesso": True, "mensagem": "Dado salvo.", "dados": {}}
                 messages.append(
                     {"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, ensure_ascii=False)}
@@ -1542,6 +1628,18 @@ async def generate_ai_reply(
                 result = {"sucesso": True, "mensagem": "Atendimento será encerrado após a resposta final."}
             elif tool:
                 result = await execute_tool(db, tool, arguments, conversation)
+                # Lead pode ter ganhado unidade/cpf nesse execute — recarrega
+                # pra autofill das próximas tools da mesma rodada.
+                if result.get("sucesso"):
+                    lead_result = await db.execute(
+                        select(Lead).where(
+                            Lead.company_id == conversation.company_id,
+                            Lead.phone == sanitize_phone_digits(conversation.contact_phone),
+                        )
+                    )
+                    refreshed = lead_result.scalar_one_or_none()
+                    if refreshed:
+                        lead = refreshed
             else:
                 result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
 
