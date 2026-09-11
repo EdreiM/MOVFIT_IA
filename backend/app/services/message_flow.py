@@ -768,7 +768,74 @@ def _extract_cpf_from_text(text: str) -> str | None:
     return None
 
 
-def _format_tool_result_as_reply(result: dict) -> str:
+_CUSTOMER_TRANSFER_ON_TOOL_FAILURE = (
+    "No momento não tenho acesso a essa informação por aqui. "
+    "Vou te encaminhar para um atendente que pode te ajudar melhor com isso. 😊"
+)
+
+_INTERNAL_TOOL_FAILURE_PHRASES = (
+    "falha ao executar",
+    "ferramenta sem webhook",
+    "erro interno",
+    "ferramenta '",
+    "timeout",
+)
+
+
+def _is_technical_tool_failure(result: dict) -> bool:
+    """Falha de infra/n8n — cliente não deve ver detalhe; transferir."""
+    if result.get("sucesso"):
+        return False
+    msg = _normalize_text(str(result.get("mensagem") or ""))
+    if not msg:
+        return True
+    return any(phrase in msg for phrase in _INTERNAL_TOOL_FAILURE_PHRASES)
+
+
+def _tool_result_for_llm(result: dict) -> dict:
+    """Evita que a IA repita mensagem técnica pro cliente no loop de tools."""
+    if result.get("sucesso") or not _is_technical_tool_failure(result):
+        return result
+    return {
+        "sucesso": False,
+        "mensagem": (
+            "A consulta no sistema não pôde ser concluída. Transfira o cliente para um "
+            "atendente humano agora (transferir_atendimento) e diga que no momento você "
+            "não tem acesso a essa informação, mas já encaminhou."
+        ),
+        "dados": {},
+    }
+
+
+async def _transfer_and_notify_tool_failure(
+    db: AsyncSession,
+    conversation: Conversation,
+    tools_by_key: dict[str, Tool],
+    internal_reason: str,
+) -> str:
+    transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+    if (
+        transfer_tool
+        and transfer_tool.webhook_url
+        and conversation.status != "with_human"
+    ):
+        await execute_tool(
+            db,
+            transfer_tool,
+            {"motivo": internal_reason},
+            conversation,
+        )
+    else:
+        logger.warning(
+            "Ferramenta falhou (%s) mas transferir_atendimento indisponível na conversa %s",
+            internal_reason,
+            conversation.id,
+        )
+    return _CUSTOMER_TRANSFER_ON_TOOL_FAILURE
+
+
+def _format_tool_result_as_reply(result: dict) -> str | None:
+    """Texto pro cliente. Retorna None se falha técnica — caller deve transferir."""
     if result.get("sucesso"):
         msg = str(result.get("mensagem") or "").strip()
         if msg:
@@ -777,13 +844,12 @@ def _format_tool_result_as_reply(result: dict) -> str:
         if isinstance(dados, dict) and dados.get("mensagem"):
             return str(dados["mensagem"]).strip()
         return "Consultei no sistema — posso ajudar com mais alguma coisa?"
+    if _is_technical_tool_failure(result):
+        return None
     msg = str(result.get("mensagem") or "").strip()
     if msg:
         return msg
-    return (
-        "Não consegui consultar isso no sistema agora. "
-        "Pode tentar de novo em instantes ou pedir pra falar com um atendente?"
-    )
+    return None
 
 
 def _pick_student_operational_tool(
@@ -886,7 +952,12 @@ async def _run_student_operational_pipeline(
     if not unit:
         verify_result = await execute_tool(db, verify_tool, {"cpf": cpf}, conversation)
         if not verify_result.get("sucesso"):
-            return _format_tool_result_as_reply(verify_result), lead
+            reply = _format_tool_result_as_reply(verify_result)
+            if reply is None:
+                reply = await _transfer_and_notify_tool_failure(
+                    db, conversation, tools_by_key, "verificar_unidade_por_cpf falhou"
+                )
+            return reply, lead
         lead_result = await db.execute(
             select(Lead).where(
                 Lead.company_id == conversation.company_id,
@@ -923,7 +994,12 @@ async def _run_student_operational_pipeline(
             args["Unidade"] = unit
 
     op_result = await execute_tool(db, op_tool, args, conversation)
-    return _format_tool_result_as_reply(op_result), lead
+    reply = _format_tool_result_as_reply(op_result)
+    if reply is None:
+        reply = await _transfer_and_notify_tool_failure(
+            db, conversation, tools_by_key, f"ferramenta {op_tool.tool_key} falhou"
+        )
+    return reply, lead
 
 
 def _plan_flow_active(text: str, recent_customer_texts: list[str] | None = None) -> bool:
@@ -2178,14 +2254,34 @@ async def generate_ai_reply(
                     refreshed = lead_result.scalar_one_or_none()
                     if refreshed:
                         lead = refreshed
+                elif (
+                    _is_technical_tool_failure(result)
+                    and key != TOOL_KEY_TRANSFER
+                ):
+                    customer_msg = await _transfer_and_notify_tool_failure(
+                        db,
+                        conversation,
+                        tools_by_key,
+                        f"ferramenta {key} falhou no loop da IA",
+                    )
+                    return customer_msg, deferred_end_call, bool(touched_units)
+                result = _tool_result_for_llm(result)
             else:
                 result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
+                if key != TOOL_KEY_TRANSFER:
+                    customer_msg = await _transfer_and_notify_tool_failure(
+                        db,
+                        conversation,
+                        tools_by_key,
+                        f"ferramenta {key} não encontrada",
+                    )
+                    return customer_msg, deferred_end_call, bool(touched_units)
 
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": _safe_tool_result_json(result),
+                    "content": _safe_tool_result_json(_tool_result_for_llm(result)),
                 }
             )
 
