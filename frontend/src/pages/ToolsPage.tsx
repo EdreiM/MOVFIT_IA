@@ -59,6 +59,17 @@ const PRESETS: { key: string; label: string; description: string }[] = [
 
 const emptyParam = (): ToolParameter => ({ name: "", type: "string", description: "", required: false });
 
+// O OpenAI recusa a requisição inteira quando o nome de uma função tem
+// acento, espaço ou símbolo — e isso derrubava TODAS as respostas da IA, não
+// só a ferramenta com a chave errada. Por isso a chave já sai corrigida aqui,
+// além da validação equivalente no backend.
+const sanitizeToolKey = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 64);
+
 export default function ToolsPage() {
   const { companyId } = useAuth();
   const [items, setItems] = useState<Tool[]>([]);
@@ -249,12 +260,15 @@ export default function ToolsPage() {
           </label>
           {!presetKey && (
             <label className="block space-y-1">
-              <span className="text-sm text-sand/60">Chave (tool_key)</span>
+              <span className="text-sm text-sand/60">
+                Chave (tool_key){" "}
+                <span className="text-sand/40">só letras, números, _ ou -</span>
+              </span>
               <input
                 className="w-full rounded-md border border-white/15 bg-ink px-3 py-2 disabled:opacity-50"
                 placeholder="ex: consultar_pagamento"
                 value={customKey}
-                onChange={(e) => setCustomKey(e.target.value.trim())}
+                onChange={(e) => setCustomKey(sanitizeToolKey(e.target.value))}
                 required={!presetKey}
                 disabled={!!editingId}
               />

@@ -283,7 +283,11 @@ class ToolParameter(BaseModel):
 
 class ToolCreate(BaseModel):
     name: str
-    tool_key: str
+    # O OpenAI só aceita nome de função com letras/números/_/- (até 64
+    # caracteres). Sem essa trava, uma chave com acento ou espaço era aceita
+    # aqui e depois fazia a API recusar TODA requisição da IA, deixando o
+    # atendimento inteiro sem resposta (ver _OPENAI_FUNCTION_NAME_RE).
+    tool_key: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     description: str | None = None
     parameters: list[ToolParameter] = Field(default_factory=list)
     webhook_url: str

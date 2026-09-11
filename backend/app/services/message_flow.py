@@ -605,11 +605,15 @@ _PLAN_INTENT_KEYWORDS = {
 }
 
 
-def _wants_plan_info(text: str) -> bool:
-    """Verdadeiro só quando o texto do CLIENTE realmente pede por plano/preço
-    — mencionar o nome de uma unidade por outro motivo (ex: perguntar
-    horário) não deve, sozinho, disparar o envio de planos."""
-    return bool(_normalize_tokens(text) & _PLAN_INTENT_KEYWORDS)
+def _wants_plan_info(text: str, recent_customer_texts: list[str] | None = None) -> bool:
+    """Verdadeiro quando o CLIENTE pediu plano/preço nesta mensagem ou numa
+    recente da mesma conversa — ex: turno 1 "quero planos", turno 2 só manda
+    o nome da unidade. Mencionar unidade por outro motivo (horário) não
+    basta sozinho."""
+    for chunk in [text, *(recent_customer_texts or [])]:
+        if chunk and _normalize_tokens(chunk) & _PLAN_INTENT_KEYWORDS:
+            return True
+    return False
 
 
 _TRANSFER_PROMISE_PHRASES = [
@@ -642,16 +646,31 @@ def _mentions_any_plan(text_tokens: set[str], plans: list[Plan]) -> bool:
     return False
 
 
+# O OpenAI só aceita nome de função nesse formato. Uma única ferramenta com
+# chave fora dele (acento, espaço, vazia) faz a API recusar a requisição
+# INTEIRA com 400 — e como todas as ferramentas ativas vão em todo request,
+# isso derruba qualquer resposta da IA, inclusive um "oi". Já aconteceu em
+# produção: ninguém respondia e o erro ficava só no log.
+_OPENAI_FUNCTION_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _is_valid_openai_tool(tool: Tool) -> bool:
+    return bool(_OPENAI_FUNCTION_NAME_RE.match(tool.tool_key or ""))
+
+
 def _tool_to_openai_schema(tool: Tool) -> dict:
     properties: dict = {}
     required: list[str] = []
     for p in tool.parameters or []:
-        properties[p["name"]] = {
+        param_name = (p.get("name") or "").strip()
+        if not param_name:
+            continue
+        properties[param_name] = {
             "type": p.get("type") or "string",
             "description": p.get("description") or "",
         }
         if p.get("required"):
-            required.append(p["name"])
+            required.append(param_name)
     description = tool.description or tool.name
     if tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES:
         # Reforça aqui, na própria descrição vista na hora de decidir chamar
@@ -994,6 +1013,7 @@ async def _auto_send_plan_images(
     assistant_text: str,
     tools_by_key: dict[str, Tool],
     touched_units: set[str],
+    recent_customer_texts: list[str] | None = None,
 ) -> None:
     """Rede de segurança: garante que a imagem do plano seja mandada quando o
     cliente menciona uma unidade, mesmo que a IA não decida chamar a
@@ -1009,7 +1029,7 @@ async def _auto_send_plan_images(
     tool = tools_by_key.get(TOOL_KEY_SEND_PLAN_IMAGES)
     if not tool or not tool.webhook_url:
         return
-    if not _wants_plan_info(user_text):
+    if not _wants_plan_info(user_text, recent_customer_texts):
         # Sem isso, só citar o nome de uma unidade por qualquer outro motivo
         # (ex: "a academia de Itaituba abre hoje?") já disparava o envio dos
         # planos — o cliente só queria saber o horário.
@@ -1111,21 +1131,21 @@ async def generate_ai_reply(
     db: AsyncSession,
     conversation: Conversation,
     user_text: str,
-) -> tuple[str | None, tuple[Tool, dict] | None]:
-    """Retorna (texto_final, chamada_de_encerramento_adiada). O segundo item
-    só vem preenchido quando a IA decidiu encerrar o atendimento nessa
-    resposta — quem chamou essa função é responsável por executar essa
-    ferramenta de verdade DEPOIS de mandar o texto_final ao cliente (ver
-    reply_to_pending_messages)."""
+) -> tuple[str | None, tuple[Tool, dict] | None, bool]:
+    """Retorna (texto_final, chamada_de_encerramento_adiada,
+    conteudo_ja_enviado_via_tools). O terceiro item fica True quando imagens
+    ou outros outbound já foram gravados/enviados durante o loop de
+    ferramentas — reply_to_pending_messages usa isso pra não descartar a
+    resposta só porque final_text veio vazio."""
     if not conversation.ai_enabled:
-        return None, None
+        return None, None, False
 
     config = await resolve_ai_config(db, conversation)
     if not config or config.operation_mode == "off":
-        return None, None
+        return None, None, False
     if not config.llm_api_key_encrypted:
         logger.warning("Empresa %s sem API key LLM", conversation.company_id)
-        return None, None
+        return None, None, False
 
     api_key = decrypt_secret(config.llm_api_key_encrypted)
     rag_context = await fetch_rag_context(db, conversation.company_id, user_text)
@@ -1138,6 +1158,8 @@ async def generate_ai_reply(
     )
     history = list(reversed(history_result.scalars().all()))
     is_first_contact = not any(m.actor in {"ai", "human_agent"} for m in history)
+    recent_customer_texts = [m.text for m in history if m.actor == "customer" and m.text]
+    plan_intent_active = _wants_plan_info(user_text, recent_customer_texts)
 
     # Resolve ferramentas cedo — o prompt de unidade muda se
     # verificar_unidade_por_cpf estiver ativa nesta integração.
@@ -1471,14 +1493,23 @@ async def generate_ai_reply(
                 ),
             }
         )
-    elif has_verify_unit_tool and lead and lead.cpf and not lead.unit:
+    elif (
+        has_verify_unit_tool
+        and lead
+        and lead.cpf
+        and not lead.unit
+        and not plan_intent_active
+    ):
         messages.append(
             {
                 "role": "system",
                 "content": (
                     "Esse cliente já tem CPF no cadastro, mas ainda sem unidade de aluno. "
-                    "Antes de chamar qualquer ferramenta que precise da unidade dele, chame "
-                    f"{TOOL_KEY_VERIFY_UNIT_BY_CPF} com esse CPF — não pergunte a unidade."
+                    "Antes de chamar qualquer ferramenta de ALUNO que precise da unidade "
+                    "dele, chame "
+                    f"{TOOL_KEY_VERIFY_UNIT_BY_CPF} com esse CPF — não pergunte a unidade. "
+                    "Exceção: se o assunto atual for planos/preços/matrícula (lead novo), "
+                    "ignore isso e use a unidade que o cliente informou de interesse."
                 ),
             }
         )
@@ -1502,8 +1533,20 @@ async def generate_ai_reply(
     # TOOL_KEY_CHECK_SESSION é só pro follow-up consultar por conta própria
     # (ver TOOL_KEY_CHECK_SESSION acima) — nunca deve ser oferecida como uma
     # função que a IA decide chamar durante a conversa.
+    offered_tools = [t for t in active_tools if t.tool_key != TOOL_KEY_CHECK_SESSION]
+    for t in offered_tools:
+        if not _is_valid_openai_tool(t):
+            # Deixa essa ferramenta de fora em vez de derrubar a resposta
+            # toda (ver _OPENAI_FUNCTION_NAME_RE): melhor a IA atender sem
+            # uma ferramenta do que o cliente ficar sem nenhuma resposta.
+            logger.error(
+                "Ferramenta %r tem tool_key inválida pro OpenAI (%r) e foi ignorada — "
+                "use só letras, números, _ ou - na chave.",
+                t.name,
+                t.tool_key,
+            )
     tool_defs = [
-        _tool_to_openai_schema(t) for t in active_tools if t.tool_key != TOOL_KEY_CHECK_SESSION
+        _tool_to_openai_schema(t) for t in offered_tools if _is_valid_openai_tool(t)
     ] + [SAVE_LEAD_DATA_TOOL_SCHEMA]
 
     assistant_message = await chat_completion(
@@ -1661,7 +1704,16 @@ async def generate_ai_reply(
         )
 
     final_text = assistant_message.get("content") or ""
-    await _auto_send_plan_images(db, conversation, user_text, final_text, tools_by_key, touched_units)
+    await _auto_send_plan_images(
+        db,
+        conversation,
+        user_text,
+        final_text,
+        tools_by_key,
+        touched_units,
+        recent_customer_texts=recent_customer_texts,
+    )
+    delivered_via_tools = bool(touched_units)
 
     transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
     if (
@@ -1680,7 +1732,7 @@ async def generate_ai_reply(
             conversation,
         )
 
-    return final_text, deferred_end_call
+    return final_text, deferred_end_call, delivered_via_tools
 
 
 async def send_outbound(
@@ -1816,7 +1868,9 @@ async def reply_to_pending_messages(
         return None
 
     combined_text = "\n".join(pending_texts)
-    reply, deferred_end_call = await generate_ai_reply(db, conversation, combined_text)
+    reply, deferred_end_call, delivered_via_tools = await generate_ai_reply(
+        db, conversation, combined_text
+    )
     if not reply:
         if deferred_end_call:
             # A IA decidiu encerrar mas não escreveu nenhum texto de
@@ -1825,6 +1879,13 @@ async def reply_to_pending_messages(
             # precisa rodar de qualquer jeito, senão a ferramenta nunca
             # executa (visto em produção: turno silencioso, nada disparava).
             reply = "Fico feliz em ajudar! Se precisar de mais alguma coisa, é só chamar por aqui. Até mais! 😊"
+        elif delivered_via_tools:
+            # enviar_imagens_planos (ou rede de segurança) já mandou intro,
+            # imagens e legendas — final_text vazio é esperado nesse fluxo.
+            if deferred_end_call:
+                end_tool, end_arguments = deferred_end_call
+                await execute_tool(db, end_tool, end_arguments, conversation)
+            return ""
         else:
             return None
 
