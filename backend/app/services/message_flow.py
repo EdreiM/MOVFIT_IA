@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -679,6 +679,44 @@ def _plan_flow_active(text: str, recent_customer_texts: list[str] | None = None)
 def _wants_plan_info(text: str, recent_customer_texts: list[str] | None = None) -> bool:
     """Alias de _plan_flow_active — rede de segurança de envio de imagens."""
     return _plan_flow_active(text, recent_customer_texts)
+
+
+_PLAN_CAPTION_MARKERS = ("🏋️", "Faça sua matrícula", "Link de cadastro", "PLANO ANUAL", "PLANO MENSAL")
+_HISTORY_LLM_MAX_CHARS = 700
+
+
+def _history_text_for_llm(message: Message) -> str | None:
+    """Encurta legendas gigantes de plano no histórico — repetir 2–3 descrições
+    completas a cada turno estourava contexto e a OpenAI passava a devolver
+    content vazio (cliente ficava sem resposta)."""
+    text = message.text
+    if not text:
+        return None
+    if message.content_type == "image":
+        return text
+    if message.actor == "ai" and len(text) > _HISTORY_LLM_MAX_CHARS:
+        if any(marker in text for marker in _PLAN_CAPTION_MARKERS):
+            return "[Descrição completa do plano já enviada ao cliente por imagem/mensagem anterior.]"
+    return text
+
+
+def _safe_tool_result_json(result: dict) -> str:
+    try:
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        return json.dumps(
+            {"sucesso": False, "mensagem": "Erro interno ao processar resultado da ferramenta."},
+            ensure_ascii=False,
+        )
+
+
+async def _count_ai_messages(db: AsyncSession, conversation_id: UUID) -> int:
+    result = await db.execute(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.conversation_id == conversation_id, Message.actor == "ai")
+    )
+    return int(result.scalar() or 0)
 
 
 _TRANSFER_PROMISE_PHRASES = [
@@ -1626,8 +1664,9 @@ async def generate_ai_reply(
 
     for m in history:
         role = "assistant" if m.actor in {"ai", "human_agent"} else "user"
-        if m.text:
-            messages.append({"role": role, "content": m.text})
+        content = _history_text_for_llm(m)
+        if content:
+            messages.append({"role": role, "content": content})
 
     # TOOL_KEY_CHECK_SESSION é só pro follow-up consultar por conta própria
     # (ver TOOL_KEY_CHECK_SESSION acima) — nunca deve ser oferecida como uma
@@ -1648,14 +1687,26 @@ async def generate_ai_reply(
         _tool_to_openai_schema(t) for t in offered_tools if _is_valid_openai_tool(t)
     ] + [SAVE_LEAD_DATA_TOOL_SCHEMA]
 
-    assistant_message = await chat_completion(
-        provider=config.llm_provider,
-        model=config.llm_model,
-        api_key=api_key,
-        messages=messages,
-        temperature=config.temperature,
-        tools=tool_defs,
-    )
+    try:
+        assistant_message = await chat_completion(
+            provider=config.llm_provider,
+            model=config.llm_model,
+            api_key=api_key,
+            messages=messages,
+            temperature=config.temperature,
+            tools=tool_defs,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "OpenAI falhou ao gerar resposta da conversa %s (texto do cliente: %r)",
+            conversation.id,
+            user_text[:200],
+        )
+        return (
+            "Desculpe, tive uma dificuldade técnica momentânea. Pode repetir sua pergunta? 🙏",
+            None,
+            False,
+        )
 
     touched_units: set[str] = set()
     # encerrar_atendimento fecha a sessão de verdade no sistema externo (ex:
@@ -1698,7 +1749,11 @@ async def generate_ai_reply(
                 # salvo (garantia no código, não só instrução no prompt).
                 autofill_tool = tools_by_key.get(key)
                 if autofill_tool:
-                    declared_params = {p.get("name") for p in (autofill_tool.parameters or [])}
+                    declared_params = {
+                        p.get("name")
+                        for p in (autofill_tool.parameters or [])
+                        if isinstance(p, dict) and p.get("name")
+                    }
                     known_values = {
                         "cpf": lead.cpf,
                         "nome": lead.name,
@@ -1737,7 +1792,11 @@ async def generate_ai_reply(
                 ) or lead
                 result = {"sucesso": True, "mensagem": "Dado salvo.", "dados": {}}
                 messages.append(
-                    {"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, ensure_ascii=False)}
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "content": _safe_tool_result_json(result),
+                    }
                 )
                 continue
 
@@ -1757,7 +1816,11 @@ async def generate_ai_reply(
                         touched_units=touched_units,
                     )
                 messages.append(
-                    {"role": "tool", "tool_call_id": call.get("id"), "content": json.dumps(result, ensure_ascii=False)}
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "content": _safe_tool_result_json(result),
+                    }
                 )
                 continue
 
@@ -1789,18 +1852,29 @@ async def generate_ai_reply(
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": json.dumps(result, ensure_ascii=False),
+                    "content": _safe_tool_result_json(result),
                 }
             )
 
-        assistant_message = await chat_completion(
-            provider=config.llm_provider,
-            model=config.llm_model,
-            api_key=api_key,
-            messages=messages,
-            temperature=config.temperature,
-            tools=tool_defs,
-        )
+        try:
+            assistant_message = await chat_completion(
+                provider=config.llm_provider,
+                model=config.llm_model,
+                api_key=api_key,
+                messages=messages,
+                temperature=config.temperature,
+                tools=tool_defs,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "OpenAI falhou no loop de ferramentas da conversa %s",
+                conversation.id,
+            )
+            return (
+                "Desculpe, tive uma dificuldade técnica momentânea. Pode repetir sua pergunta? 🙏",
+                deferred_end_call,
+                bool(touched_units),
+            )
 
     final_text = assistant_message.get("content") or ""
     await _auto_send_plan_images(
@@ -1967,9 +2041,25 @@ async def reply_to_pending_messages(
         return None
 
     combined_text = "\n".join(pending_texts)
-    reply, deferred_end_call, delivered_via_tools = await generate_ai_reply(
-        db, conversation, combined_text
-    )
+    outbound_before = await _count_ai_messages(db, conversation.id)
+    deferred_end_call: tuple[Tool, dict] | None = None
+    delivered_via_tools = False
+    try:
+        reply, deferred_end_call, delivered_via_tools = await generate_ai_reply(
+            db, conversation, combined_text
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Exceção ao gerar resposta da conversa %s (pendente: %r)",
+            conversation_id,
+            combined_text[:300],
+        )
+        reply = None
+
+    outbound_after = await _count_ai_messages(db, conversation.id)
+    if outbound_after > outbound_before:
+        delivered_via_tools = True
+
     if not reply:
         if deferred_end_call:
             # A IA decidiu encerrar mas não escreveu nenhum texto de
@@ -1986,7 +2076,16 @@ async def reply_to_pending_messages(
                 await execute_tool(db, end_tool, end_arguments, conversation)
             return ""
         else:
-            return None
+            logger.error(
+                "Resposta vazia da IA na conversa %s — cliente ficaria sem resposta. "
+                "Pendente: %r",
+                conversation_id,
+                combined_text[:300],
+            )
+            reply = (
+                "Desculpe, não consegui processar sua mensagem agora. "
+                "Pode reformular ou repetir a pergunta? 🙏"
+            )
 
     settings = get_settings()
     bubbles = split_into_bubbles(reply, settings.ai_bubble_max_chars)

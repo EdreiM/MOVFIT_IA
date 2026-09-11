@@ -4,18 +4,20 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
+from app.models import Message, Tool
 from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
+    _history_text_for_llm,
     _is_guest_info_question,
     _is_valid_openai_tool,
     _plan_flow_active,
+    _safe_tool_result_json,
     _student_operational_action,
     _tool_to_openai_schema,
     _wants_plan_info,
     _wants_student_action,
 )
-from app.models import Tool
 
 
 def test_wants_plan_info_from_recent_customer_message():
@@ -45,6 +47,27 @@ def test_guest_info_question_is_not_operational_student_action():
 def test_counting_guests_is_operational():
     assert _is_guest_info_question("Quantos convidados posso levar esse mês?") is False
     assert _student_operational_action("Quantos convidados posso levar esse mês?") is True
+
+
+def test_history_compacts_long_plan_captions():
+    long_caption = "🏋️ *PLANO ANUAL PARCELADO*\n\n" + ("benefício " * 200)
+    msg = Message(
+        conversation_id=__import__("uuid").uuid4(),
+        company_id=__import__("uuid").uuid4(),
+        direction="outbound",
+        actor="ai",
+        content_type="text",
+        text=long_caption,
+    )
+    compact = _history_text_for_llm(msg)
+    assert compact is not None
+    assert len(compact) < 200
+    assert "já enviada" in compact
+
+
+def test_safe_tool_result_json_handles_non_serializable():
+    raw = _safe_tool_result_json({"sucesso": True, "quando": __import__("datetime").datetime.now()})
+    assert "sucesso" in raw
 
 
 @pytest.mark.asyncio
