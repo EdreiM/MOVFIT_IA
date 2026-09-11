@@ -630,18 +630,35 @@ def _text_has_non_plan_topic(text: str) -> bool:
     return bool(_normalize_tokens(text) & _NON_PLAN_TOPIC_KEYWORDS)
 
 
-def _wants_student_action(text: str, recent_customer_texts: list[str] | None = None) -> bool:
-    """Verdadeiro quando o assunto é ação de aluno (parcela, convidados etc.)."""
-    for chunk in [text, *(recent_customer_texts or [])]:
-        if chunk and _normalize_tokens(chunk) & _STUDENT_ACTION_KEYWORDS:
-            # "matricula" sozinha pode ser lead novo — exige contexto de aluno.
-            tokens = _normalize_tokens(chunk)
-            if tokens & {"parcela", "parcelas", "atrasad", "atraso", "inadimpl", "convidado", "convidados", "convite", "convites"}:
-                return True
-            if "matricula" in tokens or "matriculado" in tokens or "aluno" in tokens:
-                if tokens & {"minha", "meu", "minhas", "meus", "atrasad", "atraso", "cancelar", "pagar"}:
-                    return True
+def _is_guest_info_question(text: str) -> bool:
+    """Dúvida informativa sobre convidados — RAG/explicação, não ferramenta ainda."""
+    tokens = _normalize_tokens(text)
+    if not tokens & {"convidado", "convidados", "convite", "convites"}:
+        return False
+    # "quantos convidados posso levar?" é operacional (consultar limite no sistema).
+    if tokens & {"quantos", "quantas", "restante", "restantes", "limite", "saldo", "usei", "utilizei"}:
+        return False
+    return True
+
+
+def _student_operational_action(text: str) -> bool:
+    """Ação de aluno que exige CPF/unidade/ferramenta — só a mensagem ATUAL."""
+    if not text or _is_guest_info_question(text):
+        return False
+    tokens = _normalize_tokens(text)
+    if tokens & {"parcela", "parcelas", "atrasad", "atraso", "inadimpl", "boleto", "boletos"}:
+        return True
+    if tokens & {"convidado", "convidados", "convite", "convites"}:
+        return True
+    if "matricula" in tokens or "matriculado" in tokens or "aluno" in tokens:
+        if tokens & {"minha", "meu", "minhas", "meus", "atrasad", "atraso", "cancelar", "pagar"}:
+            return True
     return False
+
+
+def _wants_student_action(text: str, recent_customer_texts: list[str] | None = None) -> bool:
+    """Alias mantido pros testes — olha só a mensagem atual."""
+    return _student_operational_action(text)
 
 
 def _plan_flow_active(text: str, recent_customer_texts: list[str] | None = None) -> bool:
@@ -1208,7 +1225,17 @@ async def generate_ai_reply(
     is_first_contact = not any(m.actor in {"ai", "human_agent"} for m in history)
     recent_customer_texts = [m.text for m in history if m.actor == "customer" and m.text]
     plan_intent_active = _plan_flow_active(user_text, recent_customer_texts)
-    student_action_active = _wants_student_action(user_text, recent_customer_texts)
+    student_operational = _student_operational_action(user_text)
+    guest_info_question = _is_guest_info_question(user_text)
+
+    lead_result = await db.execute(
+        select(Lead).where(
+            Lead.company_id == conversation.company_id,
+            Lead.phone == sanitize_phone_digits(conversation.contact_phone),
+        )
+    )
+    lead = lead_result.scalar_one_or_none()
+    confirmed_student = bool(lead and (lead.is_student or lead.unit))
 
     # Resolve ferramentas cedo — o prompt de unidade muda se
     # verificar_unidade_por_cpf estiver ativa nesta integração.
@@ -1448,15 +1475,32 @@ async def generate_ai_reply(
                 ),
             }
         )
-    if has_verify_unit_tool and student_action_active and not (lead and lead.unit):
+    if guest_info_question and not confirmed_student:
         messages.append(
             {
                 "role": "system",
                 "content": (
-                    "NESTE TURNO o cliente pediu algo de ALUNO (ex: parcelas, convidados). "
-                    "Com verificar_unidade_por_cpf disponível, NÃO peça em qual unidade ele está "
-                    "matriculado — peça SOMENTE o CPF se ainda não tiver, chame a ferramenta, e "
-                    "só então use a ferramenta específica do pedido dele."
+                    "O cliente perguntou sobre convidados de forma geral (ainda não confirmado "
+                    "como aluno). Responda com a política/regras da base de conhecimento (RAG) — "
+                    "como funciona levar convidados, limites gerais se estiverem lá, etc. "
+                    "Também pergunte se ele já é aluno matriculado; se disser que sim e quiser "
+                    "saber quantos convites ainda tem no mês, aí peça SOMENTE o CPF e use as "
+                    "ferramentas de aluno. NUNCA fique sem responder — sempre mande texto pro "
+                    "cliente neste turno."
+                ),
+            }
+        )
+    elif has_verify_unit_tool and student_operational and not confirmed_student:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "NESTE TURNO o cliente pediu uma AÇÃO de aluno no sistema (ex: parcelas "
+                    "atrasadas, consultar convites do mês). Com verificar_unidade_por_cpf "
+                    "disponível, NÃO peça em qual unidade ele está matriculado — peça SOMENTE "
+                    "o CPF se ainda não tiver, chame a ferramenta, e só então use a ferramenta "
+                    "específica do pedido. Sempre responda com texto — nunca deixe o cliente "
+                    "sem resposta."
                 ),
             }
         )
@@ -1509,13 +1553,6 @@ async def generate_ai_reply(
                 ),
             }
         )
-    lead_result = await db.execute(
-        select(Lead).where(
-            Lead.company_id == conversation.company_id,
-            Lead.phone == sanitize_phone_digits(conversation.contact_phone),
-        )
-    )
-    lead = lead_result.scalar_one_or_none()
     known_fields = []
     if lead:
         if lead.name:

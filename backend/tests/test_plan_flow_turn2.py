@@ -6,8 +6,11 @@ import pytest_asyncio
 
 from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
+    TOOL_KEY_VERIFY_UNIT_BY_CPF,
+    _is_guest_info_question,
     _is_valid_openai_tool,
     _plan_flow_active,
+    _student_operational_action,
     _tool_to_openai_schema,
     _wants_plan_info,
     _wants_student_action,
@@ -32,6 +35,68 @@ def test_plan_flow_not_active_when_topic_changes_to_hours():
 
 def test_student_action_detects_overdue_installments():
     assert _wants_student_action("Quero ver as parcelas atrasadas") is True
+
+
+def test_guest_info_question_is_not_operational_student_action():
+    assert _is_guest_info_question("Entendi, e para levar convidados?") is True
+    assert _student_operational_action("Entendi, e para levar convidados?") is False
+
+
+def test_counting_guests_is_operational():
+    assert _is_guest_info_question("Quantos convidados posso levar esse mês?") is False
+    assert _student_operational_action("Quantos convidados posso levar esse mês?") is True
+
+
+@pytest.mark.asyncio
+async def test_generate_ai_reply_does_not_crash_on_guest_info_with_verify_tool(
+    db_session, company
+):
+    """Regressão: lead era usado antes de existir → NameError silencioso no debounce."""
+    from app.models import AiConfig, Conversation, Tool
+    from app.security import encrypt_secret
+    from app.services.message_flow import generate_ai_reply
+
+    config = AiConfig(
+        company_id=company.id,
+        ai_name="Mônica",
+        llm_api_key_encrypted=encrypt_secret("sk-test"),
+    )
+    db_session.add(config)
+    await db_session.flush()
+    tool = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Verificar unidade",
+        tool_key=TOOL_KEY_VERIFY_UNIT_BY_CPF,
+        description="Descobre unidade",
+        parameters=[{"name": "cpf", "type": "string", "required": True}],
+        webhook_url="https://example.com/hook",
+        is_active=True,
+    )
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5593999887766",
+        channel="test_console",
+        status="open",
+        ai_enabled=True,
+    )
+    db_session.add_all([tool, conv])
+    await db_session.commit()
+
+    with patch(
+        "app.services.message_flow.fetch_rag_context",
+        new_callable=AsyncMock,
+        return_value="Convidados: alunos podem levar até 4 convidados por mês.",
+    ), patch(
+        "app.services.message_flow.chat_completion",
+        new_callable=AsyncMock,
+        return_value={"content": "Você pode levar convidados! Já é aluno?", "tool_calls": None},
+    ):
+        reply, _, _ = await generate_ai_reply(
+            db_session, conv, "Entendi, e para levar convidados?"
+        )
+
+    assert reply == "Você pode levar convidados! Já é aluno?"
 
 
 def test_invalid_tool_key_is_filtered_from_openai_schema():
