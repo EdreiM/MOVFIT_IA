@@ -70,6 +70,37 @@ async def test_verify_unit_persists_unidade_and_is_student(db_session, company, 
 
 
 @pytest.mark.asyncio
+async def test_verify_unit_persists_nome_from_dados(db_session, company, conversation_with_tool):
+    conv, tool = conversation_with_tool
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "sucesso": True,
+        "mensagem": "Aluno encontrado.",
+        "dados": {
+            "cpf": "12345678900",
+            "unidade": "Santarém - 24 horas",
+            "nome": "MARIA SILVA SANTOS",
+        },
+    }
+
+    with patch("app.services.message_flow.httpx.AsyncClient") as client_cls:
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.post = AsyncMock(return_value=mock_resp)
+        client_cls.return_value = client
+
+        await execute_tool(db_session, tool, {"cpf": "12345678900"}, conv)
+        await db_session.commit()
+
+    phone = sanitize_phone_digits(conv.contact_phone)
+    lead = (
+        await db_session.execute(select(Lead).where(Lead.company_id == company.id, Lead.phone == phone))
+    ).scalar_one()
+    assert lead.name == "MARIA SILVA SANTOS"
+
+
+@pytest.mark.asyncio
 async def test_verify_unit_failure_does_not_set_unit(db_session, company, conversation_with_tool):
     conv, tool = conversation_with_tool
     mock_resp = MagicMock()

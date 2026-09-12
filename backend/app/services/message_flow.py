@@ -871,6 +871,57 @@ def _extract_schedule_date_from_text(text: str, reference: datetime) -> str | No
     return target.strftime("%Y%m%d")
 
 
+def _parse_schedule_date_yyyyMMdd(schedule_date: str) -> date | None:
+    if not schedule_date or len(schedule_date) != 8:
+        return None
+    try:
+        return date(int(schedule_date[0:4]), int(schedule_date[4:6]), int(schedule_date[6:8]))
+    except ValueError:
+        return None
+
+
+def _format_schedule_date_br(schedule_date: str) -> str:
+    parsed = _parse_schedule_date_yyyyMMdd(schedule_date)
+    if not parsed:
+        return schedule_date
+    return parsed.strftime("%d/%m/%Y")
+
+
+def _schedule_date_is_weekend(schedule_date: str) -> bool:
+    parsed = _parse_schedule_date_yyyyMMdd(schedule_date)
+    return parsed is not None and parsed.weekday() >= 5
+
+
+def _lead_first_name(lead: Lead | None) -> str | None:
+    if not lead or not lead.name:
+        return None
+    first = lead.name.strip().split()[0]
+    return first or None
+
+
+def _physical_eval_ask_day_reply(unit: str, lead: Lead | None) -> str:
+    first = _lead_first_name(lead)
+    prefix = f"{first}, encontrei" if first else "Encontrei"
+    return (
+        f"{prefix} sua matrícula na unidade *{unit}*! 😊 "
+        "Para consultar horários de *avaliação física*, qual *dia útil* "
+        "(segunda a sexta) você prefere? "
+        "Pode mandar tipo *amanhã*, *15/09* ou *sexta*."
+    )
+
+
+def _physical_eval_weekend_reply(schedule_date: str, lead: Lead | None) -> str:
+    first = _lead_first_name(lead)
+    data_fmt = _format_schedule_date_br(schedule_date)
+    greeting = f"{first}, " if first else ""
+    return (
+        f"{greeting}a avaliação física acontece só de *segunda a sexta*, tá? 😊 "
+        f"No dia *{data_fmt}* (fim de semana) não tem agendamento. "
+        "Me manda um dia útil que funcione pra você — por exemplo *segunda* ou uma data "
+        "de segunda a sexta."
+    )
+
+
 _CUSTOMER_TRANSFER_ON_TOOL_FAILURE = (
     "No momento não tenho acesso a essa informação por aqui. "
     "Vou te encaminhar para um atendente que pode te ajudar melhor com isso. 😊"
@@ -1421,11 +1472,10 @@ async def _run_physical_eval_pipeline(
 
     schedule_date = _extract_schedule_date_from_text(user_text, brazil_now)
     if not schedule_date:
-        return (
-            f"Encontrei sua matrícula na unidade *{unit}*! 😊 "
-            "Para consultar os horários de *avaliação física*, qual *dia* você prefere? "
-            "Pode mandar tipo *amanhã*, *15/09* ou *segunda*."
-        ), lead
+        return _physical_eval_ask_day_reply(unit, lead), lead
+
+    if _schedule_date_is_weekend(schedule_date):
+        return _physical_eval_weekend_reply(schedule_date, lead), lead
 
     declared_params = {
         p.get("name")
@@ -2423,10 +2473,13 @@ async def generate_ai_reply(
                 "content": (
                     "NESTE TURNO o cliente quer agendar/consultar horários de AVALIAÇÃO FÍSICA. "
                     "Fluxo: (1) peça SOMENTE o CPF se ainda não tiver; (2) chame "
-                    "verificar_unidade_por_cpf — NÃO peça a unidade; (3) peça o dia desejado; "
+                    "verificar_unidade_por_cpf — NÃO peça a unidade (use dados.nome se vier); "
+                    "(3) peça um dia ÚTIL (segunda a sexta) — avaliação física NÃO acontece "
+                    "sábado nem domingo; se pedirem fim de semana, avise com gentileza; "
                     "(4) chame consultar_agendamento_horarios com unidade + data (yyyyMMdd). "
                     "Apresente os horários livres e pergunte qual prefere — NÃO confirme agendamento "
-                    "neste fluxo (só consulta disponibilidade)."
+                    "neste fluxo (só consulta disponibilidade). Use o primeiro nome do cliente "
+                    "quando souber (cadastro ou dados.nome da verificação por CPF)."
                 ),
             }
         )

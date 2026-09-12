@@ -11,7 +11,9 @@ from app.services.message_flow import (
     _format_schedule_reply_from_dados,
     _is_physical_eval_intent,
     _physical_eval_followup,
+    _physical_eval_weekend_reply,
     _run_physical_eval_pipeline,
+    _schedule_date_is_weekend,
 )
 
 
@@ -26,6 +28,21 @@ def test_extract_schedule_date_formats():
     assert _extract_schedule_date_from_text("20260915", ref) == "20260915"
     assert _extract_schedule_date_from_text("15/09/2026", ref) == "20260915"
     assert _extract_schedule_date_from_text("amanhã", ref) == "20260912"
+
+
+def test_weekend_detection():
+    assert _schedule_date_is_weekend("20260912") is True  # sábado
+    assert _schedule_date_is_weekend("20260913") is True  # domingo
+    assert _schedule_date_is_weekend("20260915") is False  # terça
+
+
+def test_weekend_reply_uses_first_name():
+    from app.models import Lead
+
+    lead = Lead(company_id=__import__("uuid").uuid4(), phone="559999", name="MARIA SILVA")
+    reply = _physical_eval_weekend_reply("20260913", lead)
+    assert "MARIA" in reply
+    assert "segunda a sexta" in reply.lower() or "segunda" in reply.lower()
 
 
 def test_physical_eval_followup_after_intent():
@@ -276,3 +293,79 @@ async def test_physical_eval_pipeline_calls_schedule_tool(db_session, company):
         "data": "20260915",
     }
     assert reply == "No dia 15/09 tem 09:00 e 11:00 livres. Qual prefere?"
+
+
+@pytest.mark.asyncio
+async def test_physical_eval_pipeline_rejects_weekend(db_session, company):
+    from app.models import AiConfig, Conversation, Lead, Tool
+    from app.security import encrypt_secret
+
+    config = AiConfig(
+        company_id=company.id,
+        ai_name="Mônica",
+        llm_api_key_encrypted=encrypt_secret("sk-test"),
+    )
+    db_session.add(config)
+    await db_session.flush()
+    verify = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Verificar unidade",
+        tool_key=TOOL_KEY_VERIFY_UNIT_BY_CPF,
+        description="Descobre unidade",
+        parameters=[{"name": "cpf", "type": "string", "required": True}],
+        webhook_url="https://example.com/verify",
+        is_active=True,
+    )
+    schedule = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Consulta horários",
+        tool_key=TOOL_KEY_CHECK_SCHEDULE,
+        description="Consulta horários",
+        parameters=[
+            {"name": "unidade", "type": "string", "required": True},
+            {"name": "data", "type": "string", "required": True},
+        ],
+        webhook_url="https://example.com/schedule",
+        is_active=True,
+    )
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5593999887766",
+        channel="whatsapp",
+        status="open",
+        ai_enabled=True,
+    )
+    lead = Lead(
+        company_id=company.id,
+        phone="5593999887766",
+        cpf="52998224725",
+        unit="Santarém - 24 horas",
+        is_student=True,
+    )
+    db_session.add_all([verify, schedule, conv, lead])
+    await db_session.commit()
+
+    tools_by_key = {verify.tool_key: verify, schedule.tool_key: schedule}
+
+    with patch(
+        "app.services.message_flow.execute_tool",
+        new_callable=AsyncMock,
+    ) as execute_mock:
+        reply, _ = await _run_physical_eval_pipeline(
+            db_session,
+            conv,
+            "sábado",
+            tools_by_key,
+            lead,
+            config=config,
+            is_first_contact=False,
+            ai_name="Mônica",
+            recent_customer_texts=["Quero agendar avaliação física"],
+        )
+
+    execute_mock.assert_not_awaited()
+    assert reply is not None
+    assert "segunda" in reply.lower()
+    assert "sexta" in reply.lower()
