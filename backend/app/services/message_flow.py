@@ -364,6 +364,8 @@ TOOL_KEY_SEND_PLAN_IMAGES = "enviar_imagens_planos"
 # marca is_student — pra próximas tools (parcela, convidados etc.) não
 # precisarem perguntar a unidade de novo. NÃO usar pra quem só pede planos.
 TOOL_KEY_VERIFY_UNIT_BY_CPF = "verificar_unidade_por_cpf"
+# Consulta horários livres para avaliação física (n8n/Pacto) — só lista, não confirma.
+TOOL_KEY_CHECK_SCHEDULE = "consultar_agendamento_horarios"
 # Opcional — só existe pra empresas cuja plataforma (ex: WTS/GYMBOT) permite
 # consultar se a sessão do cliente ainda está pendente. Usada só
 # internamente pelo follow-up (app/services/followup.py) antes de mandar
@@ -673,6 +675,7 @@ _NON_PLAN_TOPIC_KEYWORDS = {
     "convidado", "convidados", "convite", "convites", "acesso", "entrada",
     "cancelar", "cancelamento", "trancar", "trancamento", "congelar",
     "carne", "carnê", "multa", "pagar", "pagamento",
+    "agendar", "agendamento", "avaliacao", "avaliacoes",
 }
 
 _STUDENT_ACTION_KEYWORDS = {
@@ -758,14 +761,114 @@ _INTERNAL_OR_GENERIC_TOOL_KEYS = frozenset(
         TOOL_KEY_SEND_PLAN_IMAGES,
         TOOL_KEY_CHECK_SESSION,
         TOOL_KEY_SAVE_LEAD_DATA,
+        TOOL_KEY_CHECK_SCHEDULE,
     }
 )
+
+_PHYSICAL_EVAL_KEYWORDS = {"avaliacao", "avaliacoes", "agendar", "agendamento", "marcar", "marca"}
+_PHYSICAL_EVAL_BODY_KEYWORDS = {"fisica", "fisico", "fisicas", "fisicos"}
+_DATE_YYYYMMDD_RE = re.compile(r"\b(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b")
+_DATE_DMY_RE = re.compile(
+    r"\b(0?[1-9]|[12]\d|3[01])[/.-](0?[1-9]|1[0-2])(?:[/.-]((?:20)?\d{2}))?\b"
+)
+_WEEKDAY_TO_INDEX = {
+    "segunda": 0,
+    "terca": 1,
+    "quarta": 2,
+    "quinta": 3,
+    "sexta": 4,
+    "sabado": 5,
+    "domingo": 6,
+}
 
 
 def _extract_cpf_from_text(text: str) -> str | None:
     for match in _CPF_IN_TEXT_RE.finditer(text or ""):
         return _sanitize_cpf(match.group(1))
     return None
+
+
+def _is_physical_eval_intent(text: str) -> bool:
+    """Cliente quer agendar/consultar horários de avaliação física."""
+    tokens = _normalize_tokens(text)
+    if not tokens & _PHYSICAL_EVAL_KEYWORDS:
+        return False
+    if tokens & _PHYSICAL_EVAL_BODY_KEYWORDS:
+        return True
+    if "avaliacao" in tokens and tokens & {"agendar", "agendamento", "marcar", "marca", "quero", "preciso", "gostaria"}:
+        return True
+    if tokens & {"agendar", "agendamento", "marcar"} and "avaliacao" in tokens:
+        return True
+    return False
+
+
+def _physical_eval_in_recent(recent_customer_texts: list[str] | None) -> bool:
+    prior = [t for t in (recent_customer_texts or []) if t and t.strip()]
+    return any(_is_physical_eval_intent(t) for t in prior[-8:])
+
+
+def _physical_eval_followup(
+    text: str,
+    recent_customer_texts: list[str] | None,
+    lead: Lead | None = None,
+) -> bool:
+    """CPF ou data depois que o cliente pediu avaliação física."""
+    if _is_physical_eval_intent(text):
+        return False
+    if not _physical_eval_in_recent(recent_customer_texts):
+        return False
+    if _extract_cpf_from_text(text):
+        return True
+    brazil_now = datetime.now(timezone(timedelta(hours=-3)))
+    return _extract_schedule_date_from_text(text, brazil_now) is not None
+
+
+def _extract_schedule_date_from_text(text: str, reference: datetime) -> str | None:
+    """Converte data natural ou yyyyMMdd/dd/mm para yyyyMMdd."""
+    if not text:
+        return None
+    raw = text.strip()
+    digits_only = re.sub(r"\D", "", raw)
+    if len(digits_only) == 8 and digits_only.startswith("20"):
+        return digits_only
+
+    match = _DATE_YYYYMMDD_RE.search(raw)
+    if match:
+        return f"{match.group(1)}{match.group(2)}{match.group(3)}"
+
+    match = _DATE_DMY_RE.search(raw)
+    if match:
+        day, month, year = match.group(1), match.group(2), match.group(3)
+        if year:
+            if len(year) == 2:
+                year = f"20{year}"
+        else:
+            year = str(reference.year)
+        return f"{year}{month.zfill(2)}{day.zfill(2)}"
+
+    tokens = _normalize_tokens(raw)
+    ref_date = reference.date()
+
+    if "hoje" in tokens:
+        target = ref_date
+    elif "amanha" in tokens:
+        target = ref_date + timedelta(days=1)
+    elif ("depois" in tokens and "amanha" in tokens) or "depoisdeamanha" in tokens:
+        target = ref_date + timedelta(days=2)
+    else:
+        target = None
+        for name, weekday in _WEEKDAY_TO_INDEX.items():
+            if name not in tokens:
+                continue
+            days_ahead = (weekday - ref_date.weekday()) % 7
+            if days_ahead == 0 or "proxima" in tokens or "proximo" in tokens:
+                days_ahead = 7 if days_ahead == 0 else days_ahead
+            target = ref_date + timedelta(days=days_ahead)
+            break
+        if target is None:
+            return None
+
+    return target.strftime("%Y%m%d")
 
 
 _CUSTOMER_TRANSFER_ON_TOOL_FAILURE = (
@@ -864,6 +967,13 @@ def _is_guest_tool(tool: Tool) -> bool:
     return bool(haystack & {"convidado", "convidados", "convite", "convites", "guest"})
 
 
+def _is_schedule_tool(tool: Tool) -> bool:
+    if tool.tool_key == TOOL_KEY_CHECK_SCHEDULE:
+        return True
+    haystack = _normalize_tokens(f"{tool.tool_key} {tool.name or ''}")
+    return bool(haystack & {"agendamento", "agendar", "horarios", "horario", "schedule"})
+
+
 def _guest_names_from_dados(dados: dict) -> list[str]:
     raw = dados.get("convidados_do_mes") or dados.get("convidados") or []
     names: list[str] = []
@@ -946,11 +1056,36 @@ def _tool_facts_for_llm(result: dict, tool: Tool) -> dict:
     dados = result.get("dados")
     if isinstance(dados, dict) and dados:
         payload["dados"] = dados
-    if not _is_guest_tool(tool):
+    if not _is_guest_tool(tool) and not _is_schedule_tool(tool):
         msg = str(result.get("mensagem") or "").strip()
         if msg and "cliente usou" not in _normalize_text(msg):
             payload["resumo_sistema"] = msg
     return payload
+
+
+def _format_schedule_reply_from_dados(dados: dict) -> str:
+    """Fallback humano para horários de avaliação física."""
+    horarios = dados.get("horarios_disponiveis") or []
+    data_fmt = dados.get("data_formatada") or dados.get("data") or "esse dia"
+    unidade = dados.get("unidade") or "sua unidade"
+    tipo = dados.get("tipo_agendamento") or "avaliação física"
+
+    if not horarios:
+        return (
+            f"Consultei aqui! 😊 No dia *{data_fmt}*, na unidade *{unidade}*, "
+            f"não encontrei horários livres para *{tipo}*. Quer tentar outro dia?"
+        )
+
+    shown = horarios[:12]
+    lista = ", ".join(f"*{h}*" for h in shown)
+    extra = ""
+    if len(horarios) > len(shown):
+        extra = f" (e mais {len(horarios) - len(shown)} horários)"
+    return (
+        f"Consultei aqui! 😊 No dia *{data_fmt}*, na *{unidade}*, "
+        f"estes horários estão livres para *{tipo}*: {lista}{extra}. "
+        "Qual prefere?"
+    )
 
 
 async def _humanize_tool_reply_with_llm(
@@ -984,6 +1119,12 @@ async def _humanize_tool_reply_with_llm(
         )
     if who_question and _is_guest_tool(tool):
         system += "\nO cliente quer saber QUEM já levou — foque nos nomes em convidados_do_mes."
+    if _is_schedule_tool(tool):
+        system += (
+            "\nAssunto: horários livres para avaliação física. Informe a data, a unidade "
+            "e liste os horários de horarios_disponiveis de forma clara. "
+            "Pergunte qual horário prefere — NÃO diga que já agendou."
+        )
     if first_name:
         system += f"\nPode chamar o cliente de {first_name}."
 
@@ -1017,6 +1158,8 @@ async def _humanize_tool_reply_with_llm(
 
     if _is_guest_tool(tool) and isinstance(facts.get("dados"), dict):
         return _format_guest_reply_from_dados(facts["dados"], who_question=who_question)
+    if _is_schedule_tool(tool) and isinstance(facts.get("dados"), dict):
+        return _format_schedule_reply_from_dados(facts["dados"])
     fallback = _format_tool_result_as_reply(tool_result)
     if fallback and "cliente" not in _normalize_text(fallback):
         return fallback
@@ -1098,6 +1241,8 @@ def _student_operational_followup(
     lead: Lead | None = None,
 ) -> bool:
     """CPF ou confirmação de aluno depois de dúvida operacional ou informativa."""
+    if _physical_eval_in_recent(recent_customer_texts):
+        return False
     prior = [t for t in (recent_customer_texts or []) if t and t.strip() != (text or "").strip()]
     if _confirms_is_student(text) and any(_is_guest_info_question(t, lead) for t in prior[-5:]):
         return True
@@ -1207,6 +1352,114 @@ async def _run_student_operational_pipeline(
         reply = await _transfer_and_notify_tool_failure(
             db, conversation, tools_by_key, f"ferramenta {op_tool.tool_key} falhou"
         )
+    return reply, lead
+
+
+async def _run_physical_eval_pipeline(
+    db: AsyncSession,
+    conversation: Conversation,
+    user_text: str,
+    tools_by_key: dict[str, Tool],
+    lead: Lead | None,
+    *,
+    config: AiConfig,
+    is_first_contact: bool,
+    ai_name: str,
+    recent_customer_texts: list[str] | None = None,
+) -> tuple[str | None, Lead | None]:
+    """Avaliação física: CPF → verificar_unidade_por_cpf → dia → consultar horários."""
+    verify_tool = tools_by_key.get(TOOL_KEY_VERIFY_UNIT_BY_CPF)
+    schedule_tool = tools_by_key.get(TOOL_KEY_CHECK_SCHEDULE)
+    if not verify_tool or not schedule_tool:
+        return None, lead
+
+    brazil_now = datetime.now(timezone(timedelta(hours=-3)))
+
+    cpf = (lead.cpf if lead and lead.cpf else None) or _extract_cpf_from_text(user_text)
+    if cpf and (not lead or not lead.cpf):
+        lead = await _upsert_lead(
+            db, conversation.company_id, conversation.contact_phone, {"cpf": cpf}
+        ) or lead
+
+    if not cpf:
+        intro = (
+            f"Olá! Eu sou a {ai_name}, assistente virtual da Mov Fit. "
+            if is_first_contact
+            else ""
+        )
+        return (
+            f"{intro}Para agendar sua *avaliação física*, preciso do seu *CPF* "
+            "(só os números). Pode me enviar? 😊"
+        ), lead
+
+    unit = lead.unit if lead else None
+    if not unit:
+        verify_result = await execute_tool(db, verify_tool, {"cpf": cpf}, conversation)
+        if not verify_result.get("sucesso"):
+            reply = _format_tool_result_as_reply(verify_result)
+            if reply is None:
+                reply = await _transfer_and_notify_tool_failure(
+                    db, conversation, tools_by_key, "verificar_unidade_por_cpf falhou"
+                )
+            return reply, lead
+        lead_result = await db.execute(
+            select(Lead).where(
+                Lead.company_id == conversation.company_id,
+                Lead.phone == sanitize_phone_digits(conversation.contact_phone),
+            )
+        )
+        lead = lead_result.scalar_one_or_none() or lead
+        unit = lead.unit if lead else None
+        dados = verify_result.get("dados")
+        if not unit and isinstance(dados, dict):
+            unit = dados.get("unidade")
+        if not unit:
+            return (
+                "Não encontrei matrícula ativa com esse CPF. "
+                "Confere se digitou certinho ou quer falar com um atendente?"
+            ), lead
+
+    schedule_date = _extract_schedule_date_from_text(user_text, brazil_now)
+    if not schedule_date:
+        return (
+            f"Encontrei sua matrícula na unidade *{unit}*! 😊 "
+            "Para consultar os horários de *avaliação física*, qual *dia* você prefere? "
+            "Pode mandar tipo *amanhã*, *15/09* ou *segunda*."
+        ), lead
+
+    declared_params = {
+        p.get("name")
+        for p in (schedule_tool.parameters or [])
+        if isinstance(p, dict) and p.get("name")
+    }
+    args: dict = {}
+    if "unidade" in declared_params:
+        args["unidade"] = unit
+    if "Unidade" in declared_params:
+        args["Unidade"] = unit
+    if "data" in declared_params:
+        args["data"] = schedule_date
+    if "dia" in declared_params:
+        args["dia"] = schedule_date
+
+    schedule_result = await execute_tool(db, schedule_tool, args, conversation)
+    if schedule_result.get("sucesso"):
+        reply = await _humanize_tool_reply_with_llm(
+            config,
+            user_text,
+            schedule_result,
+            schedule_tool,
+            lead,
+        )
+    else:
+        reply = _format_tool_result_as_reply(schedule_result)
+        if reply is None:
+            reply = await _transfer_and_notify_tool_failure(
+                db,
+                conversation,
+                tools_by_key,
+                f"ferramenta {schedule_tool.tool_key} falhou",
+            )
     return reply, lead
 
 
@@ -1343,6 +1596,12 @@ def _tool_to_openai_schema(tool: Tool) -> dict:
             "pelo CPF. NÃO chame quando o cliente só quiser planos/preços/matrícula de lead novo: "
             "nesse caso pergunte de qual unidade ele quer saber os planos. Depois do sucesso, use "
             "dados.unidade nas próximas ferramentas sem perguntar de novo."
+        )
+    elif tool.tool_key == TOOL_KEY_CHECK_SCHEDULE:
+        description = (
+            description + " NÃO chame direto sem CPF e unidade do aluno — o fluxo correto é: "
+            "pedir CPF, usar verificar_unidade_por_cpf, pedir o dia, então chamar esta ferramenta "
+            "com unidade (nome exato) e data (yyyyMMdd). Só LISTA horários — não confirma agendamento."
         )
     elif tool.tool_key == TOOL_KEY_TRANSFER:
         description = (
@@ -1850,6 +2109,31 @@ async def generate_ai_reply(
     ai_name = config.ai_name or "assistente virtual"
 
     guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
+    physical_eval_intent = _is_physical_eval_intent(user_text)
+    physical_eval_active = (
+        has_verify_unit_tool
+        and TOOL_KEY_CHECK_SCHEDULE in tools_by_key
+        and not plan_intent_active
+        and (
+            physical_eval_intent
+            or _physical_eval_followup(user_text, recent_customer_texts, lead)
+        )
+    )
+    if physical_eval_active:
+        pipeline_reply, lead = await _run_physical_eval_pipeline(
+            db,
+            conversation,
+            user_text,
+            tools_by_key,
+            lead,
+            config=config,
+            is_first_contact=is_first_contact,
+            ai_name=ai_name,
+            recent_customer_texts=recent_customer_texts,
+        )
+        if pipeline_reply is not None:
+            return pipeline_reply, None, False
+
     student_pipeline_active = has_verify_unit_tool and (
         ((student_operational or guest_who_followup) and not plan_intent_active)
         or _student_operational_followup(user_text, recent_customer_texts, lead)
@@ -2129,6 +2413,20 @@ async def generate_ai_reply(
                     "*já é aluno matriculado*. Só se confirmar que já é aluno e quiser "
                     "consultar quantos convites *dele* ainda tem no mês é que você pede "
                     "SOMENTE o CPF e usa as ferramentas. NUNCA fique sem responder."
+                ),
+            }
+        )
+    elif physical_eval_intent and has_verify_unit_tool:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "NESTE TURNO o cliente quer agendar/consultar horários de AVALIAÇÃO FÍSICA. "
+                    "Fluxo: (1) peça SOMENTE o CPF se ainda não tiver; (2) chame "
+                    "verificar_unidade_por_cpf — NÃO peça a unidade; (3) peça o dia desejado; "
+                    "(4) chame consultar_agendamento_horarios com unidade + data (yyyyMMdd). "
+                    "Apresente os horários livres e pergunte qual prefere — NÃO confirme agendamento "
+                    "neste fluxo (só consulta disponibilidade)."
                 ),
             }
         )
