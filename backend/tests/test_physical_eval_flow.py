@@ -7,10 +7,15 @@ import pytest
 from app.services.message_flow import (
     TOOL_KEY_CHECK_SCHEDULE,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
+    _enrich_schedule_result_with_preference,
     _extract_schedule_date_from_text,
+    _extract_schedule_period_from_text,
+    _extract_schedule_time_from_text,
+    _filter_horarios_by_preference,
     _format_schedule_reply_from_dados,
     _is_physical_eval_intent,
     _physical_eval_followup,
+    _physical_eval_schedule_preference,
     _physical_eval_weekend_reply,
     _run_physical_eval_pipeline,
     _schedule_date_is_weekend,
@@ -54,6 +59,65 @@ def test_physical_eval_followup_after_intent():
         "amanhã",
         ["Quero agendar avaliação física", "52998224725"],
     ) is True
+    assert _physical_eval_followup(
+        "então terça",
+        ["Quero agendar avaliação física", "52998224725", "segunda de manhã"],
+    ) is True
+
+
+def test_extract_period_and_time():
+    assert _extract_schedule_period_from_text("segunda de manhã") == "manha"
+    assert _extract_schedule_period_from_text("quarta à tarde") == "tarde"
+    assert _extract_schedule_time_from_text("terça 9 h") == "09:00"
+    assert _extract_schedule_time_from_text("às 14:30") == "14:30"
+
+
+def test_schedule_preference_inherits_period_from_context():
+    ref = datetime(2026, 9, 11, 10, 0, tzinfo=timezone(timedelta(hours=-3)))
+    pref = _physical_eval_schedule_preference(
+        "então terça",
+        ["Quero agendar avaliação física", "segunda de manhã"],
+        ref,
+    )
+    assert pref["date"] is not None
+    assert pref["period"] == "manha"
+
+
+def test_filter_morning_slots_and_missing_preferred():
+    horarios = ["08:00", "09:30", "11:00", "14:00", "16:00"]
+    filtered, meta = _filter_horarios_by_preference(
+        horarios, period="manha", preferred_time="09:00"
+    )
+    assert filtered == ["08:00", "09:30", "11:00"]
+    assert meta["horario_preferido_indisponivel"] == "09:00"
+
+
+def test_enrich_schedule_result_filters_afternoon():
+    raw = {
+        "sucesso": True,
+        "dados": {
+            "horarios_disponiveis": ["08:00", "09:00", "14:00", "15:00"],
+            "data_formatada": "15/09/2026",
+        },
+    }
+    enriched = _enrich_schedule_result_with_preference(
+        raw, period="tarde", preferred_time=None
+    )
+    assert enriched["dados"]["horarios_disponiveis"] == ["14:00", "15:00"]
+
+
+def test_schedule_reply_notes_unavailable_preferred_time():
+    reply = _format_schedule_reply_from_dados(
+        {
+            "data_formatada": "15/09/2026",
+            "unidade": "Santarém - 24 horas",
+            "periodo_solicitado_label": "manhã",
+            "horario_preferido_indisponivel": "09:00",
+            "horarios_disponiveis": ["08:00", "10:00"],
+        }
+    )
+    assert "09:00" in reply
+    assert "08:00" in reply
 
 
 def test_schedule_reply_from_dados():

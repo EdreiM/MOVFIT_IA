@@ -812,7 +812,7 @@ def _physical_eval_followup(
     recent_customer_texts: list[str] | None,
     lead: Lead | None = None,
 ) -> bool:
-    """CPF ou data depois que o cliente pediu avaliação física."""
+    """CPF, data, período ou horário depois que o cliente pediu avaliação física."""
     if _is_physical_eval_intent(text):
         return False
     if not _physical_eval_in_recent(recent_customer_texts):
@@ -820,7 +820,16 @@ def _physical_eval_followup(
     if _extract_cpf_from_text(text):
         return True
     brazil_now = datetime.now(timezone(timedelta(hours=-3)))
-    return _extract_schedule_date_from_text(text, brazil_now) is not None
+    if _extract_schedule_date_from_text(text, brazil_now):
+        return True
+    if _extract_schedule_period_from_text(text):
+        return True
+    if _extract_schedule_time_from_text(text):
+        return True
+    tokens = _normalize_tokens(text)
+    if tokens & set(_WEEKDAY_TO_INDEX) and len(tokens) <= 5:
+        return True
+    return False
 
 
 def _extract_schedule_date_from_text(text: str, reference: datetime) -> str | None:
@@ -899,14 +908,205 @@ def _lead_first_name(lead: Lead | None) -> str | None:
     return first or None
 
 
+_SCHEDULE_MORNING_END_MINUTES = 12 * 60  # antes de 12:00 = manhã
+
+
+def _normalize_schedule_horario(valor: str | None) -> str | None:
+    if valor is None:
+        return None
+    texto = (
+        str(valor)
+        .strip()
+        .lower()
+        .replace("às", "")
+        .replace("as", "")
+        .strip()
+    )
+    match = re.match(r"^(\d{1,2})\s*h?$", texto)
+    if match:
+        hora = int(match.group(1))
+        if 0 <= hora <= 23:
+            return f"{hora:02d}:00"
+    match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", texto)
+    if match:
+        hora, minuto = int(match.group(1)), int(match.group(2))
+        if 0 <= hora <= 23 and 0 <= minuto <= 59:
+            return f"{hora:02d}:{minuto:02d}"
+    return None
+
+
+def _schedule_horario_to_minutes(horario: str) -> int | None:
+    normalizado = _normalize_schedule_horario(horario)
+    if not normalizado:
+        return None
+    hora, minuto = normalizado.split(":")
+    return int(hora) * 60 + int(minuto)
+
+
+def _extract_schedule_time_from_text(text: str) -> str | None:
+    if not text:
+        return None
+    raw = _normalize_text(text)
+    match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", raw)
+    if match:
+        return _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
+    match = re.search(r"(?:^|\D)(\d{1,2})\s*h(?:\D|$)", raw)
+    if match:
+        return _normalize_schedule_horario(match.group(1))
+    return _normalize_schedule_horario(text)
+
+
+def _extract_schedule_period_from_text(text: str) -> str | None:
+    tokens = _normalize_tokens(text)
+    if "manha" in tokens:
+        return "manha"
+    if "tarde" in tokens:
+        return "tarde"
+    return None
+
+
+def _period_label(period: str | None) -> str:
+    if period == "manha":
+        return "manhã"
+    if period == "tarde":
+        return "tarde"
+    return ""
+
+
+def _physical_eval_schedule_preference(
+    user_text: str,
+    recent_customer_texts: list[str] | None,
+    reference: datetime,
+) -> dict:
+    """Monta dia + período + horário preferido, herdando contexto de mensagens anteriores."""
+    prior = [
+        t
+        for t in (recent_customer_texts or [])
+        if t and t.strip() and t.strip() != (user_text or "").strip()
+    ]
+    scan_order = [user_text] + list(reversed(prior[-8:]))
+
+    schedule_date = _extract_schedule_date_from_text(user_text, reference)
+    if not schedule_date:
+        for text in scan_order[1:]:
+            schedule_date = _extract_schedule_date_from_text(text, reference)
+            if schedule_date:
+                break
+
+    period = None
+    preferred_time = None
+    for text in scan_order:
+        if not period:
+            period = _extract_schedule_period_from_text(text)
+        if not preferred_time:
+            preferred_time = _extract_schedule_time_from_text(text)
+
+    if preferred_time and not period:
+        minutes = _schedule_horario_to_minutes(preferred_time)
+        if minutes is not None:
+            period = "manha" if minutes < _SCHEDULE_MORNING_END_MINUTES else "tarde"
+
+    return {
+        "date": schedule_date,
+        "period": period,
+        "preferred_time": preferred_time,
+    }
+
+
+def _filter_horarios_by_preference(
+    horarios: list[str],
+    *,
+    period: str | None,
+    preferred_time: str | None,
+) -> tuple[list[str], dict]:
+    """Filtra horários livres por manhã/tarde e destaca se o horário pedido não existe."""
+    meta: dict = {}
+    if not horarios:
+        return [], meta
+
+    normalized_map = {_normalize_schedule_horario(h) or h: h for h in horarios}
+    ordered = sorted(
+        horarios,
+        key=lambda h: _schedule_horario_to_minutes(h) or 0,
+    )
+
+    filtered = ordered
+    if period == "manha":
+        filtered = [
+            h
+            for h in ordered
+            if (_schedule_horario_to_minutes(h) or 0) < _SCHEDULE_MORNING_END_MINUTES
+        ]
+    elif period == "tarde":
+        filtered = [
+            h
+            for h in ordered
+            if (_schedule_horario_to_minutes(h) or 0) >= _SCHEDULE_MORNING_END_MINUTES
+        ]
+
+    if period and not filtered:
+        meta["periodo_sem_vagas"] = period
+        return [], meta
+
+    if preferred_time:
+        pref_norm = _normalize_schedule_horario(preferred_time)
+        meta["horario_preferido"] = pref_norm or preferred_time
+        available_norms = set(normalized_map)
+        if pref_norm and pref_norm not in available_norms:
+            meta["horario_preferido_indisponivel"] = pref_norm
+
+    return filtered, meta
+
+
+def _enrich_schedule_result_with_preference(
+    tool_result: dict,
+    *,
+    period: str | None,
+    preferred_time: str | None,
+) -> dict:
+    dados = dict(tool_result.get("dados") or {})
+    horarios = dados.get("horarios_disponiveis") or []
+    if not isinstance(horarios, list):
+        horarios = []
+
+    filtered, meta = _filter_horarios_by_preference(
+        [str(h) for h in horarios if h],
+        period=period,
+        preferred_time=preferred_time,
+    )
+    dados["horarios_disponiveis"] = filtered
+    if period:
+        dados["periodo_solicitado"] = period
+        dados["periodo_solicitado_label"] = _period_label(period)
+    if preferred_time:
+        dados["horario_preferido"] = _normalize_schedule_horario(preferred_time) or preferred_time
+    dados.update(meta)
+    return {**tool_result, "dados": dados}
+
+
 def _physical_eval_ask_day_reply(unit: str, lead: Lead | None) -> str:
     first = _lead_first_name(lead)
     prefix = f"{first}, encontrei" if first else "Encontrei"
     return (
         f"{prefix} sua matrícula na unidade *{unit}*! 😊 "
-        "Para consultar horários de *avaliação física*, qual *dia útil* "
-        "(segunda a sexta) você prefere? "
-        "Pode mandar tipo *amanhã*, *15/09* ou *sexta*."
+        "Para consultar horários de *avaliação física*, me diz um *dia útil* "
+        "(segunda a sexta) e se prefere *manhã* ou *tarde* — "
+        "pode mandar tipo *segunda de manhã*, *terça às 9h* ou *quarta à tarde*."
+    )
+
+
+def _physical_eval_no_slots_reply(
+    schedule_date: str,
+    period: str | None,
+    lead: Lead | None,
+) -> str:
+    first = _lead_first_name(lead)
+    data_fmt = _format_schedule_date_br(schedule_date)
+    greeting = f"{first}, " if first else ""
+    periodo_txt = f" no período da *{_period_label(period)}*" if period else ""
+    return (
+        f"{greeting}consultei o dia *{data_fmt}*{periodo_txt} e não encontrei horários livres "
+        "para avaliação física. Quer tentar *outro dia* ou *outro período* (manhã/tarde)?"
     )
 
 
@@ -1120,11 +1320,16 @@ def _format_schedule_reply_from_dados(dados: dict) -> str:
     data_fmt = dados.get("data_formatada") or dados.get("data") or "esse dia"
     unidade = dados.get("unidade") or "sua unidade"
     tipo = dados.get("tipo_agendamento") or "avaliação física"
+    period_label = dados.get("periodo_solicitado_label") or _period_label(
+        dados.get("periodo_solicitado")
+    )
+    pref_indisponivel = dados.get("horario_preferido_indisponivel")
 
     if not horarios:
+        periodo_txt = f" no período da *{period_label}*" if period_label else ""
         return (
-            f"Consultei aqui! 😊 No dia *{data_fmt}*, na unidade *{unidade}*, "
-            f"não encontrei horários livres para *{tipo}*. Quer tentar outro dia?"
+            f"Consultei aqui! 😊 No dia *{data_fmt}*{periodo_txt}, na unidade *{unidade}*, "
+            f"não encontrei horários livres para *{tipo}*. Quer tentar outro dia ou período?"
         )
 
     shown = horarios[:12]
@@ -1132,8 +1337,15 @@ def _format_schedule_reply_from_dados(dados: dict) -> str:
     extra = ""
     if len(horarios) > len(shown):
         extra = f" (e mais {len(horarios) - len(shown)} horários)"
+
+    intro = "Consultei aqui! 😊 "
+    if pref_indisponivel:
+        intro += (
+            f"O horário *{pref_indisponivel}* não está livre, mas "
+        )
+    periodo_txt = f" de *{period_label}*" if period_label else ""
     return (
-        f"Consultei aqui! 😊 No dia *{data_fmt}*, na *{unidade}*, "
+        f"{intro}No dia *{data_fmt}*{periodo_txt}, na *{unidade}*, "
         f"estes horários estão livres para *{tipo}*: {lista}{extra}. "
         "Qual prefere?"
     )
@@ -1174,6 +1386,9 @@ async def _humanize_tool_reply_with_llm(
         system += (
             "\nAssunto: horários livres para avaliação física. Informe a data, a unidade "
             "e liste os horários de horarios_disponiveis de forma clara. "
+            "Se houver periodo_solicitado_label (manhã/tarde), deixe claro que a lista "
+            "é desse período. Se horario_preferido_indisponivel existir, diga gentilmente "
+            "que aquele horário não está livre e mostre as alternativas do mesmo período. "
             "Pergunte qual horário prefere — NÃO diga que já agendou."
         )
     if first_name:
@@ -1470,7 +1685,10 @@ async def _run_physical_eval_pipeline(
                 "Confere se digitou certinho ou quer falar com um atendente?"
             ), lead
 
-    schedule_date = _extract_schedule_date_from_text(user_text, brazil_now)
+    pref = _physical_eval_schedule_preference(
+        user_text, recent_customer_texts, brazil_now
+    )
+    schedule_date = pref["date"]
     if not schedule_date:
         return _physical_eval_ask_day_reply(unit, lead), lead
 
@@ -1494,13 +1712,24 @@ async def _run_physical_eval_pipeline(
 
     schedule_result = await execute_tool(db, schedule_tool, args, conversation)
     if schedule_result.get("sucesso"):
-        reply = await _humanize_tool_reply_with_llm(
-            config,
-            user_text,
+        schedule_result = _enrich_schedule_result_with_preference(
             schedule_result,
-            schedule_tool,
-            lead,
+            period=pref["period"],
+            preferred_time=pref["preferred_time"],
         )
+        horarios = (schedule_result.get("dados") or {}).get("horarios_disponiveis") or []
+        if not horarios:
+            reply = _physical_eval_no_slots_reply(
+                schedule_date, pref["period"], lead
+            )
+        else:
+            reply = await _humanize_tool_reply_with_llm(
+                config,
+                user_text,
+                schedule_result,
+                schedule_tool,
+                lead,
+            )
     else:
         reply = _format_tool_result_as_reply(schedule_result)
         if reply is None:
@@ -2474,12 +2703,13 @@ async def generate_ai_reply(
                     "NESTE TURNO o cliente quer agendar/consultar horários de AVALIAÇÃO FÍSICA. "
                     "Fluxo: (1) peça SOMENTE o CPF se ainda não tiver; (2) chame "
                     "verificar_unidade_por_cpf — NÃO peça a unidade (use dados.nome se vier); "
-                    "(3) peça um dia ÚTIL (segunda a sexta) — avaliação física NÃO acontece "
-                    "sábado nem domingo; se pedirem fim de semana, avise com gentileza; "
-                    "(4) chame consultar_agendamento_horarios com unidade + data (yyyyMMdd). "
-                    "Apresente os horários livres e pergunte qual prefere — NÃO confirme agendamento "
-                    "neste fluxo (só consulta disponibilidade). Use o primeiro nome do cliente "
-                    "quando souber (cadastro ou dados.nome da verificação por CPF)."
+                    "(3) peça dia ÚTIL + preferência de manhã/tarde — ex: *segunda de manhã*, "
+                    "*terça às 9h*, *quarta à tarde*; avaliação NÃO ocorre sábado/domingo; "
+                    "(4) chame consultar_agendamento_horarios com unidade + data (yyyyMMdd); "
+                    "filtre mentalmente manhã (antes de 12h) e tarde (12h+); se o horário "
+                    "exato não existir, ofereça outros do mesmo período; se o cliente mudar "
+                    "só o dia (ex: 'então terça'), mantenha o período que ele pediu antes; "
+                    "NÃO confirme agendamento neste fluxo. Use o primeiro nome quando souber."
                 ),
             }
         )
