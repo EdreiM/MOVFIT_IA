@@ -72,8 +72,10 @@ def test_physical_eval_followup_after_intent():
 def test_extract_period_and_time():
     assert _extract_schedule_period_from_text("segunda de manhã") == "manha"
     assert _extract_schedule_period_from_text("quarta à tarde") == "tarde"
+    assert _extract_schedule_period_from_text("quinta à noite") == "noite"
     assert _extract_schedule_time_from_text("terça 9 h") == "09:00"
     assert _extract_schedule_time_from_text("às 14:30") == "14:30"
+    assert _extract_schedule_time_from_text("às 21h") == "21:00"
 
 
 def test_schedule_preference_inherits_period_from_context():
@@ -120,7 +122,7 @@ def test_enrich_schedule_result_filters_afternoon():
     raw = {
         "sucesso": True,
         "dados": {
-            "horarios_disponiveis": ["08:00", "09:00", "14:00", "15:00"],
+            "horarios_disponiveis": ["08:00", "09:00", "14:00", "15:00", "21:00"],
             "data_formatada": "15/09/2026",
         },
     }
@@ -132,6 +134,24 @@ def test_enrich_schedule_result_filters_afternoon():
         "1 - 14:00 às 14:30",
         "2 - 15:00 às 15:30",
     ]
+    assert enriched["dados"]["horarios_noite_intervalos"] == [
+        "1 - 21:00 às 21:30",
+    ]
+
+
+def test_enrich_schedule_result_filters_night_only():
+    raw = {
+        "sucesso": True,
+        "dados": {
+            "horarios_disponiveis": ["14:00", "16:00", "21:00", "21:30"],
+            "data_formatada": "15/09/2026",
+        },
+    }
+    enriched = _enrich_schedule_result_with_preference(
+        raw, period="noite", preferred_time=None
+    )
+    assert enriched["dados"]["horarios_disponiveis"] == ["21:00"]
+    assert "horarios_noite_intervalos" not in enriched["dados"]
 
 
 def test_schedule_reply_notes_unavailable_preferred_time():
@@ -165,7 +185,7 @@ async def test_reply_from_schedule_tool_result_filters_afternoon():
             "data_formatada": "14/09/2026",
             "horarios_disponiveis": [
                 "07:00", "07:30", "08:00", "08:30", "11:00", "11:30",
-                "12:00", "12:30", "14:00", "14:30", "15:00", "15:30", "16:00",
+                "12:00", "12:30", "14:00", "14:30", "15:00", "15:30", "16:00", "21:00",
             ],
         },
     }
@@ -184,6 +204,8 @@ async def test_reply_from_schedule_tool_result_filters_afternoon():
     assert "7:00" not in reply
     assert "8:00 às 8:30" not in reply
     assert "tarde" in reply.lower()
+    assert "Também tem horários *de noite*" in reply
+    assert "21:00 às 21:30" in reply
 
 
 def test_schedule_reply_from_dados():

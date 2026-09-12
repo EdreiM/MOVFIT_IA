@@ -909,7 +909,33 @@ def _lead_first_name(lead: Lead | None) -> str | None:
 
 
 _SCHEDULE_MORNING_END_MINUTES = 12 * 60  # antes de 12:00 = manhã
+_SCHEDULE_EVENING_START_MINUTES = 18 * 60  # a partir de 18:00 = noite
 _SCHEDULE_SLOT_DURATION_MINUTES = 30
+
+
+def _schedule_period_for_minutes(minutes: int) -> str:
+    if minutes < _SCHEDULE_MORNING_END_MINUTES:
+        return "manha"
+    if minutes < _SCHEDULE_EVENING_START_MINUTES:
+        return "tarde"
+    return "noite"
+
+
+def _schedule_period_for_horario(horario: str) -> str | None:
+    minutes = _schedule_horario_to_minutes(horario)
+    if minutes is None:
+        return None
+    return _schedule_period_for_minutes(minutes)
+
+
+def _filter_slots_by_period(slot_starts: list[str], period: str | None) -> list[str]:
+    if not period:
+        return slot_starts
+    return [
+        h
+        for h in slot_starts
+        if _schedule_period_for_horario(h) == period
+    ]
 
 
 def _format_schedule_horario_friendly(horario: str) -> str:
@@ -998,6 +1024,8 @@ def _extract_schedule_period_from_text(text: str) -> str | None:
     tokens = _normalize_tokens(text)
     if "manha" in tokens:
         return "manha"
+    if "noite" in tokens:
+        return "noite"
     if "tarde" in tokens:
         return "tarde"
     return None
@@ -1008,6 +1036,8 @@ def _period_label(period: str | None) -> str:
         return "manhã"
     if period == "tarde":
         return "tarde"
+    if period == "noite":
+        return "noite"
     return ""
 
 
@@ -1042,7 +1072,7 @@ def _physical_eval_schedule_preference(
     if preferred_time and not period:
         minutes = _schedule_horario_to_minutes(preferred_time)
         if minutes is not None:
-            period = "manha" if minutes < _SCHEDULE_MORNING_END_MINUTES else "tarde"
+            period = _schedule_period_for_minutes(minutes)
 
     return {
         "date": schedule_date,
@@ -1057,25 +1087,18 @@ def _filter_horarios_by_preference(
     period: str | None,
     preferred_time: str | None,
 ) -> tuple[list[str], dict]:
-    """Filtra slots livres por manhã/tarde e destaca se o horário pedido não existe."""
+    """Filtra slots livres por manhã/tarde/noite e destaca se o horário pedido não existe."""
     meta: dict = {}
     slot_starts = _normalize_schedule_slot_starts(horarios)
     if not slot_starts:
         return [], meta
 
-    filtered = slot_starts
-    if period == "manha":
-        filtered = [
-            h
-            for h in slot_starts
-            if (_schedule_horario_to_minutes(h) or 0) < _SCHEDULE_MORNING_END_MINUTES
-        ]
-    elif period == "tarde":
-        filtered = [
-            h
-            for h in slot_starts
-            if (_schedule_horario_to_minutes(h) or 0) >= _SCHEDULE_MORNING_END_MINUTES
-        ]
+    filtered = _filter_slots_by_period(slot_starts, period)
+
+    if period == "tarde":
+        noite_slots = _filter_slots_by_period(slot_starts, "noite")
+        if noite_slots:
+            meta["horarios_noite_intervalos"] = _format_schedule_slots_numbered(noite_slots)
 
     if period and not filtered:
         meta["periodo_sem_vagas"] = period
@@ -1126,8 +1149,9 @@ def _physical_eval_ask_day_reply(unit: str, lead: Lead | None) -> str:
     return (
         f"{prefix} sua matrícula na unidade *{unit}*! 😊 "
         "Para consultar horários de *avaliação física*, me diz um *dia útil* "
-        "(segunda a sexta) e se prefere *manhã* ou *tarde* — "
-        "pode mandar tipo *segunda de manhã*, *terça às 9h* ou *quarta à tarde*."
+        "(segunda a sexta) e se prefere *manhã*, *tarde* ou *noite* — "
+        "pode mandar tipo *segunda de manhã*, *terça às 9h*, *quarta à tarde* "
+        "ou *quinta à noite*."
     )
 
 
@@ -1142,7 +1166,7 @@ def _physical_eval_no_slots_reply(
     periodo_txt = f" no período da *{_period_label(period)}*" if period else ""
     return (
         f"{greeting}consultei o dia *{data_fmt}*{periodo_txt} e não encontrei horários livres "
-        "para avaliação física. Quer tentar *outro dia* ou *outro período* (manhã/tarde)?"
+        "para avaliação física. Quer tentar *outro dia* ou *outro período* (manhã/tarde/noite)?"
     )
 
 
@@ -1368,6 +1392,9 @@ def _tool_facts_for_llm(result: dict, tool: Tool) -> dict:
             intervalos = dados.get("horarios_intervalos")
             if intervalos:
                 schedule_dados["horarios_intervalos"] = intervalos
+            noite_intervalos = dados.get("horarios_noite_intervalos")
+            if noite_intervalos:
+                schedule_dados["horarios_noite_intervalos"] = noite_intervalos
             payload["dados"] = schedule_dados
         else:
             payload["dados"] = dados
@@ -1409,13 +1436,26 @@ def _format_schedule_reply_from_dados(dados: dict, lead: Lead | None = None) -> 
     if len(intervalos) > len(shown):
         extra = f"\n(e mais {len(intervalos) - len(shown)} horários)"
 
+    noite_intervalos = dados.get("horarios_noite_intervalos") or []
+    noite_txt = ""
+    if noite_intervalos and dados.get("periodo_solicitado") == "tarde":
+        noite_shown = noite_intervalos[:6]
+        noite_lista = "\n".join(f"*{item}*" for item in noite_shown)
+        noite_extra = ""
+        if len(noite_intervalos) > len(noite_shown):
+            noite_extra = f"\n(e mais {len(noite_intervalos) - len(noite_shown)} horários)"
+        noite_txt = (
+            f"\n\nTambém tem horários *de noite* disponíveis:\n{noite_lista}{noite_extra}"
+        )
+
     intro = greeting
     if pref_indisponivel:
         intro += f"O horário *{pref_indisponivel}* não está livre, mas "
     periodo_txt = f" de *{period_label}*" if period_label else ""
     return (
         f"{intro}No dia *{data_fmt}*{periodo_txt}, na *{unidade}*, "
-        f"estes horários estão livres para *{tipo}*:\n{lista}{extra}\n"
+        f"estes horários estão livres para *{tipo}*:\n{lista}{extra}"
+        f"{noite_txt}\n"
         "Qual prefere? Pode responder com o número ou o horário."
     )
 
@@ -1496,8 +1536,9 @@ async def _humanize_tool_reply_with_llm(
             "e liste os horários usando horarios_intervalos (formato numerado, ex: "
             "'1 - 6:00 às 6:30'). Cada slot dura 30 minutos e começa em hora cheia — "
             "NUNCA mostre só '6:30' ou '7:30' como horário isolado. "
-            "Se houver periodo_solicitado_label (manhã/tarde), deixe claro que a lista "
-            "é desse período. Se horario_preferido_indisponivel_label existir, diga gentilmente "
+            "Se houver periodo_solicitado_label (manhã/tarde/noite), deixe claro que a lista "
+            "é desse período. Se horarios_noite_intervalos existir, mencione separadamente "
+            "como opções de noite. Se horario_preferido_indisponivel_label existir, diga gentilmente "
             "que aquele intervalo não está livre e mostre as alternativas do mesmo período. "
             "Pergunte qual horário prefere (número ou intervalo) — NÃO diga que já agendou."
         )
@@ -2804,10 +2845,10 @@ async def generate_ai_reply(
                     "NESTE TURNO o cliente quer agendar/consultar horários de AVALIAÇÃO FÍSICA. "
                     "Fluxo: (1) peça SOMENTE o CPF se ainda não tiver; (2) chame "
                     "verificar_unidade_por_cpf — NÃO peça a unidade (use dados.nome se vier); "
-                    "(3) peça dia ÚTIL + preferência de manhã/tarde — ex: *segunda de manhã*, "
-                    "*terça às 9h*, *quarta à tarde*; avaliação NÃO ocorre sábado/domingo; "
-                    "(4) chame consultar_agendamento_horarios com unidade + data (yyyyMMdd); "
-                    "filtre mentalmente manhã (antes de 12h) e tarde (12h+); se o horário "
+                    "(3) peça dia ÚTIL + preferência de manhã/tarde/noite — ex: *segunda de manhã*, "
+                    "*terça às 9h*, *quarta à tarde*, *quinta à noite*; avaliação NÃO ocorre "
+                    "sábado/domingo; (4) chame consultar_agendamento_horarios com unidade + data "
+                    "(yyyyMMdd); manhã = antes de 12h, tarde = 12h–18h, noite = 18h+; se o horário "
                     "exato não existir, ofereça outros do mesmo período; se o cliente mudar "
                     "só o dia (ex: 'então terça'), mantenha o período que ele pediu antes; "
                     "NÃO confirme agendamento neste fluxo. Use o primeiro nome quando souber."
