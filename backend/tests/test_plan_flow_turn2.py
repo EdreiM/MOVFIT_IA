@@ -140,6 +140,7 @@ async def test_student_pipeline_asks_cpf_not_unit(db_session, company):
         "Quantos convidados posso levar esse mês?",
         tools_by_key,
         None,
+        config=config,
         is_first_contact=True,
         ai_name="Mônica",
     )
@@ -164,7 +165,9 @@ def test_guest_tool_reply_includes_names():
     reply = _format_guest_tool_reply(result)
     assert reply is not None
     assert "SABRINA LOPES TURMINA" in reply
-    assert "1 de 4" in reply or "mais 3" in reply
+    assert "Cliente" not in reply
+    assert "você" in reply.lower() or "Você" in reply
+    assert "1" in reply and "4" in reply
 
 
 def test_guest_who_followup_reply():

@@ -792,19 +792,26 @@ def _is_technical_tool_failure(result: dict) -> bool:
     return any(phrase in msg for phrase in _INTERNAL_TOOL_FAILURE_PHRASES)
 
 
-def _tool_result_for_llm(result: dict) -> dict:
-    """Evita que a IA repita mensagem técnica pro cliente no loop de tools."""
-    if result.get("sucesso") or not _is_technical_tool_failure(result):
-        return result
-    return {
-        "sucesso": False,
-        "mensagem": (
-            "A consulta no sistema não pôde ser concluída. Transfira o cliente para um "
-            "atendente humano agora (transferir_atendimento) e diga que no momento você "
-            "não tem acesso a essa informação, mas já encaminhou."
-        ),
-        "dados": {},
-    }
+def _tool_result_for_llm(result: dict, tool: Tool | None = None) -> dict:
+    """Prepara o retorno da ferramenta pro loop da IA — fatos, não relatório de sistema."""
+    if not result.get("sucesso") and _is_technical_tool_failure(result):
+        return {
+            "sucesso": False,
+            "mensagem": (
+                "A consulta no sistema não pôde ser concluída. Transfira o cliente para um "
+                "atendente humano agora (transferir_atendimento) e diga que no momento você "
+                "não tem acesso a essa informação, mas já encaminhou."
+            ),
+            "dados": {},
+        }
+    if tool and result.get("sucesso"):
+        facts = _tool_facts_for_llm(result, tool)
+        facts["instrucao"] = (
+            "Informe o cliente em segunda pessoa (você), tom natural de WhatsApp. "
+            "Use só estes dados — não repita texto de sistema tipo 'Cliente usou'."
+        )
+        return facts
+    return result
 
 
 async def _transfer_and_notify_tool_failure(
@@ -874,31 +881,146 @@ def _guest_names_from_dados(dados: dict) -> list[str]:
     return names
 
 
-def _format_guest_tool_reply(result: dict, *, who_question: bool = False) -> str | None:
-    """Usa mensagem + convidados_do_mes retornados pelo n8n."""
-    if not result.get("sucesso"):
-        return _format_tool_result_as_reply(result)
-    dados = result.get("dados")
-    names: list[str] = []
-    if isinstance(dados, dict):
-        names = _guest_names_from_dados(dados)
+def _format_guest_reply_from_dados(dados: dict, *, who_question: bool = False) -> str:
+    """Monta resposta humana (2ª pessoa) só a partir dos dados — ignora mensagem do n8n."""
+    names = _guest_names_from_dados(dados)
+    limite = dados.get("limite_mensal")
+    usados = dados.get("convites_usados", 0)
+    restantes = dados.get("convites_restantes")
+    if restantes is None and limite is not None:
+        restantes = max(0, int(limite) - int(usados))
+
     if who_question:
         if not names:
-            base = _format_tool_result_as_reply(result)
-            return base or "Não encontrei convidados registrados no seu nome neste mês."
+            return "Consultei aqui e não encontrei convidados registrados no seu nome neste mês."
         if len(names) == 1:
             return f"Este mês você levou *{names[0]}* como convidado. 😊"
         listed = "\n".join(f"• {name}" for name in names)
         return f"Este mês você levou estes convidados:\n{listed}"
-    base = _format_tool_result_as_reply(result) or ""
-    if not names:
-        return base or None
-    if len(names) == 1:
-        extra = f"\n\n👤 Convidado registrado este mês: *{names[0]}*."
+
+    if limite is None:
+        return "Consultei seus convites, mas não recebi o limite da unidade agora."
+
+    usados_int = int(usados)
+    limite_int = int(limite)
+    restantes_int = int(restantes or 0)
+
+    if usados_int == 0:
+        return (
+            f"Consultei aqui! 😊 Você ainda não trouxe convidados neste mês — "
+            f"pode levar até *{limite_int}* convite(s)."
+        )
+
+    if names:
+        if len(names) == 1:
+            corpo = f"Você já trouxe *{names[0]}*"
+        else:
+            corpo = "Você já trouxe:\n" + "\n".join(f"• *{n}*" for n in names)
     else:
-        listed = "\n".join(f"• {name}" for name in names)
-        extra = f"\n\n👤 Convidados registrados este mês:\n{listed}"
-    return (base + extra).strip()
+        corpo = f"Você já usou *{usados_int}* convite(s)"
+
+    if restantes_int > 0:
+        return (
+            f"Consultei aqui! 😊 {corpo} — são *{usados_int}* de *{limite_int}* convites do mês. "
+            f"Ainda pode trazer mais *{restantes_int}*. 😊"
+        )
+    return (
+        f"Consultei aqui! 😊 {corpo} — você já usou os *{limite_int}* convites permitidos neste mês. "
+        "Quando virar o mês, libera de novo."
+    )
+
+
+def _format_guest_tool_reply(result: dict, *, who_question: bool = False) -> str | None:
+    """Fallback determinístico — prioriza dados estruturados, não a mensagem do n8n."""
+    if not result.get("sucesso"):
+        return _format_tool_result_as_reply(result)
+    dados = result.get("dados")
+    if isinstance(dados, dict) and dados:
+        return _format_guest_reply_from_dados(dados, who_question=who_question)
+    return _format_tool_result_as_reply(result)
+
+
+def _tool_facts_for_llm(result: dict, tool: Tool) -> dict:
+    """Fatores objetivos pra IA redigir — sem texto robótico tipo 'Cliente usou...'."""
+    payload: dict = {"sucesso": bool(result.get("sucesso"))}
+    dados = result.get("dados")
+    if isinstance(dados, dict) and dados:
+        payload["dados"] = dados
+    if not _is_guest_tool(tool):
+        msg = str(result.get("mensagem") or "").strip()
+        if msg and "cliente usou" not in _normalize_text(msg):
+            payload["resumo_sistema"] = msg
+    return payload
+
+
+async def _humanize_tool_reply_with_llm(
+    config: AiConfig,
+    user_text: str,
+    tool_result: dict,
+    tool: Tool,
+    lead: Lead | None,
+    *,
+    who_question: bool = False,
+) -> str:
+    """A IA redige a resposta pro cliente a partir dos dados da ferramenta."""
+    api_key = decrypt_secret(config.llm_api_key_encrypted)
+    facts = _tool_facts_for_llm(tool_result, tool)
+    ai_name = config.ai_name or "Mônica"
+    first_name = (lead.name or "").split()[0] if lead and lead.name else None
+
+    system = (
+        f"{compose_base_prompt(config)}\n\n"
+        f"Você é a {ai_name}. Uma consulta no sistema acabou de retornar os dados abaixo.\n"
+        "Escreva UMA resposta curta pro WhatsApp, informando o cliente de forma natural — "
+        "fale direto com ELE/ELA (segunda pessoa: *você*), NUNCA diga 'Cliente', 'o cliente' "
+        "ou texto de relatório de sistema.\n"
+        "Use só números e nomes que estão no JSON. Não invente nada. "
+        "Tom caloroso de atendente humano, 2–4 frases. Pode usar *negrito* com um asterisco."
+    )
+    if _is_guest_tool(tool):
+        system += (
+            "\nAssunto: convites/convidados do mês. Informe quantos já usou, quantos restam "
+            "e, se houver convidados_do_mes, cite o(s) nome(s) de forma natural."
+        )
+    if who_question and _is_guest_tool(tool):
+        system += "\nO cliente quer saber QUEM já levou — foque nos nomes em convidados_do_mes."
+    if first_name:
+        system += f"\nPode chamar o cliente de {first_name}."
+
+    messages = [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": (
+                f"Pergunta do cliente:\n{user_text}\n\n"
+                f"Dados da consulta (JSON):\n{_safe_tool_result_json(facts)}"
+            ),
+        },
+    ]
+    try:
+        assistant = await chat_completion(
+            provider=config.llm_provider,
+            model=config.llm_model,
+            api_key=api_key,
+            messages=messages,
+            temperature=config.temperature,
+            tools=None,
+        )
+        text = (assistant.get("content") or "").strip()
+        if text:
+            return text
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Falha ao humanizar resposta da ferramenta %s — usando fallback determinístico",
+            tool.tool_key,
+        )
+
+    if _is_guest_tool(tool) and isinstance(facts.get("dados"), dict):
+        return _format_guest_reply_from_dados(facts["dados"], who_question=who_question)
+    fallback = _format_tool_result_as_reply(tool_result)
+    if fallback and "cliente" not in _normalize_text(fallback):
+        return fallback
+    return "Consultei no sistema — já te confirmo a informação. 😊"
 
 
 def _is_guest_who_followup(
@@ -993,6 +1115,7 @@ async def _run_student_operational_pipeline(
     tools_by_key: dict[str, Tool],
     lead: Lead | None,
     *,
+    config: AiConfig,
     is_first_contact: bool,
     ai_name: str,
     recent_customer_texts: list[str] | None = None,
@@ -1067,7 +1190,16 @@ async def _run_student_operational_pipeline(
 
     op_result = await execute_tool(db, op_tool, args, conversation)
     who_question = _is_guest_who_followup(user_text, recent_customer_texts, lead)
-    if _is_guest_tool(op_tool):
+    if op_result.get("sucesso"):
+        reply = await _humanize_tool_reply_with_llm(
+            config,
+            user_text,
+            op_result,
+            op_tool,
+            lead,
+            who_question=who_question,
+        )
+    elif _is_guest_tool(op_tool):
         reply = _format_guest_tool_reply(op_result, who_question=who_question)
     else:
         reply = _format_tool_result_as_reply(op_result)
@@ -1729,6 +1861,7 @@ async def generate_ai_reply(
             user_text,
             tools_by_key,
             lead,
+            config=config,
             is_first_contact=is_first_contact,
             ai_name=ai_name,
             recent_customer_texts=recent_customer_texts,
@@ -2342,7 +2475,7 @@ async def generate_ai_reply(
                         f"ferramenta {key} falhou no loop da IA",
                     )
                     return customer_msg, deferred_end_call, bool(touched_units)
-                result = _tool_result_for_llm(result)
+                result = _tool_result_for_llm(result, tool)
             else:
                 result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
                 if key != TOOL_KEY_TRANSFER:
@@ -2358,7 +2491,7 @@ async def generate_ai_reply(
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": _safe_tool_result_json(_tool_result_for_llm(result)),
+                    "content": _safe_tool_result_json(result),
                 }
             )
 
