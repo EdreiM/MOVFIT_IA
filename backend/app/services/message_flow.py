@@ -909,6 +909,44 @@ def _lead_first_name(lead: Lead | None) -> str | None:
 
 
 _SCHEDULE_MORNING_END_MINUTES = 12 * 60  # antes de 12:00 = manhã
+_SCHEDULE_SLOT_DURATION_MINUTES = 30
+
+
+def _format_schedule_horario_friendly(horario: str) -> str:
+    norm = _normalize_schedule_horario(horario)
+    if not norm:
+        return horario
+    hora, minuto = norm.split(":")
+    return f"{int(hora)}:{minuto}"
+
+
+def _format_schedule_slot_interval(horario: str) -> str:
+    """Ex.: 06:00 → '6:00 às 6:30' (slot de 30 min começando em hora cheia)."""
+    norm = _normalize_schedule_horario(horario)
+    if not norm:
+        return horario
+    start_m = _schedule_horario_to_minutes(norm)
+    if start_m is None:
+        return horario
+    end_h, end_min = divmod(start_m + _SCHEDULE_SLOT_DURATION_MINUTES, 60)
+    return f"{_format_schedule_horario_friendly(norm)} às {end_h}:{end_min:02d}"
+
+
+def _normalize_schedule_slot_starts(horarios: list[str]) -> list[str]:
+    """Cada slot dura 30 min e começa em hora cheia; :30 da API é fim do slot anterior."""
+    norms = sorted(
+        {n for h in horarios if (n := _normalize_schedule_horario(h))},
+        key=lambda x: _schedule_horario_to_minutes(x) or 0,
+    )
+    return [h for h in norms if h.endswith(":00")]
+
+
+def _format_schedule_slots_numbered(horarios: list[str]) -> list[str]:
+    starts = _normalize_schedule_slot_starts(horarios)
+    return [
+        f"{idx + 1} - {_format_schedule_slot_interval(h)}"
+        for idx, h in enumerate(starts)
+    ]
 
 
 def _normalize_schedule_horario(valor: str | None) -> str | None:
@@ -1019,28 +1057,23 @@ def _filter_horarios_by_preference(
     period: str | None,
     preferred_time: str | None,
 ) -> tuple[list[str], dict]:
-    """Filtra horários livres por manhã/tarde e destaca se o horário pedido não existe."""
+    """Filtra slots livres por manhã/tarde e destaca se o horário pedido não existe."""
     meta: dict = {}
-    if not horarios:
+    slot_starts = _normalize_schedule_slot_starts(horarios)
+    if not slot_starts:
         return [], meta
 
-    normalized_map = {_normalize_schedule_horario(h) or h: h for h in horarios}
-    ordered = sorted(
-        horarios,
-        key=lambda h: _schedule_horario_to_minutes(h) or 0,
-    )
-
-    filtered = ordered
+    filtered = slot_starts
     if period == "manha":
         filtered = [
             h
-            for h in ordered
+            for h in slot_starts
             if (_schedule_horario_to_minutes(h) or 0) < _SCHEDULE_MORNING_END_MINUTES
         ]
     elif period == "tarde":
         filtered = [
             h
-            for h in ordered
+            for h in slot_starts
             if (_schedule_horario_to_minutes(h) or 0) >= _SCHEDULE_MORNING_END_MINUTES
         ]
 
@@ -1051,9 +1084,11 @@ def _filter_horarios_by_preference(
     if preferred_time:
         pref_norm = _normalize_schedule_horario(preferred_time)
         meta["horario_preferido"] = pref_norm or preferred_time
-        available_norms = set(normalized_map)
-        if pref_norm and pref_norm not in available_norms:
+        if pref_norm and pref_norm not in filtered:
             meta["horario_preferido_indisponivel"] = pref_norm
+            meta["horario_preferido_indisponivel_label"] = _format_schedule_slot_interval(
+                pref_norm
+            )
 
     return filtered, meta
 
@@ -1075,6 +1110,7 @@ def _enrich_schedule_result_with_preference(
         preferred_time=preferred_time,
     )
     dados["horarios_disponiveis"] = filtered
+    dados["horarios_intervalos"] = _format_schedule_slots_numbered(filtered)
     if period:
         dados["periodo_solicitado"] = period
         dados["periodo_solicitado_label"] = _period_label(period)
@@ -1225,6 +1261,20 @@ def _is_schedule_tool(tool: Tool) -> bool:
     return bool(haystack & {"agendamento", "agendar", "horarios", "horario", "schedule"})
 
 
+def _get_schedule_tool(tools_by_key: dict[str, Tool]) -> Tool | None:
+    tool = tools_by_key.get(TOOL_KEY_CHECK_SCHEDULE)
+    if tool:
+        return tool
+    for candidate in tools_by_key.values():
+        if _is_schedule_tool(candidate):
+            return candidate
+    return None
+
+
+def _has_schedule_tool(tools_by_key: dict[str, Tool]) -> bool:
+    return _get_schedule_tool(tools_by_key) is not None
+
+
 def _guest_names_from_dados(dados: dict) -> list[str]:
     raw = dados.get("convidados_do_mes") or dados.get("convidados") or []
     names: list[str] = []
@@ -1306,7 +1356,21 @@ def _tool_facts_for_llm(result: dict, tool: Tool) -> dict:
     payload: dict = {"sucesso": bool(result.get("sucesso"))}
     dados = result.get("dados")
     if isinstance(dados, dict) and dados:
-        payload["dados"] = dados
+        if _is_schedule_tool(tool):
+            schedule_dados = {
+                k: v
+                for k, v in dados.items()
+                if k
+                not in {
+                    "horarios_disponiveis",
+                }
+            }
+            intervalos = dados.get("horarios_intervalos")
+            if intervalos:
+                schedule_dados["horarios_intervalos"] = intervalos
+            payload["dados"] = schedule_dados
+        else:
+            payload["dados"] = dados
     if not _is_guest_tool(tool) and not _is_schedule_tool(tool):
         msg = str(result.get("mensagem") or "").strip()
         if msg and "cliente usou" not in _normalize_text(msg):
@@ -1314,41 +1378,85 @@ def _tool_facts_for_llm(result: dict, tool: Tool) -> dict:
     return payload
 
 
-def _format_schedule_reply_from_dados(dados: dict) -> str:
-    """Fallback humano para horários de avaliação física."""
+def _format_schedule_reply_from_dados(dados: dict, lead: Lead | None = None) -> str:
+    """Resposta determinística para horários de avaliação física."""
     horarios = dados.get("horarios_disponiveis") or []
+    intervalos = dados.get("horarios_intervalos") or _format_schedule_slots_numbered(horarios)
     data_fmt = dados.get("data_formatada") or dados.get("data") or "esse dia"
     unidade = dados.get("unidade") or "sua unidade"
     tipo = dados.get("tipo_agendamento") or "avaliação física"
     period_label = dados.get("periodo_solicitado_label") or _period_label(
         dados.get("periodo_solicitado")
     )
-    pref_indisponivel = dados.get("horario_preferido_indisponivel")
+    pref_indisponivel = dados.get("horario_preferido_indisponivel_label") or (
+        _format_schedule_slot_interval(dados["horario_preferido_indisponivel"])
+        if dados.get("horario_preferido_indisponivel")
+        else None
+    )
+    first = _lead_first_name(lead)
+    greeting = f"Oi, {first}! 😊 " if first else "Consultei aqui! 😊 "
 
-    if not horarios:
+    if not intervalos:
         periodo_txt = f" no período da *{period_label}*" if period_label else ""
         return (
-            f"Consultei aqui! 😊 No dia *{data_fmt}*{periodo_txt}, na unidade *{unidade}*, "
+            f"{greeting}No dia *{data_fmt}*{periodo_txt}, na unidade *{unidade}*, "
             f"não encontrei horários livres para *{tipo}*. Quer tentar outro dia ou período?"
         )
 
-    shown = horarios[:12]
-    lista = ", ".join(f"*{h}*" for h in shown)
+    shown = intervalos[:12]
+    lista = "\n".join(f"*{item}*" for item in shown)
     extra = ""
-    if len(horarios) > len(shown):
-        extra = f" (e mais {len(horarios) - len(shown)} horários)"
+    if len(intervalos) > len(shown):
+        extra = f"\n(e mais {len(intervalos) - len(shown)} horários)"
 
-    intro = "Consultei aqui! 😊 "
+    intro = greeting
     if pref_indisponivel:
-        intro += (
-            f"O horário *{pref_indisponivel}* não está livre, mas "
-        )
+        intro += f"O horário *{pref_indisponivel}* não está livre, mas "
     periodo_txt = f" de *{period_label}*" if period_label else ""
     return (
         f"{intro}No dia *{data_fmt}*{periodo_txt}, na *{unidade}*, "
-        f"estes horários estão livres para *{tipo}*: {lista}{extra}. "
-        "Qual prefere?"
+        f"estes horários estão livres para *{tipo}*:\n{lista}{extra}\n"
+        "Qual prefere? Pode responder com o número ou o horário."
     )
+
+
+async def _reply_from_schedule_tool_result(
+    user_text: str,
+    tool_result: dict,
+    lead: Lead | None,
+    *,
+    recent_customer_texts: list[str] | None,
+    brazil_now: datetime,
+    tool_arguments: dict | None = None,
+) -> str:
+    """Enriquece horários (período, intervalos) e monta resposta confiável pro cliente."""
+    pref = _physical_eval_schedule_preference(
+        user_text, recent_customer_texts, brazil_now
+    )
+    args = tool_arguments or {}
+    schedule_date = (
+        pref["date"]
+        or args.get("data")
+        or args.get("dia")
+        or (tool_result.get("dados") or {}).get("data")
+    )
+
+    if schedule_date and _schedule_date_is_weekend(str(schedule_date)):
+        return _physical_eval_weekend_reply(str(schedule_date), lead)
+
+    enriched = _enrich_schedule_result_with_preference(
+        tool_result,
+        period=pref["period"],
+        preferred_time=pref["preferred_time"],
+    )
+    horarios = (enriched.get("dados") or {}).get("horarios_disponiveis") or []
+    if not horarios:
+        return _physical_eval_no_slots_reply(
+            str(schedule_date or ""),
+            pref["period"],
+            lead,
+        )
+    return _format_schedule_reply_from_dados(enriched.get("dados") or {}, lead)
 
 
 async def _humanize_tool_reply_with_llm(
@@ -1385,11 +1493,13 @@ async def _humanize_tool_reply_with_llm(
     if _is_schedule_tool(tool):
         system += (
             "\nAssunto: horários livres para avaliação física. Informe a data, a unidade "
-            "e liste os horários de horarios_disponiveis de forma clara. "
+            "e liste os horários usando horarios_intervalos (formato numerado, ex: "
+            "'1 - 6:00 às 6:30'). Cada slot dura 30 minutos e começa em hora cheia — "
+            "NUNCA mostre só '6:30' ou '7:30' como horário isolado. "
             "Se houver periodo_solicitado_label (manhã/tarde), deixe claro que a lista "
-            "é desse período. Se horario_preferido_indisponivel existir, diga gentilmente "
-            "que aquele horário não está livre e mostre as alternativas do mesmo período. "
-            "Pergunte qual horário prefere — NÃO diga que já agendou."
+            "é desse período. Se horario_preferido_indisponivel_label existir, diga gentilmente "
+            "que aquele intervalo não está livre e mostre as alternativas do mesmo período. "
+            "Pergunte qual horário prefere (número ou intervalo) — NÃO diga que já agendou."
         )
     if first_name:
         system += f"\nPode chamar o cliente de {first_name}."
@@ -1425,7 +1535,7 @@ async def _humanize_tool_reply_with_llm(
     if _is_guest_tool(tool) and isinstance(facts.get("dados"), dict):
         return _format_guest_reply_from_dados(facts["dados"], who_question=who_question)
     if _is_schedule_tool(tool) and isinstance(facts.get("dados"), dict):
-        return _format_schedule_reply_from_dados(facts["dados"])
+        return _format_schedule_reply_from_dados(facts["dados"], lead)
     fallback = _format_tool_result_as_reply(tool_result)
     if fallback and "cliente" not in _normalize_text(fallback):
         return fallback
@@ -1635,7 +1745,7 @@ async def _run_physical_eval_pipeline(
 ) -> tuple[str | None, Lead | None]:
     """Avaliação física: CPF → verificar_unidade_por_cpf → dia → consultar horários."""
     verify_tool = tools_by_key.get(TOOL_KEY_VERIFY_UNIT_BY_CPF)
-    schedule_tool = tools_by_key.get(TOOL_KEY_CHECK_SCHEDULE)
+    schedule_tool = _get_schedule_tool(tools_by_key)
     if not verify_tool or not schedule_tool:
         return None, lead
 
@@ -1712,24 +1822,14 @@ async def _run_physical_eval_pipeline(
 
     schedule_result = await execute_tool(db, schedule_tool, args, conversation)
     if schedule_result.get("sucesso"):
-        schedule_result = _enrich_schedule_result_with_preference(
+        reply = await _reply_from_schedule_tool_result(
+            user_text,
             schedule_result,
-            period=pref["period"],
-            preferred_time=pref["preferred_time"],
+            lead,
+            recent_customer_texts=recent_customer_texts,
+            brazil_now=brazil_now,
+            tool_arguments=args,
         )
-        horarios = (schedule_result.get("dados") or {}).get("horarios_disponiveis") or []
-        if not horarios:
-            reply = _physical_eval_no_slots_reply(
-                schedule_date, pref["period"], lead
-            )
-        else:
-            reply = await _humanize_tool_reply_with_llm(
-                config,
-                user_text,
-                schedule_result,
-                schedule_tool,
-                lead,
-            )
     else:
         reply = _format_tool_result_as_reply(schedule_result)
         if reply is None:
@@ -2389,9 +2489,10 @@ async def generate_ai_reply(
 
     guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
     physical_eval_intent = _is_physical_eval_intent(user_text)
+    has_schedule_tool = _has_schedule_tool(tools_by_key)
     physical_eval_active = (
         has_verify_unit_tool
-        and TOOL_KEY_CHECK_SCHEDULE in tools_by_key
+        and has_schedule_tool
         and not plan_intent_active
         and (
             physical_eval_intent
@@ -3045,6 +3146,16 @@ async def generate_ai_reply(
                     refreshed = lead_result.scalar_one_or_none()
                     if refreshed:
                         lead = refreshed
+                    if _is_schedule_tool(tool):
+                        schedule_reply = await _reply_from_schedule_tool_result(
+                            user_text,
+                            result,
+                            lead,
+                            recent_customer_texts=recent_customer_texts,
+                            brazil_now=brazil_now,
+                            tool_arguments=arguments,
+                        )
+                        return schedule_reply, deferred_end_call, bool(touched_units)
                 elif (
                     _is_technical_tool_failure(result)
                     and key != TOOL_KEY_TRANSFER
