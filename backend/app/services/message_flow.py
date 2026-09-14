@@ -1827,24 +1827,26 @@ def _physical_eval_schedule_args(
     return args
 
 
-async def _resolve_physical_eval_chosen_time(
-    db: AsyncSession,
-    conversation: Conversation,
+def _resolve_physical_eval_chosen_time(
     user_text: str,
-    schedule_tool: Tool,
-    unit: str,
+    conversation: Conversation,
     schedule_date: str,
     pref: dict,
 ) -> str | None:
     """Resolve o horário que o cliente escolheu depois de ver a lista
-    numerada. Um número sozinho é ambíguo — "1" quase sempre é a OPÇÃO 1 da
-    lista, mas "11" pode ser a opção 11 (raro, lista curta) OU a hora 11h
-    (comum) — bug real encontrado em produção: "1" era sempre tratado como
-    "01:00", fazendo a IA tentar agendar de madrugada em vez da primeira
-    opção mostrada. Por isso: tenta primeiro como ÍNDICE na lista atual
-    (reconsultada agora, pra garantir que ainda está valendo); se o número
-    não for um índice válido, tenta como hora cheia. Horário explícito
-    (com "h" ou ":", ex: "14:30", "9h") é usado direto, sem ambiguidade.
+    numerada — sem chamar consultar_agendamento_horarios de novo (essa
+    ferramenta só serve pra MOSTRAR a lista; depois que o cliente escolhe,
+    só insere_agenda_avalicao deve ser chamada). Um número sozinho é
+    ambíguo — "1" quase sempre é a OPÇÃO 1 da lista, mas "11" pode ser a
+    opção 11 (raro, lista curta) OU a hora 11h (comum) — bug real
+    encontrado em produção: "1" era sempre tratado como "01:00", fazendo a
+    IA tentar agendar de madrugada em vez da primeira opção mostrada. Por
+    isso: tenta primeiro como ÍNDICE na última lista que a própria Mônica
+    mostrou pro cliente (persistida em
+    conversation.physical_eval_offered_slots quando a lista foi exibida);
+    se o número não for um índice válido, tenta como hora cheia. Horário
+    explícito (com "h" ou ":", ex: "14:30", "9h") é usado direto, sem
+    ambiguidade e sem precisar da lista.
 
     Só considera a ÚLTIMA linha de user_text (última mensagem da rajada,
     ver `combined_text` em reply_to_pending_messages) — se o cliente mandar
@@ -1865,22 +1867,18 @@ async def _resolve_physical_eval_chosen_time(
         return None
     number = int(number_match.group(1))
 
-    args = _physical_eval_schedule_args(schedule_tool, unit, schedule_date)
-    result = await execute_tool(db, schedule_tool, args, conversation)
-    if not result.get("sucesso"):
+    offered = conversation.physical_eval_offered_slots or {}
+    if offered.get("date") != schedule_date or offered.get("period") != pref.get("period"):
         logger.info(
-            "[avaliacao-fisica] reconsulta pra resolver numero %s falhou (conversa=%s): %r",
-            number, conversation.id, result.get("mensagem"),
+            "[avaliacao-fisica] numero %s recebido mas nao ha lista recente pra esse dia/periodo "
+            "(conversa=%s, offered=%r, data=%r, periodo=%r)",
+            number, conversation.id, offered, schedule_date, pref.get("period"),
         )
         return None
-    dados = result.get("dados") if isinstance(result.get("dados"), dict) else {}
-    horarios = dados.get("horarios_disponiveis") or []
-    filtered, _meta = _filter_horarios_by_preference(
-        horarios, period=pref.get("period"), preferred_time=None
-    )
+    filtered = offered.get("slots") or []
     logger.info(
-        "[avaliacao-fisica] resolvendo numero %s (conversa=%s): lista atual=%r período=%r",
-        number, conversation.id, filtered, pref.get("period"),
+        "[avaliacao-fisica] resolvendo numero %s pela lista ja mostrada (conversa=%s): %r",
+        number, conversation.id, filtered,
     )
     if 1 <= number <= len(filtered):
         return filtered[number - 1]
@@ -1978,8 +1976,8 @@ async def _run_physical_eval_pipeline(
     book_tool = tools_by_key.get(TOOL_KEY_BOOK_PHYSICAL_EVAL)
     chosen_time = None
     if book_tool:
-        chosen_time = await _resolve_physical_eval_chosen_time(
-            db, conversation, user_text, schedule_tool, unit, schedule_date, pref
+        chosen_time = _resolve_physical_eval_chosen_time(
+            user_text, conversation, schedule_date, pref
         )
     logger.info(
         "[avaliacao-fisica] chosen_time=%r (conversa=%s, book_tool=%s)",
@@ -2023,6 +2021,20 @@ async def _run_physical_eval_pipeline(
 
     schedule_result = await execute_tool(db, schedule_tool, args, conversation)
     if schedule_result.get("sucesso"):
+        dados = schedule_result.get("dados") if isinstance(schedule_result.get("dados"), dict) else {}
+        offered_slots, _meta = _filter_horarios_by_preference(
+            dados.get("horarios_disponiveis") or [], period=pref.get("period"), preferred_time=None
+        )
+        conversation.physical_eval_offered_slots = {
+            "date": schedule_date,
+            "period": pref.get("period"),
+            "slots": offered_slots,
+        }
+        db.add(conversation)
+        logger.info(
+            "[avaliacao-fisica] lista mostrada e persistida (conversa=%s): %r",
+            conversation.id, conversation.physical_eval_offered_slots,
+        )
         reply = await _reply_from_schedule_tool_result(
             user_text,
             schedule_result,

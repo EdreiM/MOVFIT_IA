@@ -30,6 +30,13 @@ class Conversation(Base):
     status: Mapped[str] = mapped_column(String(50), default="open")  # open | resolved | with_human
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     channel: Mapped[str | None] = mapped_column(String(50))
+    # Última lista de horários de avaliação física realmente mostrada ao
+    # cliente ({"date": "yyyyMMdd", "period": "manha"|"tarde"|"noite"|None,
+    # "slots": ["06:00", "08:00", ...]}) — permite resolver "1"/"2" como
+    # índice na lista sem reconsultar a ferramenta consultar_agendamento_
+    # horarios de novo (evita uma segunda chamada de ferramenta no mesmo
+    # turno, ver _resolve_physical_eval_chosen_time em message_flow.py).
+    physical_eval_offered_slots: Mapped[dict | None] = mapped_column(JSONB)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
