@@ -1844,8 +1844,15 @@ async def _resolve_physical_eval_chosen_time(
     opção mostrada. Por isso: tenta primeiro como ÍNDICE na lista atual
     (reconsultada agora, pra garantir que ainda está valendo); se o número
     não for um índice válido, tenta como hora cheia. Horário explícito
-    (com "h" ou ":", ex: "14:30", "9h") é usado direto, sem ambiguidade."""
-    raw = _normalize_text(user_text)
+    (com "h" ou ":", ex: "14:30", "9h") é usado direto, sem ambiguidade.
+
+    Só considera a ÚLTIMA linha de user_text (última mensagem da rajada,
+    ver `combined_text` em reply_to_pending_messages) — se o cliente mandar
+    mais de uma mensagem rápida e uma delas mencionar um horário sem
+    relação com a escolha (ex: outro assunto), o texto combinado inteiro
+    não deve ser vasculhado atrás de qualquer dígito parecido com hora."""
+    last_line = (user_text or "").strip().splitlines()[-1] if user_text and user_text.strip() else ""
+    raw = _normalize_text(last_line)
     match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", raw)
     if match:
         return _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
