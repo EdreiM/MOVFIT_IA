@@ -836,6 +836,16 @@ def _physical_eval_followup(
         return True
     if _extract_schedule_time_from_text(text):
         return True
+    # Número solto (ex: "8", "pode ser o 2") — não é tratado como HORA aqui
+    # de propósito (ver _extract_schedule_time_from_text e o bug real de
+    # "1" virar "01:00"), mas ainda precisa manter esse turno dentro do
+    # pipeline determinístico: sem isso, uma resposta só com número escapa
+    # pro loop normal de function-calling da IA, que decide sozinha (sem
+    # nenhuma garantia de código) se/como chamar insere_agenda_avalicao —
+    # bug real visto em produção: a IA chamou a ferramenta certa "por
+    # sorte", sem passar pela validação da lista já mostrada.
+    if re.search(r"(?:^|\D)\d{1,2}(?:\D|$)", text or ""):
+        return True
     tokens = _normalize_tokens(text)
     if tokens & set(_WEEKDAY_TO_INDEX) and len(tokens) <= 5:
         return True
@@ -3200,8 +3210,17 @@ async def generate_ai_reply(
 
     # TOOL_KEY_CHECK_SESSION é só pro follow-up consultar por conta própria
     # (ver TOOL_KEY_CHECK_SESSION acima) — nunca deve ser oferecida como uma
-    # função que a IA decide chamar durante a conversa.
-    offered_tools = [t for t in active_tools if t.tool_key != TOOL_KEY_CHECK_SESSION]
+    # função que a IA decide chamar durante a conversa. TOOL_KEY_BOOK_
+    # PHYSICAL_EVAL só deve ser chamada pelo pipeline determinístico
+    # (_run_physical_eval_pipeline), nunca pela IA livremente — chamar essa
+    # ferramenta sem passar pela validação da lista já mostrada (ver
+    # _resolve_physical_eval_chosen_time) já causou reserva com horário
+    # incompatível com o que o cliente via na tela em produção.
+    offered_tools = [
+        t
+        for t in active_tools
+        if t.tool_key not in (TOOL_KEY_CHECK_SESSION, TOOL_KEY_BOOK_PHYSICAL_EVAL)
+    ]
     for t in offered_tools:
         if not _is_valid_openai_tool(t):
             # Deixa essa ferramenta de fora em vez de derrubar a resposta
