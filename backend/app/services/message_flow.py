@@ -530,6 +530,10 @@ async def _upsert_lead(
             pass
     if fields.get("unidade"):
         lead.unit = str(fields["unidade"])
+    if fields.get("avaliacao_data"):
+        lead.last_physical_eval_date = str(fields["avaliacao_data"])
+    if fields.get("avaliacao_horario"):
+        lead.last_physical_eval_time = str(fields["avaliacao_horario"])
     if fields.get("estagio"):
         lead.stage = str(fields["estagio"])
     elif stage_if_new and lead.stage == "novo":
@@ -1998,6 +2002,20 @@ async def _run_physical_eval_pipeline(
         if book_result.get("sucesso"):
             book_dados = book_result.get("dados") if isinstance(book_result.get("dados"), dict) else {}
             reply = _physical_eval_booking_confirmation_reply(book_dados, lead)
+            # Reforço no código: grava o agendamento no cadastro do cliente
+            # (métrica "quantos a IA agendou" + último agendamento pra
+            # exibir na tela de Clientes) assim que a reserva é confirmada
+            # pela Pacto — não depende da IA lembrar de fazer isso.
+            lead = await _upsert_lead(
+                db,
+                conversation.company_id,
+                conversation.contact_phone,
+                {
+                    "avaliacao_data": book_dados.get("data") or schedule_date,
+                    "avaliacao_horario": book_dados.get("horario_inicial") or chosen_time,
+                },
+                sticky_flags={"physical_eval_scheduled": True},
+            ) or lead
         elif _is_technical_tool_failure(book_result):
             reply = await _transfer_and_notify_tool_failure(
                 db, conversation, tools_by_key, f"ferramenta {book_tool.tool_key} falhou"

@@ -11,9 +11,17 @@ type Lead = {
   birthdate: string | null;
   unit: string | null;
   stage: string;
+  physical_eval_scheduled: boolean;
+  last_physical_eval_date: string | null;
+  last_physical_eval_time: string | null;
   custom_fields: Record<string, unknown>;
   updated_at: string;
 };
+
+function formatEvalDate(yyyyMMdd: string | null): string {
+  if (!yyyyMMdd || yyyyMMdd.length !== 8) return "";
+  return `${yyyyMMdd.slice(6, 8)}/${yyyyMMdd.slice(4, 6)}/${yyyyMMdd.slice(0, 4)}`;
+}
 
 export default function LeadsPage() {
   const { user } = useAuth();
@@ -156,6 +164,16 @@ export default function LeadsPage() {
                   </button>
                 )}
               </div>
+
+              {selected.last_physical_eval_date && (
+                <div className="rounded-md border border-leaf/30 bg-leaf/10 px-3 py-2 text-sm text-sand/80">
+                  Última avaliação física agendada pela IA:{" "}
+                  <span className="font-medium text-sand">
+                    {formatEvalDate(selected.last_physical_eval_date)}
+                    {selected.last_physical_eval_time ? ` às ${selected.last_physical_eval_time}` : ""}
+                  </span>
+                </div>
+              )}
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block space-y-1">

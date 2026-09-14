@@ -12,6 +12,7 @@ type Overview = {
   students_total: number;
   transferred_total: number;
   cancellation_requests_total: number;
+  physical_evals_scheduled_total: number;
 };
 
 type Health = {
@@ -197,6 +198,7 @@ export default function DashboardPage() {
         { label: "Alunos", value: overview.students_total },
         { label: "Transferidos", value: overview.transferred_total },
         { label: "Pediram cancelamento", value: overview.cancellation_requests_total },
+        { label: "Avaliações agendadas", value: overview.physical_evals_scheduled_total },
         ...featuredTools.map((t) => ({ label: t.tool_name, value: t.success_calls })),
       ]
     : [];

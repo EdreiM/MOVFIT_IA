@@ -43,6 +43,13 @@ class Lead(Base):
     is_student: Mapped[bool] = mapped_column(Boolean, default=False)
     was_transferred: Mapped[bool] = mapped_column(Boolean, default=False)
     wants_cancellation: Mapped[bool] = mapped_column(Boolean, default=False)
+    # "Já agendou avaliação física alguma vez" (métrica, permanente) — os
+    # dois campos abaixo guardam só o ÚLTIMO agendamento feito pela IA
+    # (mutável, sobrescrito a cada novo agendamento), pra mostrar no
+    # cadastro do cliente qual é o compromisso mais recente.
+    physical_eval_scheduled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_physical_eval_date: Mapped[str | None] = mapped_column(String(8))  # yyyyMMdd
+    last_physical_eval_time: Mapped[str | None] = mapped_column(String(5))  # HH:MM
     # Qualquer outro dado que apareça no futuro (ex: profissão, objetivo,
     # indicação) sem precisar criar coluna nova pra cada campo novo.
     custom_fields: Mapped[dict] = mapped_column(JSONB, default=dict)

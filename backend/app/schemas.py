@@ -381,6 +381,9 @@ class LeadOut(BaseModel):
     is_student: bool
     was_transferred: bool
     wants_cancellation: bool
+    physical_eval_scheduled: bool
+    last_physical_eval_date: str | None
+    last_physical_eval_time: str | None
     custom_fields: dict
     created_at: datetime
     updated_at: datetime
@@ -410,6 +413,7 @@ class MetricsOverview(BaseModel):
     students_total: int
     transferred_total: int
     cancellation_requests_total: int
+    physical_evals_scheduled_total: int
 
 
 class MetricsPoint(BaseModel):

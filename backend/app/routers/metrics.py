@@ -85,6 +85,11 @@ async def _compute_overview(db: AsyncSession, company_id: UUID) -> MetricsOvervi
         .select_from(Lead)
         .where(Lead.company_id == company_id, Lead.wants_cancellation.is_(True))
     )
+    physical_evals_scheduled_total = await db.scalar(
+        select(func.count())
+        .select_from(Lead)
+        .where(Lead.company_id == company_id, Lead.physical_eval_scheduled.is_(True))
+    )
 
     return MetricsOverview(
         conversations_total=conv_total or 0,
@@ -97,6 +102,7 @@ async def _compute_overview(db: AsyncSession, company_id: UUID) -> MetricsOvervi
         students_total=students_total or 0,
         transferred_total=transferred_total or 0,
         cancellation_requests_total=cancellation_requests_total or 0,
+        physical_evals_scheduled_total=physical_evals_scheduled_total or 0,
     )
 
 
