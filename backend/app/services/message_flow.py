@@ -1046,7 +1046,14 @@ def _extract_schedule_time_from_text(text: str) -> str | None:
     match = re.search(r"(?:^|\D)(\d{1,2})\s*h(?:\D|$)", raw)
     if match:
         return _normalize_schedule_horario(match.group(1))
-    return _normalize_schedule_horario(text)
+    # NÃO cair pra _normalize_schedule_horario(text) aqui: isso trataria um
+    # número solto (ex: cliente respondendo "1" pra escolher a opção 1 da
+    # lista numerada) como se fosse a hora "01:00" — bug real encontrado em
+    # produção (cliente respondeu "1" e a IA tentou agendar 1h da manhã em
+    # vez da primeira opção da lista). Número solto sem "h"/":" não é uma
+    # hora explícita aqui — ver _resolve_physical_eval_chosen_time, que
+    # trata esse caso como índice na lista.
+    return None
 
 
 def _extract_schedule_period_from_text(text: str) -> str | None:
@@ -1177,10 +1184,7 @@ def _physical_eval_ask_day_reply(unit: str, lead: Lead | None) -> str:
     prefix = f"{first}, encontrei" if first else "Encontrei"
     return (
         f"{prefix} sua matrícula na unidade *{unit}*! 😊 "
-        "Para consultar horários de *avaliação física*, me diz um *dia útil* "
-        "(segunda a sexta) e se prefere *manhã*, *tarde* ou *noite* — "
-        "pode mandar tipo *segunda de manhã*, *terça às 9h*, *quarta à tarde* "
-        "ou *quinta à noite*."
+        "Qual dia e período você prefere pra avaliação física?"
     )
 
 
@@ -1450,14 +1454,15 @@ def _format_schedule_reply_from_dados(dados: dict, lead: Lead | None = None) -> 
         else None
     )
     first = _lead_first_name(lead)
-    greeting = f"Oi, {first}! 😊 " if first else "Consultei aqui! 😊 "
+    prefix = f"{first}, " if first else ""
 
     if not intervalos:
         periodo_txt = f" no período da *{period_label}*" if period_label else ""
-        return (
-            f"{greeting}No dia *{data_fmt}*{periodo_txt}, na unidade *{unidade}*, "
+        message = (
+            f"{prefix}no dia *{data_fmt}*{periodo_txt}, na unidade *{unidade}*, "
             f"não encontrei horários livres para *{tipo}*. Quer tentar outro dia ou período?"
         )
+        return message if prefix else message[0].upper() + message[1:]
 
     shown = intervalos[:12]
     lista = "\n".join(f"*{item}*" for item in shown)
@@ -1477,16 +1482,17 @@ def _format_schedule_reply_from_dados(dados: dict, lead: Lead | None = None) -> 
             f"\n\nTambém tem horários *de noite* disponíveis:\n{noite_lista}{noite_extra}"
         )
 
-    intro = greeting
+    intro = prefix
     if pref_indisponivel:
-        intro += f"O horário *{pref_indisponivel}* não está livre, mas "
+        intro += f"o horário *{pref_indisponivel}* não está livre, mas "
     periodo_txt = f" de *{period_label}*" if period_label else ""
-    return (
-        f"{intro}No dia *{data_fmt}*{periodo_txt}, na *{unidade}*, "
+    message = (
+        f"{intro}no dia *{data_fmt}*{periodo_txt}, na *{unidade}*, "
         f"estes horários estão livres para *{tipo}*:\n{lista}{extra}"
         f"{noite_txt}\n"
         "Qual prefere? Pode responder com o número ou o horário."
     )
+    return message if intro else message[0].upper() + message[1:]
 
 
 async def _reply_from_schedule_tool_result(
@@ -1801,6 +1807,75 @@ async def _run_student_operational_pipeline(
     return reply, lead
 
 
+def _physical_eval_schedule_args(
+    schedule_tool: Tool, unit: str, schedule_date: str
+) -> dict:
+    declared_params = {
+        p.get("name")
+        for p in (schedule_tool.parameters or [])
+        if isinstance(p, dict) and p.get("name")
+    }
+    args: dict = {}
+    if "unidade" in declared_params:
+        args["unidade"] = unit
+    if "Unidade" in declared_params:
+        args["Unidade"] = unit
+    if "data" in declared_params:
+        args["data"] = schedule_date
+    if "dia" in declared_params:
+        args["dia"] = schedule_date
+    return args
+
+
+async def _resolve_physical_eval_chosen_time(
+    db: AsyncSession,
+    conversation: Conversation,
+    user_text: str,
+    schedule_tool: Tool,
+    unit: str,
+    schedule_date: str,
+    pref: dict,
+) -> str | None:
+    """Resolve o horário que o cliente escolheu depois de ver a lista
+    numerada. Um número sozinho é ambíguo — "1" quase sempre é a OPÇÃO 1 da
+    lista, mas "11" pode ser a opção 11 (raro, lista curta) OU a hora 11h
+    (comum) — bug real encontrado em produção: "1" era sempre tratado como
+    "01:00", fazendo a IA tentar agendar de madrugada em vez da primeira
+    opção mostrada. Por isso: tenta primeiro como ÍNDICE na lista atual
+    (reconsultada agora, pra garantir que ainda está valendo); se o número
+    não for um índice válido, tenta como hora cheia. Horário explícito
+    (com "h" ou ":", ex: "14:30", "9h") é usado direto, sem ambiguidade."""
+    raw = _normalize_text(user_text)
+    match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", raw)
+    if match:
+        return _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
+    match = re.search(r"(?:^|\D)(\d{1,2})\s*h(?:\D|$)", raw)
+    if match:
+        return _normalize_schedule_horario(match.group(1))
+
+    number_match = re.search(r"(?:^|\D)(\d{1,2})(?:\D|$)", raw)
+    if not number_match:
+        return None
+    number = int(number_match.group(1))
+
+    args = _physical_eval_schedule_args(schedule_tool, unit, schedule_date)
+    result = await execute_tool(db, schedule_tool, args, conversation)
+    if not result.get("sucesso"):
+        return None
+    dados = result.get("dados") if isinstance(result.get("dados"), dict) else {}
+    horarios = dados.get("horarios_disponiveis") or []
+    filtered, _meta = _filter_horarios_by_preference(
+        horarios, period=pref.get("period"), preferred_time=None
+    )
+    if 1 <= number <= len(filtered):
+        return filtered[number - 1]
+    if 0 <= number <= 23:
+        candidate = f"{number:02d}:00"
+        if candidate in filtered:
+            return candidate
+    return None
+
+
 async def _run_physical_eval_pipeline(
     db: AsyncSession,
     conversation: Conversation,
@@ -1875,20 +1950,24 @@ async def _run_physical_eval_pipeline(
     if _schedule_date_is_weekend(schedule_date):
         return _physical_eval_weekend_reply(schedule_date, lead), lead
 
-    # Cliente já escolheu um horário específico (ex: respondeu "14:30" depois
-    # de ver a lista) — confirma a reserva de verdade em vez de consultar os
+    # Cliente já escolheu um horário específico (número da lista ou horário
+    # explícito) — confirma a reserva de verdade em vez de consultar os
     # horários de novo. Reforço no código, não só prompt: sem isso, a IA
     # nunca chega a considerar chamar TOOL_KEY_BOOK_PHYSICAL_EVAL, porque
     # esse pipeline determinístico intercepta toda mensagem de follow-up de
     # avaliação física antes do loop normal de function-calling rodar.
     book_tool = tools_by_key.get(TOOL_KEY_BOOK_PHYSICAL_EVAL)
-    preferred_time = pref["preferred_time"]
-    if book_tool and preferred_time and _normalize_schedule_horario(preferred_time):
+    chosen_time = None
+    if book_tool:
+        chosen_time = await _resolve_physical_eval_chosen_time(
+            db, conversation, user_text, schedule_tool, unit, schedule_date, pref
+        )
+    if book_tool and chosen_time:
         book_args = {
             "cpf": cpf,
             "unidade": unit,
             "data": schedule_date,
-            "horario": _normalize_schedule_horario(preferred_time),
+            "horario": chosen_time,
         }
         book_result = await execute_tool(db, book_tool, book_args, conversation)
         if book_result.get("sucesso"):
@@ -1909,20 +1988,7 @@ async def _run_physical_eval_pipeline(
             )
         return reply, lead
 
-    declared_params = {
-        p.get("name")
-        for p in (schedule_tool.parameters or [])
-        if isinstance(p, dict) and p.get("name")
-    }
-    args: dict = {}
-    if "unidade" in declared_params:
-        args["unidade"] = unit
-    if "Unidade" in declared_params:
-        args["Unidade"] = unit
-    if "data" in declared_params:
-        args["data"] = schedule_date
-    if "dia" in declared_params:
-        args["dia"] = schedule_date
+    args = _physical_eval_schedule_args(schedule_tool, unit, schedule_date)
 
     schedule_result = await execute_tool(db, schedule_tool, args, conversation)
     if schedule_result.get("sucesso"):
