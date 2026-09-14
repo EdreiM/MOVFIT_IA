@@ -20,11 +20,17 @@ async with advisory_lock(db, LOCK_NAMESPACE_X, key) as acquired:
 
 Cada família de lock novo ganha um namespace inteiro sequencial em `locks.py` (não reaproveita namespace de outro job). Se o lock for por entidade (ex: por conversa), usa `uuid_lock_key(entidade.id)` como `key`; se for uma tarefa única/global (ex: uma varredura), usa `key=0` (padrão).
 
-`pg_advisory_lock`/`pg_advisory_unlock` têm efeito imediato, fora da transação — por isso `advisory_lock` nunca faz commit/rollback por conta própria; quem decide o destino da transação é sempre o chamador.
+`pg_advisory_lock`/`pg_advisory_unlock` têm efeito imediato, fora da transação — por isso `advisory_lock` nunca dá commit por conta própria; quem decide se o trabalho deve ser persistido é sempre o chamador. A única exceção é defensiva: se o bloco protegido pelo lock estourar uma exceção, `advisory_lock` dá rollback antes de tentar soltar o lock (senão o Postgres rejeita o próprio comando de unlock numa transação já abortada) — isso é seguro mesmo se o chamador também der rollback logo em seguida no próprio `except`, já que `rollback()` repetido na mesma sessão não é erro.
 
 ## Confiabilidade de comportamento da IA
 
 Testado repetidamente nesta sessão: quando a IA precisa **fazer algo de forma confiável como efeito colateral** de uma conversa (chamar uma ferramenta específica em vez de transferir, persistir um dado que apareceu de outro jeito, não prometer uma ação sem executá-la), **uma instrução de prompt sozinha não é suficiente** — funciona na maioria das vezes, mas falha o bastante em produção pra não poder depender só dela. O padrão estabelecido é sempre um **reforço duplo**: a instrução no prompt/descrição da ferramenta (ajuda o modelo a decidir certo) **+** uma trava determinística no código que garante o resultado independente do que o modelo decidiu (ver `_promised_transfer_without_acting`, `_LEAD_ARG_KEYS`/captura automática de CPF/unidade, `_wants_plan_info` em `message_flow.py`).
+
+### Pipelines determinísticos (avaliação física, convidados) engolem o turno inteiro
+
+Fluxos como `_run_physical_eval_pipeline`/`_run_student_operational_pipeline` em `message_flow.py` interceptam a mensagem do cliente ANTES do loop normal de function-calling da IA rodar (`if pipeline_reply is not None: return ...`). Isso é ótimo pra garantir CPF/unidade/dia de forma confiável, mas significa que **uma etapa nova nesse fluxo (ex: confirmar um agendamento depois que o cliente escolhe um horário) só acontece se o próprio pipeline souber chamar a ferramenta** — a IA nunca chega a considerar isso sozinha, não importa quão boa seja a descrição da ferramenta no painel. Ao adicionar uma etapa nova a um desses fluxos, ela precisa ser detectada e chamada dentro da função Python do pipeline, não só declarada como ferramenta pra IA decidir.
+
+Cuidado também com `_is_schedule_tool`/`_is_guest_tool` (e heurísticas parecidas): elas reconhecem o tipo da ferramenta por palavra-chave no `tool_key` **e no nome** (`"agendamento"`, `"horario"`, `"convidado"` etc.), usadas pra decidir qual instrução extra passar pro humanizador da IA. Uma ferramenta nova cujo nome contenha uma dessas palavras por coincidência (ex: "Insere agendamento de avaliação") pode ser confundida com o tipo errado e herdar uma instrução que não faz sentido pra ela. Quando isso acontece numa etapa crítica (ex: confirmação de agendamento), prefira responder em código determinístico (ver `_physical_eval_booking_confirmation_reply`) em vez de passar pelo humanizador de LLM.
 
 ## Contrato de webhook (ferramentas e RAG via n8n)
 

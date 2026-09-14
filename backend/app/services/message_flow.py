@@ -366,6 +366,12 @@ TOOL_KEY_SEND_PLAN_IMAGES = "enviar_imagens_planos"
 TOOL_KEY_VERIFY_UNIT_BY_CPF = "verificar_unidade_por_cpf"
 # Consulta horários livres para avaliação física (n8n/Pacto) — só lista, não confirma.
 TOOL_KEY_CHECK_SCHEDULE = "consultar_agendamento_horarios"
+# Confirma o agendamento (reserva de verdade) depois que o cliente escolheu
+# um horário da lista de TOOL_KEY_CHECK_SCHEDULE. tool_key tem esse nome com
+# erro de digitação porque a ferramenta já foi criada em produção assim e o
+# tool_key não pode ser editado depois de criado — não corrigir aqui sem
+# recriar a ferramenta no painel também.
+TOOL_KEY_BOOK_PHYSICAL_EVAL = "insere_agenda_avalicao"
 # Opcional — só existe pra empresas cuja plataforma (ex: WTS/GYMBOT) permite
 # consultar se a sessão do cliente ainda está pendente. Usada só
 # internamente pelo follow-up (app/services/followup.py) antes de mandar
@@ -906,6 +912,29 @@ def _lead_first_name(lead: Lead | None) -> str | None:
         return None
     first = lead.name.strip().split()[0]
     return first or None
+
+
+def _physical_eval_booking_confirmation_reply(dados: dict, lead: Lead | None) -> str:
+    """Confirmação de agendamento em código, não via LLM: _is_schedule_tool
+    detecta pelo NOME da ferramenta (contém "agendamento"), então o
+    humanizador aplicaria a instrução da ferramenta de CONSULTA ("não diga
+    que já agendou") na resposta de confirmação — o oposto do desejado."""
+    first_name = _lead_first_name(lead)
+    saudacao = f"{first_name}, " if first_name else ""
+    data_formatada = dados.get("data_formatada") or _format_schedule_date_br(
+        str(dados.get("data") or "")
+    )
+    horario = dados.get("horario_inicial") or ""
+    unidade = dados.get("unidade") or ""
+
+    partes = [f"{saudacao}sua avaliação física está confirmada"]
+    if data_formatada:
+        partes.append(f"para {data_formatada}")
+    if horario:
+        partes.append(f"às {horario}")
+    if unidade:
+        partes.append(f"na unidade {unidade}")
+    return " ".join(partes) + ". Até lá! 😊"
 
 
 _SCHEDULE_MORNING_END_MINUTES = 12 * 60  # antes de 12:00 = manhã
@@ -1845,6 +1874,40 @@ async def _run_physical_eval_pipeline(
 
     if _schedule_date_is_weekend(schedule_date):
         return _physical_eval_weekend_reply(schedule_date, lead), lead
+
+    # Cliente já escolheu um horário específico (ex: respondeu "14:30" depois
+    # de ver a lista) — confirma a reserva de verdade em vez de consultar os
+    # horários de novo. Reforço no código, não só prompt: sem isso, a IA
+    # nunca chega a considerar chamar TOOL_KEY_BOOK_PHYSICAL_EVAL, porque
+    # esse pipeline determinístico intercepta toda mensagem de follow-up de
+    # avaliação física antes do loop normal de function-calling rodar.
+    book_tool = tools_by_key.get(TOOL_KEY_BOOK_PHYSICAL_EVAL)
+    preferred_time = pref["preferred_time"]
+    if book_tool and preferred_time and _normalize_schedule_horario(preferred_time):
+        book_args = {
+            "cpf": cpf,
+            "unidade": unit,
+            "data": schedule_date,
+            "horario": _normalize_schedule_horario(preferred_time),
+        }
+        book_result = await execute_tool(db, book_tool, book_args, conversation)
+        if book_result.get("sucesso"):
+            book_dados = book_result.get("dados") if isinstance(book_result.get("dados"), dict) else {}
+            reply = _physical_eval_booking_confirmation_reply(book_dados, lead)
+        elif _is_technical_tool_failure(book_result):
+            reply = await _transfer_and_notify_tool_failure(
+                db, conversation, tools_by_key, f"ferramenta {book_tool.tool_key} falhou"
+            )
+        else:
+            # Não-técnico (ex: 409 do Pacto porque o horário foi ocupado
+            # entre a consulta e a confirmação) — mensagem própria em vez de
+            # repassar o texto do n8n, que é escrito pra orientar a IA, não
+            # pro cliente ler direto.
+            reply = (
+                "Esse horário já não está mais disponível — alguém deve ter reservado antes. "
+                "Consegue me dizer outro horário da lista que te mostrei? 😊"
+            )
+        return reply, lead
 
     declared_params = {
         p.get("name")

@@ -27,8 +27,16 @@ async def advisory_lock(db: AsyncSession, namespace: int, key: int = 0):
     pg_try_advisory_lock/pg_advisory_unlock têm efeito imediato — não fazem
     parte da transação, não precisam (nem devem) de commit pra "valer".
     Por isso é seguro usar a mesma `db` que o chamador já usa pro resto do
-    trabalho: não commitamos nem revertemos nada aqui, quem decide o
-    destino da transação continua sendo o chamador.
+    trabalho: nunca damos commit aqui, quem decide se o trabalho deve ser
+    persistido continua sendo o chamador.
+
+    Se o bloco `yield` estourar uma exceção, damos rollback antes de tentar
+    soltar o lock — o Postgres rejeita qualquer novo comando (inclusive o
+    pg_advisory_unlock) numa transação já abortada por erro, então sem esse
+    rollback defensivo o unlock falharia silenciosamente. É seguro o
+    chamador dar rollback de novo depois (ex: no próprio `except`) — a
+    mesma sessão aceita `rollback()` repetido sem erro quando não há
+    transação pendente.
 
     Uso:
         async with advisory_lock(db, LOCK_NAMESPACE_X, key) as acquired:
