@@ -1868,11 +1868,19 @@ async def _resolve_physical_eval_chosen_time(
     args = _physical_eval_schedule_args(schedule_tool, unit, schedule_date)
     result = await execute_tool(db, schedule_tool, args, conversation)
     if not result.get("sucesso"):
+        logger.info(
+            "[avaliacao-fisica] reconsulta pra resolver numero %s falhou (conversa=%s): %r",
+            number, conversation.id, result.get("mensagem"),
+        )
         return None
     dados = result.get("dados") if isinstance(result.get("dados"), dict) else {}
     horarios = dados.get("horarios_disponiveis") or []
     filtered, _meta = _filter_horarios_by_preference(
         horarios, period=pref.get("period"), preferred_time=None
+    )
+    logger.info(
+        "[avaliacao-fisica] resolvendo numero %s (conversa=%s): lista atual=%r período=%r",
+        number, conversation.id, filtered, pref.get("period"),
     )
     if 1 <= number <= len(filtered):
         return filtered[number - 1]
@@ -1896,6 +1904,10 @@ async def _run_physical_eval_pipeline(
     recent_customer_texts: list[str] | None = None,
 ) -> tuple[str | None, Lead | None]:
     """Avaliação física: CPF → verificar_unidade_por_cpf → dia → consultar horários."""
+    logger.info(
+        "[avaliacao-fisica] pipeline chamado (conversa=%s): user_text=%r",
+        conversation.id, user_text,
+    )
     verify_tool = tools_by_key.get(TOOL_KEY_VERIFY_UNIT_BY_CPF)
     schedule_tool = _get_schedule_tool(tools_by_key)
     if not verify_tool or not schedule_tool:
@@ -1969,6 +1981,10 @@ async def _run_physical_eval_pipeline(
         chosen_time = await _resolve_physical_eval_chosen_time(
             db, conversation, user_text, schedule_tool, unit, schedule_date, pref
         )
+    logger.info(
+        "[avaliacao-fisica] chosen_time=%r (conversa=%s, book_tool=%s)",
+        chosen_time, conversation.id, bool(book_tool),
+    )
     if book_tool and chosen_time:
         book_args = {
             "cpf": cpf,
@@ -1977,6 +1993,10 @@ async def _run_physical_eval_pipeline(
             "horario": chosen_time,
         }
         book_result = await execute_tool(db, book_tool, book_args, conversation)
+        logger.info(
+            "[avaliacao-fisica] resultado da reserva (conversa=%s): sucesso=%s dados=%r",
+            conversation.id, book_result.get("sucesso"), book_result.get("dados"),
+        )
         if book_result.get("sucesso"):
             book_dados = book_result.get("dados") if isinstance(book_result.get("dados"), dict) else {}
             reply = _physical_eval_booking_confirmation_reply(book_dados, lead)
@@ -1995,6 +2015,10 @@ async def _run_physical_eval_pipeline(
             )
         return reply, lead
 
+    logger.info(
+        "[avaliacao-fisica] sem chosen_time resolvido — caindo na consulta normal (conversa=%s, user_text=%r)",
+        conversation.id, user_text,
+    )
     args = _physical_eval_schedule_args(schedule_tool, unit, schedule_date)
 
     schedule_result = await execute_tool(db, schedule_tool, args, conversation)
