@@ -14,6 +14,7 @@ from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
 from app.services.message_flow import (
     TOOL_KEY_CHECK_SESSION,
     TOOL_KEY_END,
+    _normalize_text,
     _upsert_lead,
     compose_base_prompt,
     execute_tool,
@@ -86,7 +87,9 @@ async def _generate_followup_text(
         "se mandou link de pagamento, pergunta se conseguiu acessar; se só respondeu "
         "uma pergunta, pergunta se pode ajudar em mais alguma coisa). Não repita "
         "saudação genérica de início de conversa, não se desculpe por 'incomodar' ou "
-        "'atrapalhar', e não invente nenhuma informação nova.\n\n"
+        "'atrapalhar', e não invente nenhuma informação nova. NÃO repita a sua própria "
+        "última mensagem da conversa (a mais recente enviada por você) nem uma reformulação "
+        "quase igual dela, mesmo que ainda pareça uma pergunta em aberto válida.\n\n"
         "REGRA CRÍTICA: só mencione algo que está LITERALMENTE escrito no histórico "
         "abaixo — nunca presuma que planos, links, opções ou qualquer outro material "
         "foram enviados se isso não aparecer explicitamente nas mensagens anteriores. "
@@ -268,6 +271,27 @@ async def _process_conversation(db, conversation: Conversation) -> None:
         text = await _generate_followup_text(config, history, followups_sent + 1, config.followup_max_attempts)
     if not text:
         return
+
+    # Reforço no código, não só no prompt: o modelo às vezes acha razoável
+    # "repetir a pergunta em aberto" — visto em produção, o follow-up saiu
+    # idêntico à última resposta real da conversa (ex: "esse horário não
+    # está mais disponível... consegue me dizer outro?"), mandando a mesma
+    # frase de novo como se fosse um follow-up novo. Compara contra a
+    # última mensagem real da IA e contra follow-ups já mandados nessa
+    # janela de silêncio; se bater, descarta e usa uma mensagem genérica
+    # (garantidamente diferente) em vez de arriscar repetir.
+    already_sent = {_normalize_text(last_msg.text or "")}
+    already_sent.update(
+        _normalize_text(m.text)
+        for m in history
+        if m.actor == "ai" and isinstance(m.raw_payload, dict) and m.raw_payload.get("is_followup") and m.text
+    )
+    if _normalize_text(text) in already_sent:
+        logger.warning(
+            "Follow-up gerado pra conversa %s repetia mensagem já mandada — usando genérica.",
+            conversation.id,
+        )
+        text = _GENERIC_NUDGES[followups_sent % len(_GENERIC_NUDGES)]
 
     if followups_sent + 1 >= config.followup_max_attempts:
         # Garantido no código, não só pedido no prompt — ver
