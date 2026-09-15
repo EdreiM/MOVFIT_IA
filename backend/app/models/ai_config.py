@@ -50,6 +50,10 @@ class AiConfig(Base):
     llm_model: Mapped[str] = mapped_column(String(100), default="gpt-4o-mini")
     llm_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
     temperature: Mapped[float] = mapped_column(Float, default=0.3)
+    # Transcrição de áudio (Groq/Whisper) — mesma chave criptografada em
+    # repouso que o resto das credenciais. Vazio = transcrição desligada,
+    # mensagens de áudio chegam sem texto (não processadas pela IA).
+    transcription_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
     operation_mode: Mapped[str] = mapped_column(String(50), default="auto")  # auto | suggest | off
     # Follow-up de cliente inativo: reengaja depois de X minutos sem resposta
     # do cliente, até um número máximo de tentativas — depois disso, encerra

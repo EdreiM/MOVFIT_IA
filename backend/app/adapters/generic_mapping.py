@@ -27,6 +27,7 @@ def adapt_generic_mapping(payload: dict[str, Any], mapping: dict[str, Any] | Non
     external_message_id = _dig(payload, mapping.get("external_message_id", "id"))
     external_conversation_id = _dig(payload, mapping.get("external_conversation_id", "conversation_id"))
     content_type = (_dig(payload, mapping.get("content_type", "content_type")) or "text").lower()
+    media_url = _dig(payload, mapping.get("media_url", "media_url"))
     actor = (_dig(payload, mapping.get("actor", "actor")) or "customer").lower()
     event_raw = (_dig(payload, mapping.get("event_type", "event_type")) or "message_inbound").lower()
     ts_raw = _dig(payload, mapping.get("timestamp", "timestamp"))
@@ -58,4 +59,5 @@ def adapt_generic_mapping(payload: dict[str, Any], mapping: dict[str, Any] | Non
         actor=actor if actor in {"customer", "ai", "human_agent", "system"} else "customer",  # type: ignore[arg-type]
         human_handoff_detected=handoff,
         raw_payload=payload,
+        media_url=str(media_url) if media_url else None,
     )

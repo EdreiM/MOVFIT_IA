@@ -3757,6 +3757,32 @@ async def reply_to_pending_messages(
     return reply
 
 
+async def transcribe_audio(config: AiConfig, media_url: str) -> str | None:
+    """Baixa o áudio e transcreve via Groq (Whisper) — mesmo provedor que já
+    era usado no fluxo antigo (n8n), agora chamado direto do backend."""
+    api_key = decrypt_secret(config.transcription_api_key_encrypted)
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            audio_resp = await client.get(media_url)
+            audio_resp.raise_for_status()
+            audio_bytes = audio_resp.content
+
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                data={"model": "whisper-large-v3"},
+                files={"file": ("audio.mp3", audio_bytes, "audio/mpeg")},
+            )
+            resp.raise_for_status()
+            text = (resp.json().get("text") or "").strip()
+            return text or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao transcrever áudio (%s): %s", media_url, exc)
+        return None
+
+
 async def process_normalized_event(
     db: AsyncSession,
     company_id: UUID,
@@ -3768,6 +3794,28 @@ async def process_normalized_event(
         return {"status": "ignored", "reason": "status_without_text"}
 
     conversation = await get_or_create_conversation(db, company_id, event, number, integration_id=integration_id)
+
+    if (
+        event.event_type == "message_inbound"
+        and event.actor == "customer"
+        and event.content_type == "audio"
+        and not event.text
+        and event.media_url
+    ):
+        config = await resolve_ai_config(db, conversation)
+        if config and config.transcription_api_key_encrypted:
+            transcribed = await transcribe_audio(config, event.media_url)
+            if transcribed:
+                event.text = transcribed
+                logger.info(
+                    "Áudio transcrito pra conversa %s (%d chars)", conversation.id, len(transcribed)
+                )
+            else:
+                logger.warning(
+                    "Não foi possível transcrever áudio da conversa %s (media_url=%r)",
+                    conversation.id, event.media_url,
+                )
+
     message = await save_message(db, conversation, event)
 
     ai_reply_scheduled = False

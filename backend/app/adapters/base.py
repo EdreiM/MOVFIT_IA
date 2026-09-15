@@ -22,3 +22,6 @@ class NormalizedMessageEvent:
     human_handoff_detected: bool = False
     raw_payload: dict[str, Any] = field(default_factory=dict)
     contact_name: str | None = None
+    # URL pra baixar o arquivo quando content_type != "text" (áudio, imagem
+    # etc.) — opcional, só usado hoje pra transcrição de áudio.
+    media_url: str | None = None

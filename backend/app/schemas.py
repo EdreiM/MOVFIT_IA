@@ -156,6 +156,7 @@ class AiConfigUpdate(BaseModel):
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_api_key: str | None = None
+    transcription_api_key: str | None = None
     temperature: float | None = None
     operation_mode: str | None = None
     followup_enabled: bool | None = None
@@ -175,6 +176,8 @@ class AiConfigOut(BaseModel):
     llm_model: str
     llm_api_key_masked: str | None = None
     has_api_key: bool = False
+    transcription_api_key_masked: str | None = None
+    has_transcription_api_key: bool = False
     temperature: float
     operation_mode: str
     followup_enabled: bool

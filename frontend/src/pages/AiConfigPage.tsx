@@ -14,6 +14,8 @@ type AiConfig = {
   llm_model: string;
   llm_api_key_masked: string | null;
   has_api_key: boolean;
+  transcription_api_key_masked: string | null;
+  has_transcription_api_key: boolean;
   temperature: number;
   operation_mode: string;
   followup_enabled: boolean;
@@ -43,6 +45,7 @@ export default function AiConfigPage() {
   const [config, setConfig] = useState<AiConfig | null>(null);
   const [rags, setRags] = useState<Rag[]>([]);
   const [apiKey, setApiKey] = useState("");
+  const [transcriptionApiKey, setTranscriptionApiKey] = useState("");
   const [ragName, setRagName] = useState("");
   const [ragUrl, setRagUrl] = useState("");
   const [msg, setMsg] = useState("");
@@ -88,12 +91,14 @@ export default function AiConfigPage() {
         followup_max_attempts: config.followup_max_attempts,
       };
       if (apiKey.trim()) body.llm_api_key = apiKey.trim();
+      if (transcriptionApiKey.trim()) body.transcription_api_key = transcriptionApiKey.trim();
       const updated = await api<AiConfig>(`/ai-configs/${companyId}${qs}`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
       setConfig(updated);
       setApiKey("");
+      setTranscriptionApiKey("");
       setMsg("Configuração salva.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao salvar");
@@ -312,6 +317,28 @@ export default function AiConfigPage() {
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-sm text-sand/60">
+            API Key Groq (transcrição de áudio){" "}
+            {config.has_transcription_api_key && (
+              <span className="text-lime">
+                (atual: {config.transcription_api_key_masked})
+              </span>
+            )}
+          </span>
+          <input
+            type="password"
+            className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+            placeholder={config.has_transcription_api_key ? "•••• cole nova key para rotacionar" : "gsk_..."}
+            value={transcriptionApiKey}
+            onChange={(e) => setTranscriptionApiKey(e.target.value)}
+          />
+          <span className="text-xs text-sand/45">
+            Sem essa chave, mensagens de áudio do cliente chegam sem transcrição — a IA não
+            processa o conteúdo.
+          </span>
         </label>
 
         <label className="block space-y-1">

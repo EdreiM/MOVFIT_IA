@@ -27,6 +27,7 @@ const GENERIC_MAPPING_FIELDS: { key: string; label: string; placeholder: string;
   { key: "event_type", label: "Tipo do evento", placeholder: "event_type", hint: 'valor deve virar "message_inbound" pra IA responder — mapeie ou fixe conforme o evento que você marcar na plataforma' },
   { key: "actor", label: "Quem enviou", placeholder: "actor", hint: 'opcional — "customer" quando ausente' },
   { key: "content_type", label: "Tipo de conteúdo", placeholder: "content_type", hint: 'opcional — "text" quando ausente' },
+  { key: "media_url", label: "URL do arquivo de mídia", placeholder: "media_url", hint: "opcional — link pra baixar áudio/imagem/arquivo, usado hoje pra transcrever áudio automaticamente" },
   { key: "timestamp", label: "Data/hora do evento", placeholder: "timestamp", hint: "opcional, formato ISO" },
 ];
 

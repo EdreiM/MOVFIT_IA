@@ -41,6 +41,13 @@ def _to_out(config: AiConfig) -> AiConfigOut:
             masked = mask_api_key(decrypt_secret(config.llm_api_key_encrypted))
         except Exception:  # noqa: BLE001
             masked = "****"
+    transcription_masked = None
+    has_transcription_key = bool(config.transcription_api_key_encrypted)
+    if has_transcription_key:
+        try:
+            transcription_masked = mask_api_key(decrypt_secret(config.transcription_api_key_encrypted))
+        except Exception:  # noqa: BLE001
+            transcription_masked = "****"
     return AiConfigOut(
         id=config.id,
         company_id=config.company_id,
@@ -53,6 +60,8 @@ def _to_out(config: AiConfig) -> AiConfigOut:
         llm_model=config.llm_model,
         llm_api_key_masked=masked,
         has_api_key=has_key,
+        transcription_api_key_masked=transcription_masked,
+        has_transcription_api_key=has_transcription_key,
         temperature=config.temperature,
         operation_mode=config.operation_mode,
         followup_enabled=config.followup_enabled,
@@ -83,6 +92,7 @@ async def _get_or_create_integration_config(
             llm_provider=default_config.llm_provider,
             llm_model=default_config.llm_model,
             llm_api_key_encrypted=default_config.llm_api_key_encrypted,
+            transcription_api_key_encrypted=default_config.transcription_api_key_encrypted,
             temperature=default_config.temperature,
             operation_mode=default_config.operation_mode,
             followup_enabled=default_config.followup_enabled,
@@ -149,10 +159,13 @@ async def update_ai_config(
 
     data = payload.model_dump(exclude_unset=True)
     api_key = data.pop("llm_api_key", None)
+    transcription_key = data.pop("transcription_api_key", None)
     for k, v in data.items():
         setattr(config, k, v)
     if api_key:
         config.llm_api_key_encrypted = encrypt_secret(api_key)
+    if transcription_key:
+        config.transcription_api_key_encrypted = encrypt_secret(transcription_key)
     await db.flush()
     await db.refresh(config)
     return _to_out(config)
