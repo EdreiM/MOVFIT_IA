@@ -1575,7 +1575,11 @@ async def _humanize_tool_reply_with_llm(
     if _is_guest_tool(tool):
         system += (
             "\nAssunto: convites/convidados do mês. Informe quantos já usou, quantos restam "
-            "e, se houver convidados_do_mes, cite o(s) nome(s) de forma natural."
+            "e, se houver convidados_do_mes, cite o(s) nome(s). ATENÇÃO: os nomes em "
+            "convidados_do_mes são de pessoas que o cliente JÁ LEVOU como convidado — "
+            "fale no passado ('você já levou/trouxe [nome] este mês'), NUNCA como sugestão "
+            "de quem convidar (ex: 'você pode convidar [nome]' está ERRADO e inverte o "
+            "sentido — soa como se a pessoa ainda não tivesse sido convidada)."
         )
     if who_question and _is_guest_tool(tool):
         system += "\nO cliente quer saber QUEM já levou — foque nos nomes em convidados_do_mes."
