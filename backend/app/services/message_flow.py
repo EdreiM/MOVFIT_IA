@@ -1193,6 +1193,27 @@ def _enrich_schedule_result_with_preference(
     return {**tool_result, "dados": dados}
 
 
+# Mandado uma vez por conversa, junto com a primeira lista de horários
+# exibida — nunca depois que o cliente já escolheu um horário, pra evitar o
+# cenário de ele agendar e só depois descobrir que precisava de jejum/etc
+# e não poder mais ir. Texto fixo (não passa pelo LLM) — conteúdo médico,
+# não é algo que a IA deva parafrasear ou resumir.
+_PHYSICAL_EVAL_RECOMMENDATIONS = (
+    "\n\n🚨*Recomendações para o Exame de Bioimpedância*\n\n"
+    "Para garantir maior precisão nos resultados, siga as orientações abaixo antes da "
+    "realização do exame:\n\n"
+    "* Jejum de 2 horas antes do exame;\n"
+    "* não pode estar no período menstrual\n"
+    "* Usar roupas leves e confortáveis;\n"
+    "* Retirar acessórios metálicos, como relógios, pulseiras, anéis, correntes e brincos;\n"
+    "* Evitar realizar o exame imediatamente após atividade física intensa.\n\n"
+    "⚠️ Importante: o exame de bioimpedância não deve ser realizado por gestantes ou por "
+    "pessoas que possuem implantes/dispositivos eletrônicos ou metálicos, conforme as "
+    "contraindicações do equipamento utilizado.\n\n"
+    "Em caso de dúvida, consulte nossa equipe antes da realização do exame."
+)
+
+
 def _physical_eval_ask_day_reply(unit: str, lead: Lead | None) -> str:
     first = _lead_first_name(lead)
     prefix = f"{first}, encontrei" if first else "Encontrei"
@@ -2075,6 +2096,10 @@ async def _run_physical_eval_pipeline(
             brazil_now=brazil_now,
             tool_arguments=args,
         )
+        if offered_slots and not conversation.physical_eval_recommendations_sent:
+            reply += _PHYSICAL_EVAL_RECOMMENDATIONS
+            conversation.physical_eval_recommendations_sent = True
+            db.add(conversation)
     else:
         reply = _format_tool_result_as_reply(schedule_result)
         if reply is None:

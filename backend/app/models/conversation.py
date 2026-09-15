@@ -37,6 +37,11 @@ class Conversation(Base):
     # horarios de novo (evita uma segunda chamada de ferramenta no mesmo
     # turno, ver _resolve_physical_eval_chosen_time em message_flow.py).
     physical_eval_offered_slots: Mapped[dict | None] = mapped_column(JSONB)
+    # Garante que as recomendações de preparo (jejum, roupas leves etc.) são
+    # mandadas uma vez só por conversa, junto com a primeira lista de
+    # horários exibida — não a cada "e de tarde?"/"outro dia" que o cliente
+    # pedir depois.
+    physical_eval_recommendations_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
