@@ -745,8 +745,19 @@ def _student_operational_action(text: str, lead: Lead | None = None) -> bool:
     if not text or _is_guest_info_question(text, lead):
         return False
     tokens = _normalize_tokens(text)
-    if tokens & {"parcela", "parcelas", "atrasad", "atraso", "inadimpl", "boleto", "boletos"}:
+    if tokens & {"parcela", "parcelas", "atrasad", "atraso", "inadimpl"}:
         return True
+    if tokens & {"boleto", "boletos"}:
+        # "boleto" sozinho é ambíguo — pode ser dúvida geral sobre forma de
+        # pagamento aceita pra um plano novo (ex: "posso pagar no boleto ou
+        # pix?"), não necessariamente sobre uma parcela JÁ existente do
+        # cliente. Bug real em produção: pediu CPF no meio de uma conversa
+        # de planos por causa disso. Só considera ação operacional (exige
+        # CPF) se vier acompanhado de um sinal de que é sobre a conta que
+        # já existe.
+        if tokens & {"minha", "meu", "minhas", "meus", "atrasad", "atraso", "vencid", "pendente"}:
+            return True
+        return False
     if tokens & {"convidado", "convidados", "convite", "convites"}:
         return _is_guest_operational_check(text, lead)
     if "matricula" in tokens or "matriculado" in tokens or "aluno" in tokens:
