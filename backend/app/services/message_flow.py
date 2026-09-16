@@ -199,7 +199,38 @@ def _format_price(value: float) -> str:
     return f"R$ {value:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 
-async def build_catalog_context(db: AsyncSession, company_id: UUID) -> str:
+_NO_FIDELITY_MARKERS = (
+    "avulso", "avulsa", "sem fidelidade", "sem fidelidad", "sem compromisso",
+    "nao quero fidelidade", "nao quero compromisso", "nao quero assinar",
+    "nao quero renovar", "sem renovar", "sem assinatura", "curto prazo",
+    "so um mes", "somente um mes", "apenas um mes", "um mes so", "um mes apenas",
+    "por um mes", "por 30 dias", "trinta dias", "so 30 dias", "apenas 30 dias",
+    "so enquanto", "so por um tempo", "so de passagem", "estou de passagem",
+    "nao vou ficar mais", "nao moro aqui",
+)
+
+
+def _wants_no_fidelity_plan(text: str, recent_customer_texts: list[str] | None = None) -> bool:
+    """Cliente sinalizou que não quer fidelidade/plano recorrente — só nesse
+    caso os planos marcados como sob demanda (show_by_default=False, ex:
+    avulso mensal) entram no catálogo que a IA vê. Por padrão eles ficam de
+    fora pra IA não empurrar um plano avulso antes do cliente pedir algo
+    assim (ver pedido explícito do usuário)."""
+    texts = list(recent_customer_texts or [])[-4:]
+    if text:
+        texts.append(text)
+    return any(
+        marker in _normalize_text(t)
+        for t in texts
+        for marker in _NO_FIDELITY_MARKERS
+    )
+
+
+async def build_catalog_context(
+    db: AsyncSession,
+    company_id: UUID,
+    include_on_demand: bool = False,
+) -> str:
     """Monta o catálogo de unidades e planos direto do banco (fonte oficial,
     sempre atualizada) — substitui a consulta à RAG de planos."""
     result = await db.execute(
@@ -212,7 +243,9 @@ async def build_catalog_context(db: AsyncSession, company_id: UUID) -> str:
 
     blocks: list[str] = []
     for unit in units:
-        active_plans = [p for p in unit.plans if p.is_active]
+        active_plans = [
+            p for p in unit.plans if p.is_active and (p.show_by_default or include_on_demand)
+        ]
         if not active_plans:
             continue
         type_suffix = f" — {unit.unit_type}" if unit.unit_type else ""
@@ -2187,6 +2220,11 @@ _TRANSFER_PROMISE_PHRASES = [
     "encaminhar para o atendimento", "encaminhar para um atendente", "encaminhando para um atendente",
     "transferir para um atendente", "transferindo para um atendente", "um atendente vai te",
     "um atendente ira", "ja vou te transferir", "vou te encaminhar",
+    # Fraseio comum quando o motivo é matrícula manual de um plano sem link
+    # de auto-cadastro (ex: plano avulso) — ver instrução em [Planos].
+    "atendente vai continuar", "atendente vai finalizar", "atendente vai dar continuidade",
+    "atendente para finalizar", "atendente para continuar", "atendente vai entrar em contato",
+    "atendente vai fazer sua matricula", "atendente vai concluir",
 ]
 
 
@@ -3122,7 +3160,10 @@ async def generate_ai_reply(
                 ),
             }
         )
-    catalog_context = await build_catalog_context(db, conversation.company_id)
+    wants_no_fidelity = _wants_no_fidelity_plan(user_text, recent_customer_texts)
+    catalog_context = await build_catalog_context(
+        db, conversation.company_id, include_on_demand=wants_no_fidelity
+    )
     if catalog_context:
         messages.append(
             {
@@ -3136,7 +3177,16 @@ async def generate_ai_reply(
                     "estacionamento etc), responda SÓ essa pergunta — não aproveite pra oferecer "
                     "planos por conta própria, mesmo que pareça prestativo; isso confunde o "
                     "cliente que só queria uma informação simples.\n"
-                    "Pra planos: se ele ainda não disse de qual unidade quer saber, PERGUNTE a "
+                    + (
+                        "O cliente sinalizou que não quer fidelidade/compromisso longo — por "
+                        "isso o catálogo abaixo inclui também o(s) plano(s) avulso(s)/sob "
+                        "demanda dessa unidade. Nesse caso, para quem quer ficar pouco tempo ou "
+                        "pagar só um período fechado, o avulso é a opção certa — não insista no "
+                        "recorrente/anual.\n"
+                        if wants_no_fidelity
+                        else ""
+                    )
+                    + "Pra planos: se ele ainda não disse de qual unidade quer saber, PERGUNTE a "
                     "unidade do interesse — não use CPF/verificar_unidade_por_cpf pra descobrir "
                     "(quem pergunta plano costuma ser lead novo, não aluno matriculado).\n\n"
                     "Catálogo oficial de unidades e planos, sempre atualizado — use isso, "
@@ -3152,7 +3202,14 @@ async def generate_ai_reply(
                     "assinar ou fechar algum desses planos, a resposta é: confirme qual plano, e "
                     "diga claramente que é só acessar aquele link e completar o cadastro por lá "
                     "(não diga que vai encaminhar pra um atendente nesse caso — isso é só quando "
-                    "o plano não tem link nenhum aqui embaixo). Por isso, ao terminar de "
+                    "o plano não tem link nenhum aqui embaixo).\n"
+                    "SE o plano que o cliente confirmou NÃO tiver \"Link de cadastro\" aqui "
+                    "embaixo (ex: plano avulso/sob demanda): a matrícula desse plano é manual — "
+                    "você TEM que chamar transferir_atendimento (motivo: matrícula manual do "
+                    "plano [nome]) NESSA MESMA resposta, e avisar o cliente que um atendente vai "
+                    "continuar o cadastro dele. Nunca diga que vai encaminhar sem realmente "
+                    "chamar a ferramenta.\n"
+                    "Por isso, ao terminar de "
                     "apresentar plano(s), não ofereça ajuda pra \"finalizar a matrícula\" nem "
                     "diga \"se quiser se matricular, me avise\" — isso sugere que você vai fazer "
                     "algo a mais, e não vai (o link já resolve sozinho). Prefira fechar com algo "

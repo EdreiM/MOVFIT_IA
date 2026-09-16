@@ -50,6 +50,11 @@ class Plan(Base):
     image_url: Mapped[str | None] = mapped_column(Text)
     signup_url: Mapped[str | None] = mapped_column(Text)  # link de cadastro/matrícula desse plano
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # False = plano "sob demanda": não entra na lista padrão que a IA
+    # apresenta de cara (ex: avulso mensal sem fidelidade) — só aparece pro
+    # cliente quando ele sinaliza que não quer fidelidade/compromisso longo.
+    # Ver _wants_no_fidelity_plan em message_flow.py.
+    show_by_default: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

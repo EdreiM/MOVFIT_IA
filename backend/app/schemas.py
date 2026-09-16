@@ -222,6 +222,7 @@ class PlanCreate(BaseModel):
     benefits: list[str] = Field(default_factory=list)
     image_url: str | None = None
     signup_url: str | None = None
+    show_by_default: bool = True
 
 
 class PlanUpdate(BaseModel):
@@ -234,6 +235,7 @@ class PlanUpdate(BaseModel):
     image_url: str | None = None
     signup_url: str | None = None
     is_active: bool | None = None
+    show_by_default: bool | None = None
 
 
 class PlanOut(BaseModel):
@@ -248,6 +250,7 @@ class PlanOut(BaseModel):
     image_url: str | None
     signup_url: str | None
     is_active: bool
+    show_by_default: bool
 
     model_config = {"from_attributes": True}
 

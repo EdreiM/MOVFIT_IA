@@ -14,6 +14,7 @@ type Plan = {
   image_url: string | null;
   signup_url: string | null;
   is_active: boolean;
+  show_by_default: boolean;
 };
 
 type Unit = {
@@ -121,6 +122,7 @@ function PlanForm({
   const [benefitsText, setBenefitsText] = useState(initial?.benefits.join("\n") ?? "");
   const [imageUrl, setImageUrl] = useState(initial?.image_url ?? "");
   const [signupUrl, setSignupUrl] = useState(initial?.signup_url ?? "");
+  const [showByDefault, setShowByDefault] = useState(initial?.show_by_default ?? true);
   const [open, setOpen] = useState(!!initial);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -156,6 +158,7 @@ function PlanForm({
         .filter(Boolean),
       image_url: imageUrl.trim() || null,
       signup_url: signupUrl.trim() || null,
+      show_by_default: showByDefault,
     });
     if (!initial) {
       setName("");
@@ -166,6 +169,7 @@ function PlanForm({
       setBenefitsText("");
       setImageUrl("");
       setSignupUrl("");
+      setShowByDefault(true);
       setOpen(false);
     }
   };
@@ -255,6 +259,18 @@ function PlanForm({
         value={signupUrl}
         onChange={(e) => setSignupUrl(e.target.value)}
       />
+      <label className="flex items-start gap-2 text-xs text-sand/60 sm:col-span-2">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={!showByDefault}
+          onChange={(e) => setShowByDefault(!e.target.checked)}
+        />
+        <span>
+          Plano sob demanda — a IA só oferece esse plano quando o cliente disser que não quer
+          fidelidade/compromisso (ex: avulso mensal). Não entra na lista padrão de planos.
+        </span>
+      </label>
       <div className="flex gap-2 sm:col-span-2">
         <button type="submit" className="rounded-md bg-leaf px-3 py-1.5 text-sm font-semibold text-white hover:bg-lime">
           {submitLabel}
@@ -490,6 +506,11 @@ export default function CatalogPage() {
                         <p className="font-medium">
                           {plan.name}{" "}
                           <span className="text-sand/60">{currency(plan.monthly_price)}/mês</span>
+                          {!plan.show_by_default && (
+                            <span className="ml-2 rounded border border-amber-400/40 px-1.5 py-0.5 text-[10px] uppercase text-amber-400">
+                              Sob demanda
+                            </span>
+                          )}
                         </p>
                         <p className="text-xs text-sand/50">
                           {plan.enrollment_fee > 0 && <>Matrícula {currency(plan.enrollment_fee)} · </>}
