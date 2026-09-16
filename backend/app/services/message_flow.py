@@ -3831,6 +3831,7 @@ async def process_normalized_event(
     if event.event_type == "status_update" and not event.text:
         return {"status": "ignored", "reason": "status_without_text"}
 
+    wts_handoff: bool | None = None
     if (
         integration is not None
         and event.event_type == "message_inbound"
@@ -3838,11 +3839,21 @@ async def process_normalized_event(
         and not event.human_handoff_detected
         and event.external_conversation_id
     ):
-        handoff = await check_wts_session_handoff(integration, event.external_conversation_id)
-        if handoff:
+        wts_handoff = await check_wts_session_handoff(integration, event.external_conversation_id)
+        if wts_handoff:
             event.human_handoff_detected = True
 
     conversation = await get_or_create_conversation(db, company_id, event, number, integration_id=integration_id)
+
+    # Diferente do handoff manual/sticky (dashboard, campo de payload): a
+    # checagem WTS é uma consulta ao vivo em toda mensagem, então é
+    # bidirecional de propósito — se a sessão confirma que não tem mais
+    # atendente, a IA volta a responder sozinha, sem precisar reativar no
+    # painel. Só reage quando a API respondeu de verdade (False explícito);
+    # se a checagem falhou/não rodou (None), não mexe no estado atual.
+    if wts_handoff is False and conversation.status == "with_human":
+        conversation.ai_enabled = True
+        conversation.status = "open"
 
     if (
         event.event_type == "message_inbound"
