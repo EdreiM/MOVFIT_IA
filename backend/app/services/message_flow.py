@@ -3888,6 +3888,23 @@ async def process_normalized_event(
     if event.event_type == "status_update" and not event.text:
         return {"status": "ignored", "reason": "status_without_text"}
 
+    if event.external_message_id:
+        # Reentrega do mesmo webhook (a plataforma reenvia se achar que a
+        # primeira tentativa falhou/demorou) processava a mensagem de novo
+        # inteira -- reagendava a resposta da IA, gerando 2+ respostas
+        # completas duplicadas (visto em produção: planos + saudação
+        # repetidos várias vezes pro mesmo cliente). external_message_id é
+        # estável por mensagem na origem, então usamos ele como chave de
+        # idempotência: já vimos essa mensagem, não processa de novo.
+        dup_result = await db.execute(
+            select(Message.id).where(
+                Message.company_id == company_id,
+                Message.external_message_id == event.external_message_id,
+            ).limit(1)
+        )
+        if dup_result.scalar_one_or_none():
+            return {"status": "ignored", "reason": "duplicate_message"}
+
     wts_handoff: bool | None = None
     if (
         integration is not None
