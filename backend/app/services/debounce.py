@@ -21,6 +21,30 @@ def schedule_ai_reply(conversation_id: UUID, company_id: UUID, delay_seconds: fl
     )
 
 
+async def wait_for_pending_replies(timeout: float = 45.0) -> None:
+    """Espera as respostas já agendadas terminarem antes do processo
+    desligar. Os timers em `_pending_replies` são só memória do processo --
+    se o container for morto (deploy, restart) enquanto um está contando ou
+    gerando a resposta, ele simplesmente some, sem erro nenhum, e o cliente
+    fica sem resposta. Chamado no shutdown do FastAPI (ver app/main.py);
+    precisa que o `stop_grace_period` do serviço no compose seja maior que
+    esse timeout, senão o Docker mata o processo antes da espera terminar."""
+    pending = [t for t in _pending_replies.values() if not t.done()]
+    if not pending:
+        return
+    logger.info("Desligando: esperando %s resposta(s) de IA pendente(s)...", len(pending))
+    _done, not_done = await asyncio.wait(pending, timeout=timeout)
+    if not_done:
+        logger.warning(
+            "%s resposta(s) ainda pendente(s) após %.0fs esperando o desligamento -- "
+            "essas conversas podem ter ficado sem resposta",
+            len(not_done),
+            timeout,
+        )
+        for task in not_done:
+            task.cancel()
+
+
 async def _try_reply_once(conversation_id: UUID, company_id: UUID) -> bool:
     """Tenta gerar a resposta agregada. Retorna True se rodou, False se o lock
     estava ocupado (outro turno ainda processando RAG/LLM/envio de bolhas)."""

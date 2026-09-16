@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
+from app.services.debounce import wait_for_pending_replies
 from app.services.followup import periodic_followup_loop
 
 # Sem isso, todo logger.info(...) do app (ex: diagnóstico de execução de
@@ -41,6 +42,12 @@ async def lifespan(_app: FastAPI):
     followup_task = asyncio.create_task(periodic_followup_loop())
     yield
     followup_task.cancel()
+    # Sem isso, um deploy/restart no meio do debounce (o cliente mandou
+    # mensagem, a IA ainda não respondeu) perde a resposta agendada em
+    # silêncio -- o timer só existe na memória deste processo. Ver
+    # wait_for_pending_replies() e o stop_grace_period do backend no
+    # docker-compose.prod.yml.
+    await wait_for_pending_replies()
 
 
 app = FastAPI(

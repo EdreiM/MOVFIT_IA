@@ -21,6 +21,11 @@ services:
     networks:
       - default
       - redeMov
+    # Maior que o timeout de wait_for_pending_replies() (main.py) -- sem
+    # isso, um deploy mata o processo antigo antes dele terminar de
+    # responder mensagens que já estavam agendadas (debounce em memória),
+    # e o cliente fica sem resposta sem nenhum erro aparecer em lugar nenhum.
+    stop_grace_period: 60s
     deploy:
       restart_policy:
         # Swarm não segura o start do backend até o Postgres ficar pronto
