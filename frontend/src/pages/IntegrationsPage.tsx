@@ -9,6 +9,7 @@ type Integration = {
   inbound_secret: string | null;
   outbound_url: string | null;
   field_mapping: Record<string, string> | null;
+  config: Record<string, string> | null;
   is_active: boolean;
 };
 
@@ -29,6 +30,7 @@ const GENERIC_MAPPING_FIELDS: { key: string; label: string; placeholder: string;
   { key: "content_type", label: "Tipo de conteúdo", placeholder: "content_type", hint: 'opcional — "text" quando ausente' },
   { key: "media_url", label: "URL do arquivo de mídia", placeholder: "media_url", hint: "opcional — link pra baixar áudio/imagem/arquivo, usado hoje pra transcrever áudio automaticamente" },
   { key: "timestamp", label: "Data/hora do evento", placeholder: "timestamp", hint: "opcional, formato ISO" },
+  { key: "human_handoff_detected", label: "Campo que indica atendente assumiu", placeholder: "human_handoff_detected", hint: "opcional — aponte pro campo que só vem preenchido quando um atendente já assumiu a conversa (ex: userId de quem assumiu). Se vier preenchido, a IA para de responder nessa conversa até alguém reativar manualmente." },
 ];
 
 const emptyMapping = () => Object.fromEntries(GENERIC_MAPPING_FIELDS.map((f) => [f.key, ""]));
@@ -42,9 +44,11 @@ export default function IntegrationsPage() {
   const [instanceToken, setInstanceToken] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("+5593936180433");
   const [mapping, setMapping] = useState<Record<string, string>>(emptyMapping());
+  const [wtsApiKey, setWtsApiKey] = useState("");
   const [error, setError] = useState("");
   const [created, setCreated] = useState<Integration | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingHasWtsKey, setEditingHasWtsKey] = useState(false);
 
   const load = () =>
     api<Integration[]>("/integrations")
@@ -92,6 +96,8 @@ export default function IntegrationsPage() {
     setAdapter("evolution_api_v1");
     setOutbound("https://evolutiongo.xmov.com.br");
     setMapping(emptyMapping());
+    setWtsApiKey("");
+    setEditingHasWtsKey(false);
   };
 
   const onEdit = (integ: Integration) => {
@@ -100,6 +106,8 @@ export default function IntegrationsPage() {
     setName(integ.name);
     setOutbound(integ.outbound_url ?? "");
     setMapping({ ...emptyMapping(), ...(integ.field_mapping ?? {}) });
+    setWtsApiKey("");
+    setEditingHasWtsKey(Boolean(integ.config?.wts_api_key_encrypted));
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -115,6 +123,7 @@ export default function IntegrationsPage() {
             name,
             outbound_url: outbound || null,
             field_mapping: Object.fromEntries(Object.entries(mapping).filter(([, v]) => v.trim())),
+            ...(wtsApiKey.trim() ? { config: { wts_api_key: wtsApiKey.trim() } } : {}),
           }),
         });
         resetForm();
@@ -140,7 +149,9 @@ export default function IntegrationsPage() {
                   instance_token: instanceToken,
                   phone_number: phoneNumber,
                 }
-              : {},
+              : adapter === "generic_mapping" && wtsApiKey.trim()
+                ? { wts_api_key: wtsApiKey.trim() }
+                : {},
           field_mapping:
             adapter === "generic_mapping"
               ? Object.fromEntries(Object.entries(mapping).filter(([, v]) => v.trim()))
@@ -153,6 +164,7 @@ export default function IntegrationsPage() {
       if (adapter === "generic_mapping") {
         setCreated(integ);
         setMapping(emptyMapping());
+        setWtsApiKey("");
       }
       await load();
     } catch (err) {
@@ -245,6 +257,26 @@ export default function IntegrationsPage() {
                 </label>
               ))}
             </div>
+            <label className="block space-y-1">
+              <span className="text-xs text-sand/60">
+                Chave da API WTS Chat (verifica se atendente já assumiu)
+                {editingHasWtsKey && !wtsApiKey && (
+                  <span className="ml-1 text-lime">✓ já configurada</span>
+                )}
+              </span>
+              <input
+                className="w-full rounded-md border border-white/15 bg-ink px-2 py-1.5 text-sm sm:w-1/2"
+                type="password"
+                placeholder={editingHasWtsKey ? "deixe em branco pra manter a atual" : "pn_..."}
+                value={wtsApiKey}
+                onChange={(e) => setWtsApiKey(e.target.value)}
+              />
+              <span className="block text-[11px] text-sand/40">
+                opcional — usada pra consultar a API da WTS Chat (plataforma por trás da GymBot) e
+                saber se um atendente já assumiu a conversa antes da IA responder, mesmo quando isso
+                não vem no payload da mensagem em si.
+              </span>
+            </label>
           </div>
         )}
         <div className="flex items-center gap-3 sm:col-span-2">

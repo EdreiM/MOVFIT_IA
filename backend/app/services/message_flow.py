@@ -3783,15 +3783,64 @@ async def transcribe_audio(config: AiConfig, media_url: str) -> str | None:
         return None
 
 
+async def check_wts_session_handoff(integration: Integration, session_id: str) -> bool | None:
+    """Consulta a API do WTS Chat (plataforma por trás da integração GymBot)
+    pra saber se a sessão já tem um atendente humano assumindo — o payload
+    de mensagem não traz isso (userId sempre vem nulo nele), só a própria
+    sessão sabe. Mesma checagem que o fluxo antigo em n8n fazia via node
+    "Get session by id" antes de deixar a IA responder.
+
+    Retorna None quando não dá pra checar (sem chave configurada, sessão sem
+    id, ou a API falhou) — nesse caso o chamador não deve mudar o estado
+    atual da conversa, só quando a checagem realmente confirma humano."""
+    config = integration.config or {}
+    encrypted = config.get("wts_api_key_encrypted")
+    if not encrypted or not session_id:
+        return None
+    api_key = decrypt_secret(encrypted)
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://api.wts.chat/chat/v1/session/{session_id}",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            return bool((data or {}).get("userId"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao checar sessão WTS %s: %s", session_id, exc)
+        return None
+
+
 async def process_normalized_event(
     db: AsyncSession,
     company_id: UUID,
     event: NormalizedMessageEvent,
     number: Number | None = None,
     integration_id: UUID | None = None,
+    integration: Integration | None = None,
 ) -> dict:
     if event.event_type == "status_update" and not event.text:
         return {"status": "ignored", "reason": "status_without_text"}
+
+    if (
+        integration is not None
+        and event.event_type == "message_inbound"
+        and event.actor == "customer"
+        and not event.human_handoff_detected
+        and event.external_conversation_id
+    ):
+        handoff = await check_wts_session_handoff(integration, event.external_conversation_id)
+        if handoff:
+            event.human_handoff_detected = True
 
     conversation = await get_or_create_conversation(db, company_id, event, number, integration_id=integration_id)
 

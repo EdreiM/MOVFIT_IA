@@ -42,6 +42,10 @@ async def create_webhook_integration(
         if raw_token:
             config = {**config, "instance_token_encrypted": encrypt_secret(str(raw_token))}
             config.pop("instance_token", None)
+    raw_wts_key = config.get("wts_api_key")
+    if raw_wts_key:
+        config = {**config, "wts_api_key_encrypted": encrypt_secret(str(raw_wts_key))}
+        config.pop("wts_api_key", None)
     integ = Integration(
         company_id=company_id,
         name=payload.name,
@@ -92,7 +96,15 @@ async def update_integration(
     integ = await db.get(Integration, integration_id)
     if not integ or integ.company_id != company_id:
         raise HTTPException(status_code=404, detail="Integração não encontrada")
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "config" in data:
+        merged_config = {**(integ.config or {}), **(data.pop("config") or {})}
+        raw_wts_key = merged_config.get("wts_api_key")
+        if raw_wts_key:
+            merged_config["wts_api_key_encrypted"] = encrypt_secret(str(raw_wts_key))
+            merged_config.pop("wts_api_key", None)
+        data["config"] = merged_config
+    for k, v in data.items():
         setattr(integ, k, v)
     await db.flush()
     await db.refresh(integ)
@@ -182,7 +194,9 @@ async def inbound_webhook(
             )
             number = result.scalar_one_or_none()
 
-        result = await process_normalized_event(db, integ.company_id, event, number, integration_id=integ.id)
+        result = await process_normalized_event(
+            db, integ.company_id, event, number, integration_id=integ.id, integration=integ
+        )
         log.status = "ok"
         log.http_status = 200
         return result

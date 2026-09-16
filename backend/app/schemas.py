@@ -352,6 +352,7 @@ class IntegrationUpdate(BaseModel):
     name: str | None = None
     outbound_url: str | None = None
     field_mapping: dict | None = None
+    config: dict | None = None
     is_active: bool | None = None
 
 
