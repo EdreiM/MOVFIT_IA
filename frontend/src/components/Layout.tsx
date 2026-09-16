@@ -7,6 +7,7 @@ const links = [
   { to: "/leads", label: "Clientes" },
   { to: "/numbers", label: "Números" },
   { to: "/integrations", label: "Integrações" },
+  { to: "/webhook-logs", label: "Logs de Webhook" },
   { to: "/ai", label: "Config. IA" },
   { to: "/catalog", label: "Unidades & Planos" },
   { to: "/tools", label: "Ferramentas" },

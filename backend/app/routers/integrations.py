@@ -1,4 +1,5 @@
 import json
+import logging
 import secrets
 from uuid import UUID
 
@@ -13,6 +14,8 @@ from app.models import Integration, Number, WebhookLog
 from app.schemas import IntegrationCreate, IntegrationOut, IntegrationUpdate
 from app.security import encrypt_secret
 from app.services.message_flow import process_normalized_event
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["integrations"])
 
@@ -202,6 +205,7 @@ async def inbound_webhook(
         return result
     except Exception as exc:  # noqa: BLE001
         # Retorna dict (não HTTPException) para o get_db fazer commit do log de erro
+        logger.exception("Falha ao processar webhook inbound da integração %s (%s)", integ.id, integ.name)
         log.status = "error"
         log.http_status = 400
         log.error_message = str(exc)
