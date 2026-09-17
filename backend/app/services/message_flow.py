@@ -3014,12 +3014,18 @@ async def generate_ai_reply(
             "content": (
                 "Ferramentas e RAG: se uma ferramenta não existir, falhar (sucesso=false) "
                 "ou não retornar dados úteis, NÃO fique em silêncio — responda em texto "
-                "usando a base de conhecimento (RAG) e o histórico desta conversa. Se "
-                "ainda não tiver a informação, diga honestamente que não conseguiu "
-                "verificar no sistema agora e peça para reformular ou ofereça transferir "
-                "pra um atendente. Perguntas simples (horário, endereço, estacionamento, "
-                "estrutura) devem ser respondidas pelo RAG/histórico — não peça CPF nem "
-                "chame ferramentas de aluno só por causa disso."
+                "usando a base de conhecimento (RAG) e o histórico desta conversa. Se o "
+                "cliente perguntou algo específico e nem a RAG nem o histórico têm essa "
+                "informação, NÃO chute nem invente — diga honestamente que não tem essa "
+                "informação agora e chame transferir_atendimento pra um atendente confirmar "
+                "(se a ferramenta estiver disponível). Perguntas simples (horário, endereço, "
+                "estacionamento, estrutura) devem ser respondidas pelo RAG/histórico — não "
+                "peça CPF nem chame ferramentas de aluno só por causa disso.\n"
+                "Mensagem sem contexto claro: se a mensagem do cliente (ou a descrição de uma "
+                "imagem que ele mandou) não deixar claro o que ele quer, e não tiver relação "
+                "óbvia com nenhum assunto de atendimento (planos, horários, parcelas, etc.), "
+                "NÃO tente adivinhar nem transfira de cara — diga que não entendeu muito bem e "
+                "peça pra ele explicar melhor o que precisa."
             ),
         }
     )
@@ -3859,6 +3865,48 @@ async def transcribe_audio(config: AiConfig, media_url: str) -> str | None:
         return None
 
 
+async def describe_image(config: AiConfig, media_url: str) -> str | None:
+    """Descreve uma imagem recebida do cliente via visão da OpenAI, pra
+    virar o texto da mensagem — mesma ideia do fluxo antigo em n8n (node
+    "Analyze image"), agora chamado direto do backend, reaproveitando a
+    mesma chave/modelo já configurados pra conversa (não precisa de uma
+    chave nova, diferente da transcrição de áudio que usa outro provedor)."""
+    api_key = decrypt_secret(config.llm_api_key_encrypted)
+    if not api_key:
+        return None
+    try:
+        assistant = await chat_completion(
+            provider=config.llm_provider,
+            model=config.llm_model,
+            api_key=api_key,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Descreva objetivamente o que tem nessa imagem, em uma frase "
+                                "curta (até ~30 palavras). Outra IA vai usar sua descrição como "
+                                "contexto de uma conversa de WhatsApp de uma academia, sem ver "
+                                "a imagem de verdade — então inclua qualquer texto legível e "
+                                "qualquer coisa relevante pra atendimento (comprovante, print de "
+                                "erro, foto de produto, documento, etc)."
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": media_url}},
+                    ],
+                }
+            ],
+            temperature=0.2,
+        )
+        text = (assistant.get("content") or "").strip()
+        return text or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao descrever imagem (%s): %s", media_url, exc)
+        return None
+
+
 async def check_wts_session_handoff(integration: Integration, session_id: str) -> bool | None:
     """Consulta a API do WTS Chat (plataforma por trás da integração GymBot)
     pra saber se a sessão já tem um atendente humano assumindo — o payload
@@ -3966,6 +4014,25 @@ async def process_normalized_event(
             else:
                 logger.warning(
                     "Não foi possível transcrever áudio da conversa %s (media_url=%r)",
+                    conversation.id, event.media_url,
+                )
+
+    if (
+        event.event_type == "message_inbound"
+        and event.actor == "customer"
+        and event.content_type == "image"
+        and not event.text
+        and event.media_url
+    ):
+        config = await resolve_ai_config(db, conversation)
+        if config and config.llm_api_key_encrypted:
+            description = await describe_image(config, event.media_url)
+            if description:
+                event.text = f"[Imagem enviada pelo cliente] {description}"
+                logger.info("Imagem descrita pra conversa %s", conversation.id)
+            else:
+                logger.warning(
+                    "Não foi possível descrever imagem da conversa %s (media_url=%r)",
                     conversation.id, event.media_url,
                 )
 
