@@ -1397,6 +1397,15 @@ def _is_schedule_tool(tool: Tool) -> bool:
     return bool(haystack & {"agendamento", "agendar", "horarios", "horario", "schedule"})
 
 
+def _is_payment_link_tool(tool: Tool) -> bool:
+    """Ferramenta que gera link de pagamento de parcela (n8n) — a IA já foi
+    vista respondendo só com informação da parcela e esquecendo de incluir
+    o link de verdade que a ferramenta gerou. Ver instrução extra em
+    _humanize_tool_reply_with_llm."""
+    haystack = _normalize_tokens(f"{tool.tool_key} {tool.name or ''}")
+    return "link" in haystack and bool(haystack & {"pagamento", "parcela", "parcelas", "boleto"})
+
+
 def _get_schedule_tool(tools_by_key: dict[str, Tool]) -> Tool | None:
     tool = tools_by_key.get(TOOL_KEY_CHECK_SCHEDULE)
     if tool:
@@ -1659,6 +1668,16 @@ async def _humanize_tool_reply_with_llm(
             "como opções de noite. Se horario_preferido_indisponivel_label existir, diga gentilmente "
             "que aquele intervalo não está livre e mostre as alternativas do mesmo período. "
             "Pergunte qual horário prefere (número ou intervalo) — NÃO diga que já agendou."
+        )
+    if _is_payment_link_tool(tool):
+        system += (
+            "\nAssunto: link de pagamento de parcela(s). Se sucesso=true e dados.links "
+            "tiver algum item, você TEM que incluir a URL de pagamento de verdade na sua "
+            "resposta (copie exatamente, nunca invente ou encurte) — nunca descreva a "
+            "parcela (valor, vencimento) sem também mandar o link; isso já aconteceu e "
+            "deixa o cliente sem saber como pagar. Se sucesso=true mas dados.links vier "
+            "vazio, diga que não conseguiu gerar o link agora e ofereça tentar de novo "
+            "ou transferir pra um atendente."
         )
     if first_name:
         system += f"\nPode chamar o cliente de {first_name}."
