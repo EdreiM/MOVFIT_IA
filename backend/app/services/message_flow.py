@@ -977,6 +977,24 @@ def _schedule_date_is_weekend(schedule_date: str) -> bool:
     return parsed is not None and parsed.weekday() >= 5
 
 
+def _filter_past_schedule_slots(
+    horarios: list[str],
+    schedule_date: str,
+    reference: datetime,
+) -> list[str]:
+    """Remove horários de hoje que já passaram (referência = horário de Brasília)."""
+    parsed = _parse_schedule_date_yyyyMMdd(schedule_date)
+    if not parsed or parsed != reference.date():
+        return horarios
+    now_minutes = reference.hour * 60 + reference.minute
+    kept: list[str] = []
+    for horario in horarios:
+        slot_minutes = _schedule_horario_to_minutes(horario)
+        if slot_minutes is not None and slot_minutes > now_minutes:
+            kept.append(horario)
+    return kept
+
+
 def _lead_first_name(lead: Lead | None) -> str | None:
     if not lead or not lead.name:
         return None
@@ -1642,7 +1660,17 @@ async def _reply_from_schedule_tool_result(
         period=pref["period"],
         preferred_time=pref["preferred_time"],
     )
-    horarios = (enriched.get("dados") or {}).get("horarios_disponiveis") or []
+    dados = enriched.get("dados") or {}
+    horarios = dados.get("horarios_disponiveis") or []
+    if schedule_date:
+        horarios = _filter_past_schedule_slots(
+            [str(h) for h in horarios if h],
+            str(schedule_date),
+            brazil_now,
+        )
+        dados["horarios_disponiveis"] = horarios
+        dados["horarios_intervalos"] = _format_schedule_slots_numbered(horarios)
+        enriched = {**enriched, "dados": dados}
     if not horarios:
         return _physical_eval_no_slots_reply(
             str(schedule_date or ""),
@@ -1980,55 +2008,69 @@ def _resolve_physical_eval_chosen_time(
     """Resolve o horário que o cliente escolheu depois de ver a lista
     numerada — sem chamar consultar_agendamento_horarios de novo (essa
     ferramenta só serve pra MOSTRAR a lista; depois que o cliente escolhe,
-    só insere_agenda_avalicao deve ser chamada). Um número sozinho é
-    ambíguo — "1" quase sempre é a OPÇÃO 1 da lista, mas "11" pode ser a
-    opção 11 (raro, lista curta) OU a hora 11h (comum) — bug real
-    encontrado em produção: "1" era sempre tratado como "01:00", fazendo a
-    IA tentar agendar de madrugada em vez da primeira opção mostrada. Por
-    isso: tenta primeiro como ÍNDICE na última lista que a própria Mônica
-    mostrou pro cliente (persistida em
-    conversation.physical_eval_offered_slots quando a lista foi exibida);
-    se o número não for um índice válido, tenta como hora cheia. Horário
-    explícito (com "h" ou ":", ex: "14:30", "9h") é usado direto, sem
-    ambiguidade e sem precisar da lista.
+    só insere_agenda_avalicao deve ser chamada).
+
+    Só resolve se conversation.physical_eval_offered_slots tiver a lista
+    persistida pro mesmo dia — nunca agenda a partir de um horário solto
+    ("Hoje 15hs") sem antes ter exibido os disponíveis (bug real em
+    produção). Um número sozinho é ambíguo — "1" quase sempre é a OPÇÃO 1
+    da lista, mas "11" pode ser opção 11 ou hora 11h; por isso tenta
+    primeiro como índice na última lista mostrada e, se inválido, como hora
+    cheia desde que esteja na lista. Horário explícito (com "h" ou ":")
+    também só vale se constar na lista já exibida.
 
     Só considera a ÚLTIMA linha de user_text (última mensagem da rajada,
-    ver `combined_text` em reply_to_pending_messages) — se o cliente mandar
-    mais de uma mensagem rápida e uma delas mencionar um horário sem
-    relação com a escolha (ex: outro assunto), o texto combinado inteiro
-    não deve ser vasculhado atrás de qualquer dígito parecido com hora."""
+    ver `combined_text` em reply_to_pending_messages)."""
+    offered = conversation.physical_eval_offered_slots or {}
+    filtered = offered.get("slots") or []
+    if not filtered or offered.get("date") != schedule_date:
+        logger.info(
+            "[avaliacao-fisica] escolha ignorada — lista de horarios ainda nao foi "
+            "mostrada (conversa=%s, user_text=%r, offered=%r, data=%r)",
+            conversation.id, user_text, offered, schedule_date,
+        )
+        return None
+
+    offered_period = offered.get("period")
+    pref_period = pref.get("period")
+    if offered_period and pref_period and offered_period != pref_period:
+        logger.info(
+            "[avaliacao-fisica] escolha ignorada — periodo mudou "
+            "(conversa=%s, offered=%r, periodo=%r)",
+            conversation.id, offered, pref_period,
+        )
+        return None
+
     last_line = (user_text or "").strip().splitlines()[-1] if user_text and user_text.strip() else ""
     raw = _normalize_text(last_line)
+
+    explicit: str | None = None
     match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", raw)
     if match:
-        return _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
-    match = re.search(r"(?:^|\D)(\d{1,2})\s*h(?:\D|$)", raw)
-    if match:
-        return _normalize_schedule_horario(match.group(1))
+        explicit = _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
+    else:
+        match = re.search(r"(?:^|\D)(\d{1,2})\s*h(?:\D|$)", raw)
+        if match:
+            explicit = _normalize_schedule_horario(match.group(1))
+
+    if explicit:
+        if explicit in filtered:
+            logger.info(
+                "[avaliacao-fisica] horario explicito %s escolhido da lista (conversa=%s)",
+                explicit, conversation.id,
+            )
+            return explicit
+        logger.info(
+            "[avaliacao-fisica] horario explicito %s nao esta na lista mostrada "
+            "(conversa=%s, slots=%r)",
+            explicit, conversation.id, filtered,
+        )
+        return None
 
     number_match = re.search(r"(?:^|\D)(\d{1,2})(?:\D|$)", raw)
     if not number_match:
         return None
     number = int(number_match.group(1))
-
-    offered = conversation.physical_eval_offered_slots or {}
-    offered_period = offered.get("period")
-    pref_period = pref.get("period")
-    if offered.get("date") != schedule_date:
-        logger.info(
-            "[avaliacao-fisica] numero %s recebido mas nao ha lista recente pra esse dia "
-            "(conversa=%s, offered=%r, data=%r)",
-            number, conversation.id, offered, schedule_date,
-        )
-        return None
-    if offered_period and pref_period and offered_period != pref_period:
-        logger.info(
-            "[avaliacao-fisica] numero %s recebido mas periodo mudou "
-            "(conversa=%s, offered=%r, periodo=%r)",
-            number, conversation.id, offered, pref_period,
-        )
-        return None
-    filtered = offered.get("slots") or []
     logger.info(
         "[avaliacao-fisica] resolvendo numero %s pela lista ja mostrada (conversa=%s): %r",
         number, conversation.id, filtered,

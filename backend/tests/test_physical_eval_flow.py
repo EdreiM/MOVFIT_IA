@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.message_flow import (
+    TOOL_KEY_BOOK_PHYSICAL_EVAL,
     TOOL_KEY_CHECK_SCHEDULE,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
     _enrich_schedule_result_with_preference,
@@ -12,6 +13,7 @@ from app.services.message_flow import (
     _extract_schedule_period_from_text,
     _extract_schedule_time_from_text,
     _filter_horarios_by_preference,
+    _filter_past_schedule_slots,
     _format_schedule_reply_from_dados,
     _format_schedule_slot_interval,
     _format_schedule_slots_numbered,
@@ -78,6 +80,67 @@ def test_resolve_chosen_time_by_list_index_even_without_period_in_pref():
     assert chosen == "16:00"
 
 
+def test_resolve_chosen_time_ignored_without_offered_list():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+    )
+    assert (
+        _resolve_physical_eval_chosen_time(
+            "Hoje 15hs",
+            conv,
+            "20260917",
+            {"date": "20260917", "period": "tarde", "preferred_time": "15:00"},
+        )
+        is None
+    )
+    assert (
+        _resolve_physical_eval_chosen_time(
+            "3",
+            conv,
+            "20260917",
+            {"date": "20260917", "period": None, "preferred_time": None},
+        )
+        is None
+    )
+
+
+def test_resolve_chosen_time_explicit_not_in_offered_list():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+        physical_eval_offered_slots={
+            "date": "20260917",
+            "period": "tarde",
+            "slots": ["14:00", "16:00"],
+        },
+    )
+    assert (
+        _resolve_physical_eval_chosen_time(
+            "15hs",
+            conv,
+            "20260917",
+            {"date": "20260917", "period": "tarde", "preferred_time": None},
+        )
+        is None
+    )
+
+
+def test_filter_past_schedule_slots_for_today():
+    ref = datetime(2026, 9, 17, 15, 2, tzinfo=timezone(timedelta(hours=-3)))
+    horarios = ["14:00", "15:00", "16:00", "21:00"]
+    assert _filter_past_schedule_slots(horarios, "20260917", ref) == ["16:00", "21:00"]
+    assert _filter_past_schedule_slots(horarios, "20260918", ref) == horarios
+
+
 def test_resolve_chosen_time_from_explicit_hour():
     from app.models import Conversation
 
@@ -120,7 +183,7 @@ async def test_reply_from_schedule_persists_offered_slots():
         channel="whatsapp",
         status="open",
     )
-    ref = datetime(2026, 9, 17, 12, 0, tzinfo=timezone(timedelta(hours=-3)))
+    ref = datetime(2026, 9, 17, 11, 0, tzinfo=timezone(timedelta(hours=-3)))
     raw = {
         "sucesso": True,
         "dados": {
@@ -561,6 +624,151 @@ async def test_physical_eval_pipeline_calls_schedule_tool(db_session, company):
     assert "1 - 9:00 às 9:30" in reply
     assert "2 - 11:00 às 11:30" in reply
     assert "Qual prefere" in reply
+
+
+@pytest.mark.asyncio
+async def test_physical_eval_pipeline_shows_slots_before_booking_today(db_session, company):
+    """'Hoje 15hs' sem lista prévia deve consultar horários, não reservar direto."""
+    from app.models import AiConfig, Conversation, Lead, Tool
+    from app.security import encrypt_secret
+
+    config = AiConfig(
+        company_id=company.id,
+        ai_name="Mônica",
+        llm_api_key_encrypted=encrypt_secret("sk-test"),
+    )
+    db_session.add(config)
+    await db_session.flush()
+    verify = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Verificar unidade",
+        tool_key=TOOL_KEY_VERIFY_UNIT_BY_CPF,
+        description="Descobre unidade",
+        parameters=[{"name": "cpf", "type": "string", "required": True}],
+        webhook_url="https://example.com/verify",
+        is_active=True,
+    )
+    schedule = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Consulta horários",
+        tool_key=TOOL_KEY_CHECK_SCHEDULE,
+        description="Consulta horários",
+        parameters=[
+            {"name": "unidade", "type": "string", "required": True},
+            {"name": "data", "type": "string", "required": True},
+        ],
+        webhook_url="https://example.com/schedule",
+        is_active=True,
+    )
+    book = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Insere agenda",
+        tool_key=TOOL_KEY_BOOK_PHYSICAL_EVAL,
+        description="Reserva avaliação",
+        parameters=[
+            {"name": "cpf", "type": "string", "required": True},
+            {"name": "unidade", "type": "string", "required": True},
+            {"name": "data", "type": "string", "required": True},
+            {"name": "horario", "type": "string", "required": True},
+        ],
+        webhook_url="https://example.com/book",
+        is_active=True,
+    )
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5593999887766",
+        channel="whatsapp",
+        status="open",
+        ai_enabled=True,
+    )
+    lead = Lead(
+        company_id=company.id,
+        phone="5593999887766",
+        cpf="01098015207",
+        unit="Santarém - 24 horas",
+        is_student=True,
+        name="ALAILSON",
+    )
+    db_session.add_all([verify, schedule, book, conv, lead])
+    await db_session.commit()
+
+    tools_by_key = {
+        verify.tool_key: verify,
+        schedule.tool_key: schedule,
+        book.tool_key: book,
+    }
+    schedule_payload = {
+        "sucesso": True,
+        "mensagem": "Horários disponíveis consultados.",
+        "dados": {
+            "unidade": "Santarém - 24 horas",
+            "data": "20260917",
+            "data_formatada": "17/09/2026",
+            "horarios_disponiveis": ["14:00", "15:00", "16:00", "21:00"],
+        },
+    }
+
+    with patch(
+        "app.services.message_flow.execute_tool",
+        new_callable=AsyncMock,
+        return_value=schedule_payload,
+    ) as execute_mock:
+        reply, _ = await _run_physical_eval_pipeline(
+            db_session,
+            conv,
+            "Hoje 15hs",
+            tools_by_key,
+            lead,
+            config=config,
+            is_first_contact=False,
+            ai_name="Mônica",
+            recent_customer_texts=["Quero fazer a avaliação fisica", "010.980.152-07"],
+        )
+
+    execute_mock.assert_awaited_once()
+    assert execute_mock.await_args.args[1].tool_key == TOOL_KEY_CHECK_SCHEDULE
+    assert "confirmada" not in (reply or "").lower()
+    assert "Qual prefere" in (reply or "")
+    assert conv.physical_eval_offered_slots is not None
+    assert len(conv.physical_eval_offered_slots["slots"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_reply_from_schedule_filters_past_slots_today():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+    )
+    ref = datetime(2026, 9, 17, 15, 2, tzinfo=timezone(timedelta(hours=-3)))
+    raw = {
+        "sucesso": True,
+        "dados": {
+            "unidade": "Santarém - 24 horas",
+            "data": "20260917",
+            "data_formatada": "17/09/2026",
+            "horarios_disponiveis": ["14:00", "15:00", "16:00", "21:00"],
+        },
+    }
+    reply = await _reply_from_schedule_tool_result(
+        "Hoje à tarde",
+        raw,
+        None,
+        recent_customer_texts=["Quero fazer a avaliação"],
+        brazil_now=ref,
+        tool_arguments={"data": "20260917"},
+        conversation=conv,
+    )
+    assert "14:00" not in reply
+    assert "15:00 às 15:30" not in reply
+    assert "16:00 às 16:30" in reply
+    assert conv.physical_eval_offered_slots["slots"] == ["16:00"]
 
 
 @pytest.mark.asyncio
