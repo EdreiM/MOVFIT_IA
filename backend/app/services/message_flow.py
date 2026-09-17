@@ -977,15 +977,16 @@ def _physical_eval_booking_confirmation_reply(dados: dict, lead: Lead | None) ->
     detecta pelo NOME da ferramenta (contém "agendamento"), então o
     humanizador aplicaria a instrução da ferramenta de CONSULTA ("não diga
     que já agendou") na resposta de confirmação — o oposto do desejado."""
-    first_name = _lead_first_name(lead)
-    saudacao = f"{first_name}, " if first_name else ""
+    # Sem nome aqui de propósito: essa confirmação vem logo depois da lista
+    # de horários (_format_schedule_reply_from_dados), que já usa o nome —
+    # repetir de novo num turno seguinte soa repetitivo/robotizado.
     data_formatada = dados.get("data_formatada") or _format_schedule_date_br(
         str(dados.get("data") or "")
     )
     horario = dados.get("horario_inicial") or ""
     unidade = dados.get("unidade") or ""
 
-    partes = [f"{saudacao}sua avaliação física está confirmada"]
+    partes = ["Sua avaliação física está confirmada"]
     if data_formatada:
         partes.append(f"para {data_formatada}")
     if horario:
@@ -1680,7 +1681,12 @@ async def _humanize_tool_reply_with_llm(
             "ou transferir pra um atendente."
         )
     if first_name:
-        system += f"\nPode chamar o cliente de {first_name}."
+        system += (
+            f"\nSe fizer sentido, pode chamar o cliente de {first_name} — mas não comece "
+            "a mensagem com uma saudação tipo \"Oi, nome!\" nem repita o nome toda vez que "
+            "responder uma ferramenta; isso já foi feito no início da conversa e repetir "
+            "soa robotizado. Use o nome só ocasionalmente, não em toda resposta."
+        )
 
     messages = [
         {"role": "system", "content": system},
@@ -3323,7 +3329,11 @@ async def generate_ai_reply(
                 "Se o resultado de alguma ferramenta trouxer o nome real do cliente (campo "
                 "\"nome\" na resposta), passe a chamá-lo por esse nome pelo resto da conversa — "
                 "é mais confiável que o que ele mesmo escreveu, porque vem confirmado pelo "
-                "sistema. Use só o primeiro nome, de forma natural, sem soar formal demais."
+                "sistema. Use só o primeiro nome, de forma natural, sem soar formal demais. "
+                "NÃO comece toda mensagem com o nome ou uma saudação tipo \"Oi, nome!\" — "
+                "isso só faz sentido na primeira vez que você usa o nome confirmado; nas "
+                "respostas seguintes (inclusive depois de chamar outras ferramentas), varie "
+                "e só use o nome de vez em quando, senão soa repetitivo e robotizado."
             ),
         }
     )
