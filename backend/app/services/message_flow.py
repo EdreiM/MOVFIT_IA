@@ -849,7 +849,9 @@ def _is_physical_eval_intent(text: str) -> bool:
         return False
     if tokens & _PHYSICAL_EVAL_BODY_KEYWORDS:
         return True
-    if "avaliacao" in tokens and tokens & {"agendar", "agendamento", "marcar", "marca", "quero", "preciso", "gostaria"}:
+    if "avaliacao" in tokens and tokens & {
+        "agendar", "agendamento", "marcar", "marca", "quero", "preciso", "gostaria", "fazer",
+    }:
         return True
     if tokens & {"agendar", "agendamento", "marcar"} and "avaliacao" in tokens:
         return True
@@ -859,6 +861,16 @@ def _is_physical_eval_intent(text: str) -> bool:
 def _physical_eval_in_recent(recent_customer_texts: list[str] | None) -> bool:
     prior = [t for t in (recent_customer_texts or []) if t and t.strip()]
     return any(_is_physical_eval_intent(t) for t in prior[-8:])
+
+
+def _physical_eval_awaiting_slot_choice(user_text: str, conversation: Conversation) -> bool:
+    """Cliente já viu a lista numerada — número ou horário escolhido deve ir pro pipeline."""
+    if not conversation.physical_eval_offered_slots:
+        return False
+    last_line = (user_text or "").strip().splitlines()[-1] if (user_text or "").strip() else ""
+    if _extract_schedule_time_from_text(last_line):
+        return True
+    return bool(re.search(r"(?:^|\D)\d{1,2}(?:\D|$)", last_line or ""))
 
 
 def _physical_eval_followup(
@@ -1584,6 +1596,22 @@ def _format_schedule_reply_from_dados(dados: dict, lead: Lead | None = None) -> 
     return message if intro else message[0].upper() + message[1:]
 
 
+def _persist_physical_eval_offered_slots(
+    conversation: Conversation,
+    *,
+    schedule_date: str,
+    period: str | None,
+    horarios: list[str],
+) -> None:
+    if not schedule_date or not horarios:
+        return
+    conversation.physical_eval_offered_slots = {
+        "date": schedule_date,
+        "period": period,
+        "slots": horarios,
+    }
+
+
 async def _reply_from_schedule_tool_result(
     user_text: str,
     tool_result: dict,
@@ -1592,6 +1620,7 @@ async def _reply_from_schedule_tool_result(
     recent_customer_texts: list[str] | None,
     brazil_now: datetime,
     tool_arguments: dict | None = None,
+    conversation: Conversation | None = None,
 ) -> str:
     """Enriquece horários (período, intervalos) e monta resposta confiável pro cliente."""
     pref = _physical_eval_schedule_preference(
@@ -1619,6 +1648,13 @@ async def _reply_from_schedule_tool_result(
             str(schedule_date or ""),
             pref["period"],
             lead,
+        )
+    if conversation is not None and schedule_date:
+        _persist_physical_eval_offered_slots(
+            conversation,
+            schedule_date=str(schedule_date),
+            period=pref.get("period"),
+            horarios=horarios,
         )
     return _format_schedule_reply_from_dados(enriched.get("dados") or {}, lead)
 
@@ -1976,11 +2012,20 @@ def _resolve_physical_eval_chosen_time(
     number = int(number_match.group(1))
 
     offered = conversation.physical_eval_offered_slots or {}
-    if offered.get("date") != schedule_date or offered.get("period") != pref.get("period"):
+    offered_period = offered.get("period")
+    pref_period = pref.get("period")
+    if offered.get("date") != schedule_date:
         logger.info(
-            "[avaliacao-fisica] numero %s recebido mas nao ha lista recente pra esse dia/periodo "
-            "(conversa=%s, offered=%r, data=%r, periodo=%r)",
-            number, conversation.id, offered, schedule_date, pref.get("period"),
+            "[avaliacao-fisica] numero %s recebido mas nao ha lista recente pra esse dia "
+            "(conversa=%s, offered=%r, data=%r)",
+            number, conversation.id, offered, schedule_date,
+        )
+        return None
+    if offered_period and pref_period and offered_period != pref_period:
+        logger.info(
+            "[avaliacao-fisica] numero %s recebido mas periodo mudou "
+            "(conversa=%s, offered=%r, periodo=%r)",
+            number, conversation.id, offered, pref_period,
         )
         return None
     filtered = offered.get("slots") or []
@@ -2143,20 +2188,6 @@ async def _run_physical_eval_pipeline(
 
     schedule_result = await execute_tool(db, schedule_tool, args, conversation)
     if schedule_result.get("sucesso"):
-        dados = schedule_result.get("dados") if isinstance(schedule_result.get("dados"), dict) else {}
-        offered_slots, _meta = _filter_horarios_by_preference(
-            dados.get("horarios_disponiveis") or [], period=pref.get("period"), preferred_time=None
-        )
-        conversation.physical_eval_offered_slots = {
-            "date": schedule_date,
-            "period": pref.get("period"),
-            "slots": offered_slots,
-        }
-        db.add(conversation)
-        logger.info(
-            "[avaliacao-fisica] lista mostrada e persistida (conversa=%s): %r",
-            conversation.id, conversation.physical_eval_offered_slots,
-        )
         reply = await _reply_from_schedule_tool_result(
             user_text,
             schedule_result,
@@ -2164,7 +2195,14 @@ async def _run_physical_eval_pipeline(
             recent_customer_texts=recent_customer_texts,
             brazil_now=brazil_now,
             tool_arguments=args,
+            conversation=conversation,
         )
+        logger.info(
+            "[avaliacao-fisica] lista mostrada e persistida (conversa=%s): %r",
+            conversation.id, conversation.physical_eval_offered_slots,
+        )
+        db.add(conversation)
+        offered_slots = (conversation.physical_eval_offered_slots or {}).get("slots") or []
         if offered_slots and not conversation.physical_eval_recommendations_sent:
             reply += _PHYSICAL_EVAL_RECOMMENDATIONS
             conversation.physical_eval_recommendations_sent = True
@@ -2261,6 +2299,28 @@ def _promised_transfer_without_acting(text: str) -> bool:
     sempre é seguida pelo modelo)."""
     normalized = _normalize_text(text)
     return any(phrase in normalized for phrase in _TRANSFER_PROMISE_PHRASES)
+
+
+_BOOKING_PROMISE_PHRASES = (
+    "esta agendad",
+    "está agendad",
+    "foi agendad",
+    "agendamento confirmad",
+    "esta confirmad",
+    "está confirmad",
+    "horario confirmad",
+    "horário confirmad",
+    "esta marcad",
+    "está marcad",
+    "foi marcad",
+)
+
+
+def _promised_physical_eval_booking_without_acting(text: str) -> bool:
+    """IA prometeu que agendou avaliação física — insere_agenda_avalicao é
+    só via pipeline determinístico, nunca via texto livre da LLM."""
+    normalized = _normalize_text(text)
+    return any(phrase in normalized for phrase in _BOOKING_PROMISE_PHRASES)
 
 
 def _mentions_any_plan(text_tokens: set[str], plans: list[Plan]) -> bool:
@@ -2841,6 +2901,7 @@ async def generate_ai_reply(
         and (
             physical_eval_intent
             or _physical_eval_followup(user_text, recent_customer_texts, lead)
+            or _physical_eval_awaiting_slot_choice(user_text, conversation)
         )
     )
     if physical_eval_active:
@@ -3540,7 +3601,9 @@ async def generate_ai_reply(
                             recent_customer_texts=recent_customer_texts,
                             brazil_now=brazil_now,
                             tool_arguments=arguments,
+                            conversation=conversation,
                         )
+                        db.add(conversation)
                         return schedule_reply, deferred_end_call, bool(touched_units)
                 elif (
                     _is_technical_tool_failure(result)
@@ -3621,6 +3684,30 @@ async def generate_ai_reply(
             {"motivo": "Assunto fora do que a IA consegue resolver — ela já sinalizou a transferência ao cliente."},
             conversation,
         )
+
+    if (
+        conversation.physical_eval_offered_slots
+        and TOOL_KEY_BOOK_PHYSICAL_EVAL in tools_by_key
+        and _promised_physical_eval_booking_without_acting(final_text)
+    ):
+        logger.warning(
+            "IA prometeu agendamento de avaliação física sem chamar %s — reexecutando pipeline (conversa=%s)",
+            TOOL_KEY_BOOK_PHYSICAL_EVAL,
+            conversation.id,
+        )
+        pipeline_reply, lead = await _run_physical_eval_pipeline(
+            db,
+            conversation,
+            user_text,
+            tools_by_key,
+            lead,
+            config=config,
+            is_first_contact=is_first_contact,
+            ai_name=ai_name,
+            recent_customer_texts=recent_customer_texts,
+        )
+        if pipeline_reply is not None:
+            return pipeline_reply, deferred_end_call, delivered_via_tools
 
     return final_text, deferred_end_call, delivered_via_tools
 

@@ -17,10 +17,13 @@ from app.services.message_flow import (
     _format_schedule_slots_numbered,
     _is_physical_eval_intent,
     _normalize_schedule_slot_starts,
+    _physical_eval_awaiting_slot_choice,
     _physical_eval_followup,
     _physical_eval_schedule_preference,
     _physical_eval_weekend_reply,
+    _promised_physical_eval_booking_without_acting,
     _reply_from_schedule_tool_result,
+    _resolve_physical_eval_chosen_time,
     _run_physical_eval_pipeline,
     _schedule_date_is_weekend,
 )
@@ -29,7 +32,118 @@ from app.services.message_flow import (
 def test_physical_eval_intent_detected():
     assert _is_physical_eval_intent("Quero agendar avaliação física") is True
     assert _is_physical_eval_intent("Preciso marcar minha avaliação") is True
+    assert _is_physical_eval_intent("Fazer a avaliação") is True
     assert _is_physical_eval_intent("Quais os horários de funcionamento?") is False
+
+
+def test_awaiting_slot_choice_detects_number_or_time():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+        physical_eval_offered_slots={
+            "date": "20260917",
+            "period": "tarde",
+            "slots": ["12:00", "14:00", "16:00"],
+        },
+    )
+    assert _physical_eval_awaiting_slot_choice("3", conv) is True
+    assert _physical_eval_awaiting_slot_choice("16hs", conv) is True
+    assert _physical_eval_awaiting_slot_choice("obrigado", conv) is False
+
+
+def test_resolve_chosen_time_by_list_index_even_without_period_in_pref():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+        physical_eval_offered_slots={
+            "date": "20260917",
+            "period": "tarde",
+            "slots": ["12:00", "14:00", "16:00"],
+        },
+    )
+    chosen = _resolve_physical_eval_chosen_time(
+        "3",
+        conv,
+        "20260917",
+        {"date": "20260917", "period": None, "preferred_time": None},
+    )
+    assert chosen == "16:00"
+
+
+def test_resolve_chosen_time_from_explicit_hour():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+        physical_eval_offered_slots={
+            "date": "20260917",
+            "period": "tarde",
+            "slots": ["12:00", "14:00", "16:00"],
+        },
+    )
+    chosen = _resolve_physical_eval_chosen_time(
+        "16hs",
+        conv,
+        "20260917",
+        {"date": "20260917", "period": "tarde", "preferred_time": None},
+    )
+    assert chosen == "16:00"
+
+
+def test_booking_promise_guard_detects_fake_confirmation():
+    assert _promised_physical_eval_booking_without_acting(
+        "Perfeito! O horário de 16:00 às 16:30 está agendado para a sua avaliação física hoje."
+    ) is True
+    assert _promised_physical_eval_booking_without_acting(
+        "Sua avaliação física está confirmada para 17/09/2026 às 16:00."
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_reply_from_schedule_persists_offered_slots():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+    )
+    ref = datetime(2026, 9, 17, 12, 0, tzinfo=timezone(timedelta(hours=-3)))
+    raw = {
+        "sucesso": True,
+        "dados": {
+            "unidade": "Santarém - 24 horas",
+            "data": "20260917",
+            "data_formatada": "17/09/2026",
+            "horarios_disponiveis": ["12:00", "14:00", "16:00", "21:00"],
+        },
+    }
+    await _reply_from_schedule_tool_result(
+        "Hoje 15hs",
+        raw,
+        None,
+        recent_customer_texts=["Fazer a avaliação"],
+        brazil_now=ref,
+        tool_arguments={"data": "20260917"},
+        conversation=conv,
+    )
+    assert conv.physical_eval_offered_slots == {
+        "date": "20260917",
+        "period": "tarde",
+        "slots": ["12:00", "14:00", "16:00"],
+    }
 
 
 def test_extract_schedule_date_formats():
