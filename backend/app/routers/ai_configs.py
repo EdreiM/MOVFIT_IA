@@ -34,7 +34,15 @@ router = APIRouter(tags=["ai-configs"])
 TEST_CHAT_PHONE = "__test_console__"
 
 
-def _to_out(config: AiConfig) -> AiConfigOut:
+def _serialize_custom_links(config: AiConfig) -> list[CustomLink]:
+    return [
+        CustomLink.model_validate(item)
+        for item in (config.custom_links or [])
+        if isinstance(item, dict)
+    ]
+
+
+def _to_out(config: AiConfig, *, custom_links: list[CustomLink] | None = None) -> AiConfigOut:
     masked = None
     has_key = bool(config.llm_api_key_encrypted)
     if has_key:
@@ -68,11 +76,7 @@ def _to_out(config: AiConfig) -> AiConfigOut:
         followup_enabled=config.followup_enabled,
         followup_delay_minutes=config.followup_delay_minutes,
         followup_max_attempts=config.followup_max_attempts,
-        custom_links=[
-            CustomLink.model_validate(item)
-            for item in (config.custom_links or [])
-            if isinstance(item, dict)
-        ],
+        custom_links=custom_links if custom_links is not None else _serialize_custom_links(config),
     )
 
 
@@ -104,7 +108,6 @@ async def _get_or_create_integration_config(
             followup_enabled=default_config.followup_enabled,
             followup_delay_minutes=default_config.followup_delay_minutes,
             followup_max_attempts=default_config.followup_max_attempts,
-            custom_links=list(default_config.custom_links or []),
         )
         db.add(config)
         await db.flush()
@@ -143,7 +146,7 @@ async def get_ai_config(
         return _to_out(default_config)
 
     config = await _get_or_create_integration_config(db, company_id, integration_id, default_config)
-    return _to_out(config)
+    return _to_out(config, custom_links=_serialize_custom_links(default_config))
 
 
 @router.patch("/ai-configs/{company_id}", response_model=AiConfigOut)
@@ -158,20 +161,18 @@ async def update_ai_config(
     if company_id != resolved and not current.is_super_admin:
         raise HTTPException(status_code=403, detail="Sem acesso")
 
+    default_config = await _get_default_ai_config(db, company_id)
     if integration_id is None:
-        config = await _get_default_ai_config(db, company_id)
+        config = default_config
     else:
-        default_config = await _get_default_ai_config(db, company_id)
         config = await _get_or_create_integration_config(db, company_id, integration_id, default_config)
 
     data = payload.model_dump(exclude_unset=True)
     api_key = data.pop("llm_api_key", None)
     transcription_key = data.pop("transcription_api_key", None)
-    if "custom_links" in data and data["custom_links"] is not None:
-        data["custom_links"] = [
-            link if isinstance(link, dict) else link
-            for link in data["custom_links"]
-        ]
+    custom_links = data.pop("custom_links", None)
+    if custom_links is not None:
+        default_config.custom_links = custom_links
     for k, v in data.items():
         setattr(config, k, v)
     if api_key:
@@ -180,7 +181,8 @@ async def update_ai_config(
         config.transcription_api_key_encrypted = encrypt_secret(transcription_key)
     await db.flush()
     await db.refresh(config)
-    return _to_out(config)
+    await db.refresh(default_config)
+    return _to_out(config, custom_links=_serialize_custom_links(default_config))
 
 
 @router.post("/ai-configs/{company_id}/rag-sources", response_model=RagSourceOut)

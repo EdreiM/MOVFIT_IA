@@ -406,13 +406,12 @@ export default function AiConfigPage() {
           )}
         </fieldset>
 
-        {!integrationId && (
-          <fieldset className="space-y-3 rounded-md border border-white/10 p-3">
+        <fieldset className="space-y-3 rounded-md border border-white/10 p-3">
             <legend className="px-1 text-sm text-sand/60">Links personalizados</legend>
             <p className="text-xs text-sand/45">
               URLs que a IA pode enviar quando o assunto combinar — por exemplo, vagas de
-              emprego. Vale pra empresa toda. No campo &quot;Quando enviar&quot;, use palavras-chave
-              separadas por vírgula.
+              emprego. Vale pra empresa toda, independente da integração selecionada acima. No
+              campo &quot;Quando enviar&quot;, use palavras-chave separadas por vírgula.
             </p>
             {(config.custom_links ?? []).map((link, index) => (
               <div
@@ -487,15 +486,7 @@ export default function AiConfigPage() {
             >
               Adicionar link
             </button>
-          </fieldset>
-        )}
-
-        {integrationId && (
-          <p className="text-xs text-sand/45">
-            Links personalizados são configurados na configuração padrão da empresa (sem
-            integração selecionada).
-          </p>
-        )}
+        </fieldset>
 
         <details className="rounded-md border border-white/10 p-3">
           <summary className="cursor-pointer text-sm text-sand/60">
