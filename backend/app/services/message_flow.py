@@ -2831,6 +2831,105 @@ async def _auto_send_plan_images(
     )
 
 
+async def _get_company_custom_links(db: AsyncSession, company_id: UUID) -> list:
+    result = await db.execute(
+        select(AiConfig.custom_links).where(
+            AiConfig.company_id == company_id,
+            AiConfig.integration_id.is_(None),
+        )
+    )
+    raw = result.scalar_one_or_none()
+    return raw if isinstance(raw, list) else []
+
+
+def _custom_link_keywords(when: str) -> list[str]:
+    return [
+        _normalize_text(part)
+        for part in re.split(r"[,;\n]+", when or "")
+        if part.strip()
+    ]
+
+
+def _custom_link_matches_text(link: dict, text: str) -> bool:
+    when = (link.get("when") or "").strip()
+    if not when or not text:
+        return False
+    normalized = _normalize_text(text)
+    tokens = _normalize_tokens(text)
+    for keyword in _custom_link_keywords(when):
+        if len(keyword) < 3:
+            continue
+        if keyword in normalized or keyword in tokens:
+            return True
+    return False
+
+
+def _matching_custom_links(
+    user_text: str,
+    recent_customer_texts: list[str] | None,
+    links: list,
+) -> list[dict]:
+    if not links:
+        return []
+    texts = [user_text] + list(reversed((recent_customer_texts or [])[-4:]))
+    matched: list[dict] = []
+    seen_urls: set[str] = set()
+    for item in links:
+        if not isinstance(item, dict):
+            continue
+        url = (item.get("url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        if any(_custom_link_matches_text(item, text) for text in texts if text):
+            matched.append(item)
+            seen_urls.add(url)
+    return matched
+
+
+def _format_custom_links_system_block(links: list) -> str:
+    lines = [
+        "[Links personalizados da empresa]",
+        "Use estes links quando o assunto combinar — envie a URL pura (https://...), "
+        "NUNCA markdown [texto](url). Só envie quando o cliente perguntar ou o assunto "
+        "for claramente relacionado; não mande proativamente sem contexto.",
+        "",
+    ]
+    count = 0
+    for item in links:
+        if not isinstance(item, dict):
+            continue
+        label = (item.get("label") or "Link").strip()
+        url = (item.get("url") or "").strip()
+        when = (item.get("when") or "").strip()
+        if not url:
+            continue
+        hint = f" — envie quando: {when}" if when else ""
+        lines.append(f"- {label}{hint}: {url}")
+        count += 1
+    return "\n".join(lines) if count else ""
+
+
+def _ensure_custom_links_in_reply(
+    reply: str,
+    user_text: str,
+    recent_customer_texts: list[str] | None,
+    links: list,
+) -> str:
+    if not reply or not links:
+        return reply
+    matched = _matching_custom_links(user_text, recent_customer_texts, links)
+    if not matched:
+        return reply
+    reply_lower = reply.lower()
+    extras: list[str] = []
+    for link in matched:
+        url = (link.get("url") or "").strip()
+        if url and url.lower() not in reply_lower:
+            label = (link.get("label") or "Link").strip()
+            extras.append(f"\n\n{label}: {url}")
+    return reply + "".join(extras) if extras else reply
+
+
 async def resolve_ai_config(db: AsyncSession, conversation: Conversation) -> AiConfig | None:
     """Personalização da integração da conversa, com fallback pra
     configuração padrão da empresa — mesma regra usada tanto pra gerar
@@ -2889,6 +2988,7 @@ async def generate_ai_reply(
         return None, None, False
 
     api_key = decrypt_secret(config.llm_api_key_encrypted)
+    custom_links = await _get_company_custom_links(db, conversation.company_id)
     rag_context = await fetch_rag_context(db, conversation.company_id, user_text)
 
     history_result = await db.execute(
@@ -3117,6 +3217,9 @@ async def generate_ai_reply(
                 "content": f"Contexto da base de conhecimento:\n{rag_context}",
             }
         )
+    custom_links_block = _format_custom_links_system_block(custom_links)
+    if custom_links_block:
+        messages.append({"role": "system", "content": custom_links_block})
     messages.append(
         {
             "role": "system",
@@ -3751,6 +3854,9 @@ async def generate_ai_reply(
         if pipeline_reply is not None:
             return pipeline_reply, deferred_end_call, delivered_via_tools
 
+    final_text = _ensure_custom_links_in_reply(
+        final_text, user_text, recent_customer_texts, custom_links
+    )
     return final_text, deferred_end_call, delivered_via_tools
 
 

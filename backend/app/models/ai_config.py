@@ -61,6 +61,9 @@ class AiConfig(Base):
     followup_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     followup_delay_minutes: Mapped[int] = mapped_column(Integer, default=120)
     followup_max_attempts: Mapped[int] = mapped_column(Integer, default=2)
+    # Links úteis que a IA pode enviar quando o assunto combinar (vagas,
+    # formulários etc.) — lista de {label, url, when}.
+    custom_links: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

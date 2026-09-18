@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 # Auth
@@ -148,6 +148,20 @@ class MessageOut(BaseModel):
 
 
 # AI Config
+class CustomLink(BaseModel):
+    label: str = Field(min_length=1, max_length=255)
+    url: str = Field(min_length=1)
+    when: str | None = None
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_scheme(cls, v: str) -> str:
+        url = v.strip()
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("URL deve começar com http:// ou https://")
+        return url
+
+
 class AiConfigUpdate(BaseModel):
     ai_name: str | None = None
     tone: str | None = None
@@ -162,6 +176,7 @@ class AiConfigUpdate(BaseModel):
     followup_enabled: bool | None = None
     followup_delay_minutes: int | None = None
     followup_max_attempts: int | None = None
+    custom_links: list[CustomLink] | None = None
 
 
 class AiConfigOut(BaseModel):
@@ -183,6 +198,7 @@ class AiConfigOut(BaseModel):
     followup_enabled: bool
     followup_delay_minutes: int
     followup_max_attempts: int
+    custom_links: list[CustomLink] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

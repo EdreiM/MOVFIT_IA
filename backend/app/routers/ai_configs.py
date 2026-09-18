@@ -13,6 +13,7 @@ from app.models import AiConfig, Conversation, Message, RagSource, Tool
 from app.schemas import (
     AiConfigOut,
     AiConfigUpdate,
+    CustomLink,
     MessageOut,
     RagSourceCreate,
     RagSourceOut,
@@ -67,6 +68,11 @@ def _to_out(config: AiConfig) -> AiConfigOut:
         followup_enabled=config.followup_enabled,
         followup_delay_minutes=config.followup_delay_minutes,
         followup_max_attempts=config.followup_max_attempts,
+        custom_links=[
+            CustomLink.model_validate(item)
+            for item in (config.custom_links or [])
+            if isinstance(item, dict)
+        ],
     )
 
 
@@ -98,6 +104,7 @@ async def _get_or_create_integration_config(
             followup_enabled=default_config.followup_enabled,
             followup_delay_minutes=default_config.followup_delay_minutes,
             followup_max_attempts=default_config.followup_max_attempts,
+            custom_links=list(default_config.custom_links or []),
         )
         db.add(config)
         await db.flush()
@@ -160,6 +167,11 @@ async def update_ai_config(
     data = payload.model_dump(exclude_unset=True)
     api_key = data.pop("llm_api_key", None)
     transcription_key = data.pop("transcription_api_key", None)
+    if "custom_links" in data and data["custom_links"] is not None:
+        data["custom_links"] = [
+            link if isinstance(link, dict) else link
+            for link in data["custom_links"]
+        ]
     for k, v in data.items():
         setattr(config, k, v)
     if api_key:

@@ -2,6 +2,12 @@ import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
+type CustomLink = {
+  label: string;
+  url: string;
+  when: string | null;
+};
+
 type AiConfig = {
   id: string;
   company_id: string;
@@ -21,6 +27,7 @@ type AiConfig = {
   followup_enabled: boolean;
   followup_delay_minutes: number;
   followup_max_attempts: number;
+  custom_links: CustomLink[];
 };
 
 type Integration = {
@@ -55,7 +62,7 @@ export default function AiConfigPage() {
     if (!companyId) return;
     const qs = targetIntegrationId ? `?integration_id=${targetIntegrationId}` : "";
     const cfg = await api<AiConfig>(`/ai-configs/${companyId}${qs}`);
-    setConfig(cfg);
+    setConfig({ ...cfg, custom_links: cfg.custom_links ?? [] });
     setApiKey("");
   };
 
@@ -89,6 +96,9 @@ export default function AiConfigPage() {
         followup_enabled: config.followup_enabled,
         followup_delay_minutes: config.followup_delay_minutes,
         followup_max_attempts: config.followup_max_attempts,
+        custom_links: (config.custom_links ?? []).filter(
+          (link) => link.label.trim() && link.url.trim()
+        ),
       };
       if (apiKey.trim()) body.llm_api_key = apiKey.trim();
       if (transcriptionApiKey.trim()) body.transcription_api_key = transcriptionApiKey.trim();
@@ -395,6 +405,97 @@ export default function AiConfigPage() {
             </div>
           )}
         </fieldset>
+
+        {!integrationId && (
+          <fieldset className="space-y-3 rounded-md border border-white/10 p-3">
+            <legend className="px-1 text-sm text-sand/60">Links personalizados</legend>
+            <p className="text-xs text-sand/45">
+              URLs que a IA pode enviar quando o assunto combinar — por exemplo, vagas de
+              emprego. Vale pra empresa toda. No campo &quot;Quando enviar&quot;, use palavras-chave
+              separadas por vírgula.
+            </p>
+            {(config.custom_links ?? []).map((link, index) => (
+              <div
+                key={index}
+                className="space-y-2 rounded-md border border-white/10 bg-ink/40 p-3"
+              >
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="block space-y-1">
+                    <span className="text-xs text-sand/50">Nome do link</span>
+                    <input
+                      className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+                      placeholder="Ex: Trabalhe conosco"
+                      value={link.label}
+                      onChange={(e) => {
+                        const next = [...(config.custom_links ?? [])];
+                        next[index] = { ...next[index], label: e.target.value };
+                        setConfig({ ...config, custom_links: next });
+                      }}
+                    />
+                  </label>
+                  <label className="block space-y-1 sm:col-span-2">
+                    <span className="text-xs text-sand/50">URL</span>
+                    <input
+                      className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+                      placeholder="https://..."
+                      value={link.url}
+                      onChange={(e) => {
+                        const next = [...(config.custom_links ?? [])];
+                        next[index] = { ...next[index], url: e.target.value };
+                        setConfig({ ...config, custom_links: next });
+                      }}
+                    />
+                  </label>
+                  <label className="block space-y-1 sm:col-span-2">
+                    <span className="text-xs text-sand/50">Quando enviar (palavras-chave)</span>
+                    <input
+                      className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+                      placeholder="vagas, emprego, trabalhar, colaborador, personal"
+                      value={link.when ?? ""}
+                      onChange={(e) => {
+                        const next = [...(config.custom_links ?? [])];
+                        next[index] = { ...next[index], when: e.target.value };
+                        setConfig({ ...config, custom_links: next });
+                      }}
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = (config.custom_links ?? []).filter((_, i) => i !== index);
+                    setConfig({ ...config, custom_links: next });
+                  }}
+                  className="rounded-md border border-ember/40 px-3 py-1 text-xs text-ember hover:bg-ember/10"
+                >
+                  Remover link
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() =>
+                setConfig({
+                  ...config,
+                  custom_links: [
+                    ...(config.custom_links ?? []),
+                    { label: "", url: "", when: "" },
+                  ],
+                })
+              }
+              className="rounded-md border border-leaf px-4 py-2 text-sm text-lime hover:bg-leaf/10"
+            >
+              Adicionar link
+            </button>
+          </fieldset>
+        )}
+
+        {integrationId && (
+          <p className="text-xs text-sand/45">
+            Links personalizados são configurados na configuração padrão da empresa (sem
+            integração selecionada).
+          </p>
+        )}
 
         <details className="rounded-md border border-white/10 p-3">
           <summary className="cursor-pointer text-sm text-sand/60">
