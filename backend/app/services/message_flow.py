@@ -2282,7 +2282,68 @@ def _wants_plan_info(text: str, recent_customer_texts: list[str] | None = None) 
 
 
 _PLAN_CAPTION_MARKERS = ("🏋️", "Faça sua matrícula", "Link de cadastro", "PLANO ANUAL", "PLANO MENSAL")
+_PLANS_SENT_PROMISE_PHRASES = (
+    "ja enviei",
+    "já enviei",
+    "enviei as imagens",
+    "enviei para voce",
+    "enviei pra voce",
+    "imagens e detalhes dos planos",
+    "detalhes dos planos",
+)
 _HISTORY_LLM_MAX_CHARS = 700
+
+
+def _text_looks_like_plan_caption(text: str) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    if stripped.startswith("🏋️"):
+        return True
+    return "🏋️" in text and any(
+        marker in text for marker in ("Faça sua matrícula", "Link de cadastro", " por mês")
+    )
+
+
+def _strip_plan_captions_from_text(text: str) -> str:
+    """Remove blocos de legenda de plano que a IA escreveu em texto livre —
+    plano só deve ir via enviar_imagens_planos (imagem + legenda), senão
+    aparece no painel como se tivesse sido enviado sem passar pelo webhook."""
+    if not text or not any(marker in text for marker in _PLAN_CAPTION_MARKERS):
+        return text
+    parts = re.split(r"(?=🏋️\s*\*)", text)
+    kept: list[str] = []
+    for part in parts:
+        chunk = part.strip()
+        if not chunk:
+            continue
+        if chunk.startswith("🏋️"):
+            # Descarta a legenda do plano, mas preserva texto depois do link
+            # (ex: "Já enviei..." que a IA colocou na mesma bolha).
+            url_tail = re.split(r"https?://\S+", chunk, maxsplit=1)
+            if len(url_tail) > 1:
+                trailing = url_tail[1].strip()
+                if trailing and not _text_looks_like_plan_caption(trailing):
+                    kept.append(trailing)
+            continue
+        if not _text_looks_like_plan_caption(chunk):
+            kept.append(chunk)
+    return "\n\n".join(kept).strip()
+
+
+def _promised_plans_already_sent(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(phrase in normalized for phrase in _PLANS_SENT_PROMISE_PHRASES)
+
+
+async def _all_unit_plan_images_sent(
+    db: AsyncSession, conversation_id: UUID, unit: Unit
+) -> bool:
+    needed = {p.image_url for p in unit.plans if p.is_active and p.image_url}
+    if not needed:
+        return True
+    sent = await _get_sent_plan_image_urls(db, conversation_id)
+    return needed <= sent
 
 
 def _history_text_for_llm(message: Message) -> str | None:
@@ -2747,6 +2808,52 @@ async def _present_plan_images_with_captions(
     }
 
 
+async def _resolve_plan_delivery_unit(
+    db: AsyncSession,
+    company_id: UUID,
+    user_text: str,
+    assistant_text: str,
+    recent_customer_texts: list[str] | None,
+    touched_units: set[str],
+) -> Unit | None:
+    """Descobre a unidade cujos planos devem ser enviados — prioriza unidade
+    já tocada pela ferramenta neste turno (a IA pode ter mandado só 1 plano)."""
+    result = await db.execute(
+        select(Unit)
+        .options(selectinload(Unit.plans))
+        .where(Unit.company_id == company_id, Unit.is_active.is_(True))
+    )
+    units = result.scalars().unique().all()
+    if not units:
+        return None
+
+    for unit in units:
+        if unit.name in touched_units:
+            return unit
+
+    scan_texts = [user_text] + list(reversed((recent_customer_texts or [])[-6:]))
+    for text in scan_texts:
+        tokens = _normalize_tokens(text)
+        if not tokens:
+            continue
+        candidates = [
+            (str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}"))
+            for u in units
+        ]
+        matched_unit_id = _unique_match(candidates, tokens, threshold=0.4)
+        if matched_unit_id:
+            return next((u for u in units if str(u.id) == matched_unit_id), None)
+
+    units_with_images = [u for u in units if any(p.is_active and p.image_url for p in u.plans)]
+    if len(units_with_images) == 1:
+        candidate_unit = units_with_images[0]
+        combined_tokens = _normalize_tokens(user_text) | _normalize_tokens(assistant_text)
+        if _mentions_any_plan(combined_tokens, candidate_unit.plans):
+            return candidate_unit
+
+    return None
+
+
 async def _auto_send_plan_images(
     db: AsyncSession,
     conversation: Conversation,
@@ -2755,71 +2862,35 @@ async def _auto_send_plan_images(
     tools_by_key: dict[str, Tool],
     touched_units: set[str],
     recent_customer_texts: list[str] | None = None,
-) -> None:
-    """Rede de segurança: garante que a imagem do plano seja mandada quando o
-    cliente menciona uma unidade, mesmo que a IA não decida chamar a
-    ferramenta por conta própria (comportamento de prompt não é 100%
-    consistente). O dedup ("não repetir a mesma imagem") e o reenvio quando
-    o cliente pede explicitamente já são tratados dentro de
-    _present_plan_images_with_captions, então essa função só decide QUANDO
-    tentar chamar, não SE deve repetir.
-
-    `touched_units` traz as unidades que a própria IA já mandou imagem nessa
-    mesma resposta (via chamada de ferramenta) — pula essas pra não mandar a
-    mesma imagem duas vezes numa resposta só."""
+) -> Unit | None:
+    """Rede de segurança: garante TODAS as imagens de plano da unidade via
+    ferramenta, mesmo que a IA chame enviar_imagens_planos só pra um plano
+    ou escreva as legendas em texto livre (bug real: painel mostrava plano
+    enviado, WhatsApp não recebia). Dedup por URL evita repetir o que já foi."""
     tool = tools_by_key.get(TOOL_KEY_SEND_PLAN_IMAGES)
     if not tool or not tool.webhook_url:
-        return
+        return None
     if not _wants_plan_info(user_text, recent_customer_texts):
-        # Sem isso, só citar o nome de uma unidade por qualquer outro motivo
-        # (ex: "a academia de Itaituba abre hoje?") já disparava o envio dos
-        # planos — o cliente só queria saber o horário.
-        return
+        return None
 
-    text_tokens = _normalize_tokens(user_text)
-
-    result = await db.execute(
-        select(Unit)
-        .options(selectinload(Unit.plans))
-        .where(Unit.company_id == conversation.company_id, Unit.is_active.is_(True))
+    unit = await _resolve_plan_delivery_unit(
+        db,
+        conversation.company_id,
+        user_text,
+        assistant_text,
+        recent_customer_texts,
+        touched_units,
     )
-    units = result.scalars().unique().all()
-    units_with_images = [u for u in units if any(p.is_active and p.image_url for p in u.plans)]
-
-    unit = None
-    if text_tokens:
-        candidates = [(str(u.id), _normalize_tokens(f"{u.name} {u.city} {u.unit_type or ''}")) for u in units]
-        matched_unit_id = _unique_match(candidates, text_tokens, threshold=0.4)
-        if matched_unit_id:
-            unit = next((u for u in units if str(u.id) == matched_unit_id), None)
-
-    if not unit and len(units_with_images) == 1:
-        # Cliente não citou a unidade (ex: "me mostra os planos"), mas só
-        # existe uma cadastrada — sem ambiguidade nenhuma pra resolver. Só
-        # dispara se a resposta da IA realmente citar um plano por extenso,
-        # pra não mandar imagem sem pedir em mensagens sem nada a ver (tipo
-        # um simples "oi, tudo bem?").
-        candidate_unit = units_with_images[0]
-        combined_tokens = text_tokens | _normalize_tokens(assistant_text)
-        if _mentions_any_plan(combined_tokens, candidate_unit.plans):
-            unit = candidate_unit
-
-    if not unit:
-        return
-    if not any(p.is_active and p.image_url for p in unit.plans):
-        return
+    if not unit or not any(p.is_active and p.image_url for p in unit.plans):
+        return None
 
     force_resend = _wants_image_explicitly(user_text)
     if force_resend and unit.name in touched_units:
-        # Só pula quando é reenvio explícito: aí sim a IA já tendo mandado a
-        # imagem dessa unidade nessa resposta é sinal de duplicata na certa
-        # (o dedup por URL não se aplica no reenvio forçado). Fora isso,
-        # "unidade já tocada" não quer dizer "todos os planos dela já foram
-        # mandados" — a IA pode ter chamado a ferramenta só pra um dos
-        # planos da unidade, e o dedup por URL abaixo já cuida de não
-        # repetir o que já foi enviado.
-        return
-    resolved_images = await _resolve_plan_images(db, conversation.company_id, {"Unidade": unit.name})
+        return unit
+
+    resolved_images = await _resolve_plan_images(
+        db, conversation.company_id, {"Unidade": unit.name}
+    )
     await _present_plan_images_with_captions(
         db,
         conversation,
@@ -2829,6 +2900,7 @@ async def _auto_send_plan_images(
         force_resend=force_resend,
         touched_units=touched_units,
     )
+    return unit
 
 
 async def _get_company_custom_links(db: AsyncSession, company_id: UUID) -> list:
@@ -3802,7 +3874,7 @@ async def generate_ai_reply(
             )
 
     final_text = assistant_message.get("content") or ""
-    await _auto_send_plan_images(
+    plan_unit = await _auto_send_plan_images(
         db,
         conversation,
         user_text,
@@ -3811,6 +3883,33 @@ async def generate_ai_reply(
         touched_units,
         recent_customer_texts=recent_customer_texts,
     )
+    if _wants_plan_info(user_text, recent_customer_texts):
+        final_text = _strip_plan_captions_from_text(final_text)
+        if plan_unit and _promised_plans_already_sent(final_text):
+            if not await _all_unit_plan_images_sent(db, conversation.id, plan_unit):
+                plan_tool = tools_by_key.get(TOOL_KEY_SEND_PLAN_IMAGES)
+                if plan_tool and plan_tool.webhook_url:
+                    logger.warning(
+                        "IA prometeu planos enviados mas faltam imagens (conversa=%s, unidade=%s)",
+                        conversation.id,
+                        plan_unit.name,
+                    )
+                    await _present_plan_images_with_captions(
+                        db,
+                        conversation,
+                        conversation.company_id,
+                        plan_tool,
+                        await _resolve_plan_images(
+                            db, conversation.company_id, {"Unidade": plan_unit.name}
+                        ),
+                        force_resend=False,
+                        touched_units=touched_units,
+                    )
+            final_text = _strip_plan_captions_from_text(final_text)
+        if not final_text.strip():
+            final_text = "Deseja mais alguma informação?"
+        elif _promised_plans_already_sent(final_text):
+            final_text = "Deseja mais alguma informação?"
     delivered_via_tools = bool(touched_units)
 
     transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)

@@ -5,9 +5,32 @@ from app.services.message_flow import (
     _best_matches,
     _get_sent_plan_image_urls,
     _normalize_tokens,
+    _promised_plans_already_sent,
     _resolve_plan_images,
+    _strip_plan_captions_from_text,
     _unique_match,
 )
+
+
+def test_strip_plan_captions_removes_llm_written_blocks():
+    caption = (
+        "🏋️ *MENSAL RECORRENTE*\n\n"
+        "💰 *R$ 167,00 por mês*\n\n"
+        "👉 *Faça sua matrícula pelo link:*\n"
+        "https://movfitbrasil.com.br/planos?unidade=novo-progresso"
+    )
+    text = f"{caption}\n\nJá enviei para você as imagens e detalhes dos planos."
+    stripped = _strip_plan_captions_from_text(text)
+    assert "🏋️" not in stripped
+    assert "167,00" not in stripped
+    assert "Já enviei" in stripped
+
+
+def test_promised_plans_already_sent_detects_false_claim():
+    assert _promised_plans_already_sent(
+        "Já enviei para você as imagens e detalhes dos planos do Novo Progresso."
+    ) is True
+    assert _promised_plans_already_sent("Deseja mais alguma informação?") is False
 
 
 def test_normalize_tokens_ignores_accents_and_case():
