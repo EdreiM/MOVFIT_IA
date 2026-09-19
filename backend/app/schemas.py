@@ -435,6 +435,7 @@ class MetricsOverview(BaseModel):
     ai_resolution_rate: float | None
     students_total: int
     transferred_total: int
+    with_human_total: int
     cancellation_requests_total: int
     physical_evals_scheduled_total: int
 
@@ -465,6 +466,20 @@ class MetricsNarrativeReport(BaseModel):
     ai_name: str
     paragraphs: list[str]
     generated_at: datetime
+
+
+class ShowcaseSnippet(BaseModel):
+    actor: str
+    text: str
+
+
+class ShowcaseExample(BaseModel):
+    modality: str
+    title: str
+    outcome: str
+    evidence: str
+    occurred_at: datetime
+    snippets: list[ShowcaseSnippet]
 
 
 # API keys (acesso externo, machine-to-machine)

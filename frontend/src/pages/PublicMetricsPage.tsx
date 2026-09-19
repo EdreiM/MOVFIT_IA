@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiExternal } from "../api";
+import MetricsShowcase, { type ShowcaseExample } from "../components/MetricsShowcase";
 
 type Overview = {
   conversations_total: number;
@@ -12,6 +13,7 @@ type Overview = {
   ai_resolution_rate: number | null;
   students_total: number;
   transferred_total: number;
+  with_human_total: number;
   cancellation_requests_total: number;
   physical_evals_scheduled_total: number;
 };
@@ -55,6 +57,7 @@ export default function PublicMetricsPage() {
   const [funnel, setFunnel] = useState<StageCount[]>([]);
   const [tools, setTools] = useState<ToolStats[]>([]);
   const [narrative, setNarrative] = useState<NarrativeReport | null>(null);
+  const [showcase, setShowcase] = useState<ShowcaseExample[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -77,12 +80,14 @@ export default function PublicMetricsPage() {
       apiExternal<StageCount[]>("/v1/metrics/leads-funnel", key),
       apiExternal<ToolStats[]>("/v1/metrics/tools", key),
       apiExternal<NarrativeReport>("/v1/metrics/narrative-report", key),
+      apiExternal<ShowcaseExample[]>("/v1/metrics/showcase-examples", key),
     ])
-      .then(([o, f, t, narrativeReport]) => {
+      .then(([o, f, t, narrativeReport, showcaseExamples]) => {
         setOverview(o);
         setFunnel(f);
         setTools(t);
         setNarrative(narrativeReport);
+        setShowcase(showcaseExamples);
       })
       .catch((e) => {
         setError(e instanceof Error ? e.message : "Chave inválida ou expirada");
@@ -127,11 +132,12 @@ export default function PublicMetricsPage() {
         { label: "Msgs entrada", value: overview.messages_inbound },
         { label: "Msgs saída", value: overview.messages_outbound },
         {
-          label: "Resolução IA",
+          label: "Resolução pela IA",
           value: overview.ai_resolution_rate != null ? `${Math.round(overview.ai_resolution_rate * 100)}%` : "—",
         },
         { label: "Alunos", value: overview.students_total },
-        { label: "Transferidos", value: overview.transferred_total },
+        { label: "Com atendente agora", value: overview.with_human_total },
+        { label: "Transferidos (total)", value: overview.transferred_total },
         { label: "Pediram cancelamento", value: overview.cancellation_requests_total },
         { label: "Avaliações agendadas", value: overview.physical_evals_scheduled_total },
       ]
@@ -188,6 +194,15 @@ export default function PublicMetricsPage() {
                 </div>
               </div>
             )}
+
+            <div className="border border-white/10 bg-panel px-5 py-4">
+              <p className="text-xs uppercase tracking-wider text-muted">Auditoria de atendimentos</p>
+              <p className="mt-1 text-sm text-sand/50">
+                Amostragem verificada nos logs — 1 registro recente por modalidade, com evidência e trecho
+                anonimizado da conversa.
+              </p>
+              <MetricsShowcase examples={showcase} />
+            </div>
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {cards.map((c) => (

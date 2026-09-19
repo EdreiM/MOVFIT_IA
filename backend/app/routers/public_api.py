@@ -14,8 +14,16 @@ from app.routers.metrics import (
     _compute_overview,
     _compute_tools_stats,
 )
-from app.schemas import LeadOut, MetricsNarrativeReport, MetricsOverview, StageCount, ToolStats
+from app.schemas import (
+    LeadOut,
+    MetricsNarrativeReport,
+    MetricsOverview,
+    ShowcaseExample,
+    StageCount,
+    ToolStats,
+)
 from app.services.metrics_narrative import compute_metrics_narrative
+from app.services.metrics_showcase import compute_metrics_showcase
 
 # Sem "/api" aqui de propósito — em produção isso já é adicionado (e
 # descascado) pelo proxy reverso na frente do backend, igual todo resto
@@ -85,3 +93,11 @@ async def metrics_narrative_report_external(
     db: AsyncSession = Depends(get_db),
 ):
     return await compute_metrics_narrative(db, company_id)
+
+
+@router.get("/metrics/showcase-examples", response_model=list[ShowcaseExample])
+async def metrics_showcase_examples_external(
+    company_id: UUID = Depends(get_api_key_company),
+    db: AsyncSession = Depends(get_db),
+):
+    return await compute_metrics_showcase(db, company_id)

@@ -16,6 +16,7 @@ def _overview(**kwargs) -> MetricsOverview:
         ai_resolution_rate=None,
         students_total=0,
         transferred_total=0,
+        with_human_total=0,
         cancellation_requests_total=0,
         physical_evals_scheduled_total=0,
     )

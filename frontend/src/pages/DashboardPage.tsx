@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import MetricsShowcase, { type ShowcaseExample } from "../components/MetricsShowcase";
 
 type Overview = {
   conversations_total: number;
@@ -11,6 +12,7 @@ type Overview = {
   ai_resolution_rate: number | null;
   students_total: number;
   transferred_total: number;
+  with_human_total: number;
   cancellation_requests_total: number;
   physical_evals_scheduled_total: number;
 };
@@ -168,6 +170,7 @@ export default function DashboardPage() {
   const [toolStats, setToolStats] = useState<ToolStats[]>([]);
   const [featuredTools, setFeaturedTools] = useState<ToolStats[]>([]);
   const [narrative, setNarrative] = useState<NarrativeReport | null>(null);
+  const [showcase, setShowcase] = useState<ShowcaseExample[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -179,8 +182,9 @@ export default function DashboardPage() {
       api<ToolStats[]>("/metrics/tools"),
       api<ToolStats[]>("/metrics/featured-tools"),
       api<NarrativeReport>("/metrics/narrative-report"),
+      api<ShowcaseExample[]>("/metrics/showcase-examples"),
     ])
-      .then(([o, h, ts, f, t, ft, narrativeReport]) => {
+      .then(([o, h, ts, f, t, ft, narrativeReport, showcaseExamples]) => {
         setOverview(o);
         setHealth(h);
         setTimeseries(ts);
@@ -188,6 +192,7 @@ export default function DashboardPage() {
         setToolStats(t);
         setFeaturedTools(ft);
         setNarrative(narrativeReport);
+        setShowcase(showcaseExamples);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -198,14 +203,15 @@ export default function DashboardPage() {
         { label: "Msgs entrada", value: overview.messages_inbound },
         { label: "Msgs saída", value: overview.messages_outbound },
         {
-          label: "Resolução IA",
+          label: "Resolução pela IA",
           value:
             overview.ai_resolution_rate != null
               ? `${Math.round(overview.ai_resolution_rate * 100)}%`
               : "—",
         },
         { label: "Alunos", value: overview.students_total },
-        { label: "Transferidos", value: overview.transferred_total },
+        { label: "Com atendente agora", value: overview.with_human_total },
+        { label: "Transferidos (total)", value: overview.transferred_total },
         { label: "Pediram cancelamento", value: overview.cancellation_requests_total },
         { label: "Avaliações agendadas", value: overview.physical_evals_scheduled_total },
         ...featuredTools.map((t) => ({ label: t.tool_name, value: t.success_calls })),
@@ -258,6 +264,15 @@ export default function DashboardPage() {
             <p className="mt-2 font-display text-3xl font-bold text-lime">{c.value}</p>
           </div>
         ))}
+      </div>
+
+      <div className="border border-white/10 bg-panel px-5 py-4">
+        <p className="text-xs uppercase tracking-wider text-muted">Auditoria de atendimentos</p>
+        <p className="mt-1 text-sm text-sand/50">
+          Amostragem verificada nos logs — 1 registro recente por modalidade, com evidência e trecho
+          anonimizado da conversa.
+        </p>
+        <MetricsShowcase examples={showcase} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

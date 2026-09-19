@@ -7,8 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
 from app.models import Conversation, Lead, Message, MetricsDaily, Tool, ToolCallLog
-from app.schemas import MetricsNarrativeReport, MetricsOverview, MetricsPoint, StageCount, ToolStats
+from app.schemas import (
+    MetricsNarrativeReport,
+    MetricsOverview,
+    MetricsPoint,
+    ShowcaseExample,
+    StageCount,
+    ToolStats,
+)
 from app.services.metrics_narrative import compute_metrics_narrative
+from app.services.metrics_showcase import compute_metrics_showcase
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -59,6 +67,15 @@ async def _compute_overview(db: AsyncSession, company_id: UUID) -> MetricsOvervi
             Conversation.channel != "test_console",
         )
     )
+    with_human = await db.scalar(
+        select(func.count())
+        .select_from(Conversation)
+        .where(
+            Conversation.company_id == company_id,
+            Conversation.status == "with_human",
+            Conversation.channel != "test_console",
+        )
+    )
 
     result = await db.execute(
         select(func.avg(MetricsDaily.avg_response_seconds)).where(MetricsDaily.company_id == company_id)
@@ -67,9 +84,14 @@ async def _compute_overview(db: AsyncSession, company_id: UUID) -> MetricsOvervi
 
     ai_r = ai_resolved or 0
     hu_r = human_resolved or 0
+    wh_r = with_human or 0
+    # Transferência = IA não resolveu sozinha — entra no denominador junto
+    # com encerramentos feitos por humano. Conversas ainda abertas com a IA
+    # ficam de fora (desfecho ainda não definido).
     rate = None
-    if ai_r + hu_r > 0:
-        rate = ai_r / (ai_r + hu_r)
+    outcomes = ai_r + hu_r + wh_r
+    if outcomes > 0:
+        rate = ai_r / outcomes
 
     # Flags permanentes do Lead (ver app/models/lead.py) — sobrevivem a
     # mudança de stage depois, por isso não dá pra derivar de Lead.stage.
@@ -102,6 +124,7 @@ async def _compute_overview(db: AsyncSession, company_id: UUID) -> MetricsOvervi
         ai_resolution_rate=rate,
         students_total=students_total or 0,
         transferred_total=transferred_total or 0,
+        with_human_total=wh_r,
         cancellation_requests_total=cancellation_requests_total or 0,
         physical_evals_scheduled_total=physical_evals_scheduled_total or 0,
     )
@@ -265,3 +288,12 @@ async def metrics_narrative_report(
 ):
     company_id = await resolve_company_id(current, db)
     return await compute_metrics_narrative(db, company_id)
+
+
+@router.get("/showcase-examples", response_model=list[ShowcaseExample])
+async def metrics_showcase_examples(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await compute_metrics_showcase(db, company_id)

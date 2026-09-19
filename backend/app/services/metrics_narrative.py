@@ -96,10 +96,17 @@ def build_metrics_narrative(ctx: NarrativeContext) -> list[str]:
             f"{ctx.with_human_conversations} {label} aguardando um atendente humano"
         )
     rate_text = _pct(o.ai_resolution_rate)
-    if rate_text and (o.ai_resolved + o.human_resolved) > 0:
+    outcomes = o.ai_resolved + o.human_resolved + o.with_human_total
+    if rate_text and outcomes > 0:
+        detail = (
+            f"{o.ai_resolved} encerrados por mim, {o.human_resolved} encerrados com humano"
+        )
+        if o.with_human_total:
+            label = "ainda com atendente" if o.with_human_total == 1 else "ainda com atendentes"
+            detail += f", {o.with_human_total} {label}"
         status_bits.append(
-            f"resolvi sozinha {rate_text} dos atendimentos que chegaram ao fim "
-            f"({o.ai_resolved} pela IA e {o.human_resolved} com apoio humano)"
+            f"resolvi sozinha {rate_text} dos atendimentos com desfecho "
+            f"({detail})"
         )
     elif o.ai_resolved or o.human_resolved:
         status_bits.append(
