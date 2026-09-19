@@ -476,8 +476,7 @@ class ShowcaseSnippet(BaseModel):
 class ShowcaseExample(BaseModel):
     modality: str
     title: str
-    outcome: str
-    evidence: str
+    description: str
     occurred_at: datetime
     snippets: list[ShowcaseSnippet]
 

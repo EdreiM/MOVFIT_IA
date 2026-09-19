@@ -1,4 +1,4 @@
-"""Auditoria de atendimentos corretos — só registros com desfecho comprovado."""
+"""Apresentação de atendimentos reais — só exemplos com desfecho comprovado."""
 from __future__ import annotations
 
 import re
@@ -30,37 +30,55 @@ _MODALITY_CATALOG: list[dict] = [
     {
         "id": "plans",
         "title": "Planos e valores",
-        "outcome": "Cliente recebeu planos com imagem, preço e benefícios.",
+        "description": (
+            "Quando alguém pergunta preços ou quer conhecer as opções, "
+            "eu apresento os planos da unidade com imagem, valores e benefícios."
+        ),
         "tool_keys": [TOOL_KEY_SEND_PLAN_IMAGES],
     },
     {
         "id": "physical_eval",
         "title": "Avaliação física",
-        "outcome": "Avaliação física confirmada e registrada no sistema.",
+        "description": (
+            "Ajudo a marcar avaliação física: consulto horários disponíveis "
+            "e confirmo o agendamento no sistema."
+        ),
         "tool_keys": [TOOL_KEY_BOOK_PHYSICAL_EVAL],
     },
     {
         "id": "student_verify",
         "title": "Identificação de aluno",
-        "outcome": "Unidade e status de aluno confirmados a partir do CPF.",
+        "description": (
+            "Com o CPF, identifico em qual unidade a pessoa já é aluno "
+            "e confirmo o cadastro no sistema."
+        ),
         "tool_keys": [TOOL_KEY_VERIFY_UNIT_BY_CPF],
     },
     {
         "id": "guests",
         "title": "Convidados",
-        "outcome": "Consulta de convites respondida com dados do sistema.",
+        "description": (
+            "Alunos podem consultar convites ou convidados do mês — "
+            "eu busco a informação e respondo na hora."
+        ),
         "heuristic": "guest",
     },
     {
         "id": "payment_link",
         "title": "Link de pagamento",
-        "outcome": "Link de parcela ou boleto gerado e repassado ao cliente.",
+        "description": (
+            "Quando pedem parcela ou boleto, eu gero o link de pagamento "
+            "e envio direto na conversa."
+        ),
         "heuristic": "payment_link",
     },
     {
         "id": "resolved",
-        "title": "Encerramento pela IA",
-        "outcome": "Dúvida respondida e atendimento encerrado sem transferir para humano.",
+        "title": "Dúvidas do dia a dia",
+        "description": (
+            "Horários, informações gerais, orientações… quando consigo resolver "
+            "sozinha, encerro o atendimento sem precisar transferir."
+        ),
         "tool_keys": [TOOL_KEY_END],
     },
 ]
@@ -106,7 +124,7 @@ def _message_display_text(message: Message) -> str | None:
             if labels:
                 joined = ", ".join(labels[:3])
                 suffix = "…" if len(labels) > 3 else ""
-                return f"[Registro] Imagem de plano enviada: {joined}{suffix}"
+                return f"📷 Enviei as imagens dos planos: {joined}{suffix}"
         if message.text:
             return _trim_text(message.text)
     return None
@@ -356,8 +374,7 @@ async def compute_metrics_showcase(db: AsyncSession, company_id: UUID) -> list[S
             ShowcaseExample(
                 modality=modality["id"],
                 title=modality["title"],
-                outcome=modality["outcome"],
-                evidence=f"{hit.evidence} · desfecho correto verificado",
+                description=modality["description"],
                 occurred_at=hit.occurred_at,
                 snippets=snippets,
             )

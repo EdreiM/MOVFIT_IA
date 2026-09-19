@@ -196,12 +196,11 @@ export default function PublicMetricsPage() {
             )}
 
             <div className="border border-white/10 bg-panel px-5 py-4">
-              <p className="text-xs uppercase tracking-wider text-muted">Auditoria de atendimentos</p>
+              <p className="text-xs uppercase tracking-wider text-muted">Atendimentos que realizo</p>
               <p className="mt-1 text-sm text-sand/50">
-                Só atendimentos com desfecho correto comprovado — 1 registro recente por modalidade, sem
-                transferência, com evidência e trecho anonimizado.
+                Apresentação prática do que a IA faz hoje — exemplos reais de conversa, um de cada tipo.
               </p>
-              <MetricsShowcase examples={showcase} />
+              <MetricsShowcase examples={showcase} aiName={narrative?.ai_name} />
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

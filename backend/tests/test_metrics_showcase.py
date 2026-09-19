@@ -87,9 +87,8 @@ async def test_showcase_returns_plan_example(db_session, company):
     assert any(example.modality == "plans" for example in examples)
     plan = next(example for example in examples if example.modality == "plans")
     assert len(plan.snippets) >= 2
-    assert plan.evidence
-    assert plan.outcome
-    assert "desfecho correto verificado" in plan.evidence
+    assert plan.description
+    assert "planos" in plan.description.lower() or "preços" in plan.description.lower()
     assert any("planos" in snippet.text.lower() or "plano" in snippet.text.lower() for snippet in plan.snippets)
 
 

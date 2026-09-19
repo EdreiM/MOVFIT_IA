@@ -6,80 +6,72 @@ type ShowcaseSnippet = {
 export type ShowcaseExample = {
   modality: string;
   title: string;
-  outcome: string;
-  evidence: string;
+  description: string;
   occurred_at: string;
   snippets: ShowcaseSnippet[];
 };
 
-function actorLabel(actor: string) {
-  return actor === "customer" ? "Cliente" : "IA";
-}
+type Props = {
+  examples: ShowcaseExample[];
+  aiName?: string;
+};
 
-export default function MetricsShowcase({ examples }: { examples: ShowcaseExample[] }) {
+export default function MetricsShowcase({ examples, aiName = "IA" }: Props) {
   if (examples.length === 0) {
     return (
       <p className="mt-4 text-sand/45">
-        Ainda não há atendimentos corretos auditáveis. Quando a IA concluir planos, avaliação,
-        CPF etc. com sucesso comprovado (sem transferência), um registro por modalidade aparece aqui.
+        Assim que eu concluir atendimentos reais de planos, avaliação, CPF e outros assuntos,
+        aparecem aqui exemplos de conversas — um de cada tipo de coisa que faço hoje.
       </p>
     );
   }
 
   return (
     <div className="mt-4 space-y-4">
-      <p className="text-sm text-sand/55">
-        {examples.length} atendimento{examples.length === 1 ? "" : "s"} correto
-        {examples.length === 1 ? "" : "s"} auditado{examples.length === 1 ? "" : "s"} · amostra
-        mais recente de cada modalidade, com desfecho verificado nos logs
+      <p className="text-sm leading-relaxed text-sand/70">
+        Olá! Sou a <span className="text-lime">{aiName}</span>. Abaixo estão{" "}
+        <span className="text-sand">{examples.length}</span> tipos de atendimento que já realizo
+        na prática — cada um com um trecho real de conversa (dados dos clientes protegidos).
       </p>
-      <div className="grid gap-4 lg:grid-cols-2">
-        {examples.map((record) => (
+      <div className="grid gap-5 lg:grid-cols-2">
+        {examples.map((example, index) => (
           <article
-            key={record.modality}
-            className="border border-white/10 bg-ink/40 px-4 py-4"
+            key={example.modality}
+            className="border border-white/10 bg-ink/40 px-5 py-5"
           >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-display text-lg font-semibold text-lime">{record.title}</p>
-                  <span className="rounded border border-leaf/30 bg-leaf/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-lime">
-                    Atendimento correto
-                  </span>
-                </div>
-                <p className="mt-2 text-sm text-sand/75">
-                  <span className="text-muted">Resultado: </span>
-                  {record.outcome}
+            <div className="flex items-start gap-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-leaf/15 font-display text-sm font-bold text-lime">
+                {index + 1}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="font-display text-lg font-semibold text-sand">{example.title}</p>
+                <p className="mt-2 text-sm leading-relaxed text-sand/75">{example.description}</p>
+              </div>
+            </div>
+
+            <div className="mt-4 border-t border-white/10 pt-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[10px] uppercase tracking-wider text-muted">Exemplo real</p>
+                <p className="text-xs text-sand/40">
+                  {new Date(example.occurred_at).toLocaleDateString("pt-BR", {
+                    day: "2-digit",
+                    month: "long",
+                    year: "numeric",
+                  })}
                 </p>
               </div>
-              <p className="text-xs text-sand/40">
-                {new Date(record.occurred_at).toLocaleString("pt-BR", {
-                  day: "2-digit",
-                  month: "2-digit",
-                  year: "2-digit",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </p>
-            </div>
-            <p className="mt-3 border-l-2 border-leaf/40 pl-3 text-xs text-sand/55">
-              <span className="font-medium text-sand/70">Evidência · </span>
-              {record.evidence}
-            </p>
-            <div className="mt-4">
-              <p className="mb-2 text-[10px] uppercase tracking-wider text-muted">Trecho auditado (anonimizado)</p>
               <div className="space-y-2">
-                {record.snippets.map((snippet, index) => (
+                {example.snippets.map((snippet, snippetIndex) => (
                   <div
-                    key={index}
-                    className={`rounded-md px-3 py-2 text-sm leading-relaxed ${
+                    key={snippetIndex}
+                    className={`rounded-lg px-3 py-2.5 text-sm leading-relaxed ${
                       snippet.actor === "customer"
-                        ? "bg-white/5 text-sand/80"
-                        : "border border-leaf/20 bg-leaf/5 text-sand"
+                        ? "mr-6 bg-white/5 text-sand/85"
+                        : "ml-6 border border-leaf/15 bg-leaf/5 text-sand"
                     }`}
                   >
-                    <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">
-                      {actorLabel(snippet.actor)}
+                    <p className="mb-1 text-[10px] font-medium text-sand/50">
+                      {snippet.actor === "customer" ? "Cliente" : aiName}
                     </p>
                     <p>{snippet.text}</p>
                   </div>
