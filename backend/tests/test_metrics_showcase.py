@@ -89,4 +89,69 @@ async def test_showcase_returns_plan_example(db_session, company):
     assert len(plan.snippets) >= 2
     assert plan.evidence
     assert plan.outcome
+    assert "desfecho correto verificado" in plan.evidence
     assert any("planos" in snippet.text.lower() or "plano" in snippet.text.lower() for snippet in plan.snippets)
+
+
+@pytest.mark.asyncio
+async def test_showcase_excludes_transferred_conversations(db_session, company):
+    config = AiConfig(company_id=company.id)
+    db_session.add(config)
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5511999000002",
+        status="with_human",
+        ai_enabled=False,
+        channel="whatsapp",
+    )
+    db_session.add(conv)
+    await db_session.flush()
+
+    tool = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        tool_key="enviar_imagens_planos",
+        name="Enviar planos",
+        webhook_url="https://example.com/plans",
+        is_active=True,
+    )
+    db_session.add(tool)
+    await db_session.flush()
+
+    db_session.add_all(
+        [
+            Message(
+                company_id=company.id,
+                conversation_id=conv.id,
+                direction="inbound",
+                actor="customer",
+                content_type="text",
+                text="Quero ver os planos",
+            ),
+            Message(
+                company_id=company.id,
+                conversation_id=conv.id,
+                direction="outbound",
+                actor="ai",
+                content_type="image",
+                text="Plano",
+                raw_payload={"images": [{"plano": "Mensal"}]},
+            ),
+        ]
+    )
+    db_session.add(
+        ToolCallLog(
+            company_id=company.id,
+            conversation_id=conv.id,
+            tool_id=tool.id,
+            tool_key=tool.tool_key,
+            tool_name=tool.name,
+            success=True,
+            arguments={},
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    examples = await compute_metrics_showcase(db_session, company.id)
+    assert not any(example.modality == "plans" for example in examples)

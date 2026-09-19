@@ -269,8 +269,8 @@ export default function DashboardPage() {
       <div className="border border-white/10 bg-panel px-5 py-4">
         <p className="text-xs uppercase tracking-wider text-muted">Auditoria de atendimentos</p>
         <p className="mt-1 text-sm text-sand/50">
-          Amostragem verificada nos logs — 1 registro recente por modalidade, com evidência e trecho
-          anonimizado da conversa.
+          Só atendimentos com desfecho correto comprovado — 1 registro recente por modalidade, sem
+          transferência, com evidência e trecho anonimizado.
         </p>
         <MetricsShowcase examples={showcase} />
       </div>

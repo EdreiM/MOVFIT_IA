@@ -20,8 +20,8 @@ export default function MetricsShowcase({ examples }: { examples: ShowcaseExampl
   if (examples.length === 0) {
     return (
       <p className="mt-4 text-sand/45">
-        Ainda não há registros auditáveis suficientes. Quando a IA executar planos, avaliação,
-        CPF etc. em conversas reais, um registro por modalidade aparece aqui automaticamente.
+        Ainda não há atendimentos corretos auditáveis. Quando a IA concluir planos, avaliação,
+        CPF etc. com sucesso comprovado (sem transferência), um registro por modalidade aparece aqui.
       </p>
     );
   }
@@ -29,8 +29,9 @@ export default function MetricsShowcase({ examples }: { examples: ShowcaseExampl
   return (
     <div className="mt-4 space-y-4">
       <p className="text-sm text-sand/55">
-        {examples.length} modalidade{examples.length === 1 ? "" : "s"} auditada
-        {examples.length === 1 ? "" : "s"} · amostra mais recente de cada tipo, com evidência nos logs
+        {examples.length} atendimento{examples.length === 1 ? "" : "s"} correto
+        {examples.length === 1 ? "" : "s"} auditado{examples.length === 1 ? "" : "s"} · amostra
+        mais recente de cada modalidade, com desfecho verificado nos logs
       </p>
       <div className="grid gap-4 lg:grid-cols-2">
         {examples.map((record) => (
@@ -43,7 +44,7 @@ export default function MetricsShowcase({ examples }: { examples: ShowcaseExampl
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="font-display text-lg font-semibold text-lime">{record.title}</p>
                   <span className="rounded border border-leaf/30 bg-leaf/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-lime">
-                    Verificado
+                    Atendimento correto
                   </span>
                 </div>
                 <p className="mt-2 text-sm text-sand/75">
