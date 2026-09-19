@@ -461,6 +461,12 @@ class ToolStats(BaseModel):
     success_rate: float | None
 
 
+class MetricsNarrativeReport(BaseModel):
+    ai_name: str
+    paragraphs: list[str]
+    generated_at: datetime
+
+
 # API keys (acesso externo, machine-to-machine)
 class ApiKeyCreate(BaseModel):
     name: str

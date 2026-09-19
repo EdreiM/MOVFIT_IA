@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
 from app.models import Conversation, Lead, Message, MetricsDaily, Tool, ToolCallLog
-from app.schemas import MetricsOverview, MetricsPoint, StageCount, ToolStats
+from app.schemas import MetricsNarrativeReport, MetricsOverview, MetricsPoint, StageCount, ToolStats
+from app.services.metrics_narrative import compute_metrics_narrative
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -255,3 +256,12 @@ async def featured_tools_stats(
 ):
     company_id = await resolve_company_id(current, db)
     return await _compute_featured_tools_stats(db, company_id)
+
+
+@router.get("/narrative-report", response_model=MetricsNarrativeReport)
+async def metrics_narrative_report(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await compute_metrics_narrative(db, company_id)

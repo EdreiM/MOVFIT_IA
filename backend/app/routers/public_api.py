@@ -14,7 +14,8 @@ from app.routers.metrics import (
     _compute_overview,
     _compute_tools_stats,
 )
-from app.schemas import LeadOut, MetricsOverview, StageCount, ToolStats
+from app.schemas import LeadOut, MetricsNarrativeReport, MetricsOverview, StageCount, ToolStats
+from app.services.metrics_narrative import compute_metrics_narrative
 
 # Sem "/api" aqui de propósito — em produção isso já é adicionado (e
 # descascado) pelo proxy reverso na frente do backend, igual todo resto
@@ -76,3 +77,11 @@ async def featured_tools_stats_external(
     db: AsyncSession = Depends(get_db),
 ):
     return await _compute_featured_tools_stats(db, company_id)
+
+
+@router.get("/metrics/narrative-report", response_model=MetricsNarrativeReport)
+async def metrics_narrative_report_external(
+    company_id: UUID = Depends(get_api_key_company),
+    db: AsyncSession = Depends(get_db),
+):
+    return await compute_metrics_narrative(db, company_id)

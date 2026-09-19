@@ -13,6 +13,13 @@ type Overview = {
   students_total: number;
   transferred_total: number;
   cancellation_requests_total: number;
+  physical_evals_scheduled_total: number;
+};
+
+type NarrativeReport = {
+  ai_name: string;
+  paragraphs: string[];
+  generated_at: string;
 };
 
 type StageCount = { stage: string; count: number };
@@ -47,6 +54,7 @@ export default function PublicMetricsPage() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [funnel, setFunnel] = useState<StageCount[]>([]);
   const [tools, setTools] = useState<ToolStats[]>([]);
+  const [narrative, setNarrative] = useState<NarrativeReport | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -68,11 +76,13 @@ export default function PublicMetricsPage() {
       apiExternal<Overview>("/v1/metrics/overview", key),
       apiExternal<StageCount[]>("/v1/metrics/leads-funnel", key),
       apiExternal<ToolStats[]>("/v1/metrics/tools", key),
+      apiExternal<NarrativeReport>("/v1/metrics/narrative-report", key),
     ])
-      .then(([o, f, t]) => {
+      .then(([o, f, t, narrativeReport]) => {
         setOverview(o);
         setFunnel(f);
         setTools(t);
+        setNarrative(narrativeReport);
       })
       .catch((e) => {
         setError(e instanceof Error ? e.message : "Chave inválida ou expirada");
@@ -123,6 +133,7 @@ export default function PublicMetricsPage() {
         { label: "Alunos", value: overview.students_total },
         { label: "Transferidos", value: overview.transferred_total },
         { label: "Pediram cancelamento", value: overview.cancellation_requests_total },
+        { label: "Avaliações agendadas", value: overview.physical_evals_scheduled_total },
       ]
     : [];
 
@@ -151,6 +162,33 @@ export default function PublicMetricsPage() {
 
         {overview && (
           <>
+            {narrative && (
+              <div className="border border-leaf/30 bg-panel px-6 py-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-wider text-muted">Relatório da IA</p>
+                    <p className="mt-1 font-display text-xl font-semibold text-sand">
+                      Como estão indo os atendimentos
+                    </p>
+                  </div>
+                  <p className="text-xs text-sand/45">
+                    Atualizado{" "}
+                    {new Date(narrative.generated_at).toLocaleString("pt-BR", {
+                      day: "2-digit",
+                      month: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </p>
+                </div>
+                <div className="mt-4 space-y-3 text-sm leading-relaxed text-sand/85">
+                  {narrative.paragraphs.map((paragraph, index) => (
+                    <p key={index}>{paragraph}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {cards.map((c) => (
                 <div key={c.label} className="border-l-2 border-leaf bg-panel px-5 py-4">

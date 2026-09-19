@@ -45,6 +45,12 @@ type ToolStats = {
   success_rate: number | null;
 };
 
+type NarrativeReport = {
+  ai_name: string;
+  paragraphs: string[];
+  generated_at: string;
+};
+
 // Ordem canônica do funil — estágios conhecidos aparecem nessa ordem;
 // qualquer estágio customizado que a IA ou um usuário crie entra depois,
 // ordenado por volume.
@@ -161,6 +167,7 @@ export default function DashboardPage() {
   const [funnel, setFunnel] = useState<StageCount[]>([]);
   const [toolStats, setToolStats] = useState<ToolStats[]>([]);
   const [featuredTools, setFeaturedTools] = useState<ToolStats[]>([]);
+  const [narrative, setNarrative] = useState<NarrativeReport | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -171,14 +178,16 @@ export default function DashboardPage() {
       api<StageCount[]>("/metrics/leads-funnel"),
       api<ToolStats[]>("/metrics/tools"),
       api<ToolStats[]>("/metrics/featured-tools"),
+      api<NarrativeReport>("/metrics/narrative-report"),
     ])
-      .then(([o, h, ts, f, t, ft]) => {
+      .then(([o, h, ts, f, t, ft, narrativeReport]) => {
         setOverview(o);
         setHealth(h);
         setTimeseries(ts);
         setFunnel(f);
         setToolStats(t);
         setFeaturedTools(ft);
+        setNarrative(narrativeReport);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -211,6 +220,33 @@ export default function DashboardPage() {
       </div>
 
       {error && <p className="text-ember">{error}</p>}
+
+      {narrative && (
+        <div className="border border-leaf/30 bg-panel px-6 py-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-muted">Relatório da IA</p>
+              <p className="mt-1 font-display text-xl font-semibold text-sand">
+                Como estão indo os atendimentos
+              </p>
+            </div>
+            <p className="text-xs text-sand/45">
+              Atualizado{" "}
+              {new Date(narrative.generated_at).toLocaleString("pt-BR", {
+                day: "2-digit",
+                month: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </p>
+          </div>
+          <div className="mt-4 space-y-3 text-sm leading-relaxed text-sand/85">
+            {narrative.paragraphs.map((paragraph, index) => (
+              <p key={index}>{paragraph}</p>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map((c) => (
