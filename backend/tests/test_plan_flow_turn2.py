@@ -8,6 +8,8 @@ from app.models import Message, Tool
 from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
+    _apply_post_plans_tour_closing,
+    _confirms_gym_tour,
     _confirms_is_student,
     _extract_cpf_from_text,
     _format_guest_tool_reply,
@@ -18,6 +20,7 @@ from app.services.message_flow import (
     _is_valid_openai_tool,
     _pick_student_operational_tool,
     _plan_flow_active,
+    _plan_tour_transfer_active,
     _run_student_operational_pipeline,
     _safe_tool_result_json,
     _student_operational_action,
@@ -215,6 +218,49 @@ def test_pick_guest_tool_by_keyword():
     )
     assert picked is not None
     assert picked.tool_key == "verificar_convidados_mes"
+
+
+def test_post_plans_closing_offers_tour_instead_of_generic_help():
+    closing = _apply_post_plans_tour_closing(
+        "Deseja mais alguma informação?",
+        plans_delivered=True,
+    )
+    assert "tour" in closing.lower()
+    assert "aula experimental" in closing.lower()
+    assert "Deseja mais alguma" not in closing
+
+
+def test_plan_tour_transfer_after_offer_and_confirmation():
+    from app.models import Message
+
+    history = [
+        Message(
+            conversation_id=__import__("uuid").uuid4(),
+            company_id=__import__("uuid").uuid4(),
+            direction="outbound",
+            actor="ai",
+            content_type="text",
+            text="Gostaria de fazer um tour pela academia pra conhecer melhor o ambiente?",
+        )
+    ]
+    assert _plan_tour_transfer_active("Sim, quero", history) is True
+    assert _confirms_gym_tour("Quero fazer um tour") is True
+
+
+def test_plan_tour_transfer_not_triggered_by_random_sim():
+    from app.models import Message
+
+    history = [
+        Message(
+            conversation_id=__import__("uuid").uuid4(),
+            company_id=__import__("uuid").uuid4(),
+            direction="outbound",
+            actor="ai",
+            content_type="text",
+            text="Qual unidade você prefere?",
+        )
+    ]
+    assert _plan_tour_transfer_active("sim", history) is False
 
 
 def test_history_compacts_long_plan_captions():

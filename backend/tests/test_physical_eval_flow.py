@@ -719,7 +719,7 @@ async def test_physical_eval_pipeline_shows_slots_before_booking_today(db_sessio
         reply, _ = await _run_physical_eval_pipeline(
             db_session,
             conv,
-            "Hoje 15hs",
+            "17/09/2026 15hs",
             tools_by_key,
             lead,
             config=config,

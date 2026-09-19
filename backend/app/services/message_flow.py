@@ -2281,6 +2281,133 @@ def _wants_plan_info(text: str, recent_customer_texts: list[str] | None = None) 
     return _plan_flow_active(text, recent_customer_texts)
 
 
+_POST_PLANS_TOUR_OFFER = (
+    "Gostaria de fazer um *tour* pela academia pra conhecer melhor o ambiente? "
+    "É só pra conhecer o espaço — *não* inclui aula experimental. 😊"
+)
+
+_TOUR_REQUEST_MARKERS = (
+    "tour",
+    "conhecer a academia",
+    "conhecer o ambiente",
+    "conhecer a unidade",
+    "visita na unidade",
+    "visitar a academia",
+    "ver a academia",
+)
+
+_GENERIC_PLAN_CLOSING_PHRASES = (
+    "deseja mais alguma informacao",
+    "posso ajudar com mais alguma coisa",
+    "posso ajudar com mais",
+    "mais alguma coisa",
+    "mais alguma informacao",
+    "posso ajudar em algo mais",
+)
+
+
+def _already_offers_tour(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return "tour" in normalized and ("conhecer" in normalized or "ambiente" in normalized)
+
+
+def _is_generic_plan_closing(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(phrase in normalized for phrase in _GENERIC_PLAN_CLOSING_PHRASES)
+
+
+def _wants_gym_tour_explicit(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(marker in normalized for marker in _TOUR_REQUEST_MARKERS)
+
+
+def _confirms_gym_tour(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    if _wants_gym_tour_explicit(text):
+        return True
+    normalized = _normalize_text(text)
+    tokens = _normalize_tokens(text)
+    if len(tokens) <= 5 and tokens & {"sim", "quero", "gostaria", "bora", "pode", "confirmo"}:
+        return True
+    return normalized in {
+        "sim",
+        "quero sim",
+        "pode ser",
+        "gostaria sim",
+        "tenho interesse",
+        "me interessa",
+        "quero",
+        "bora",
+    }
+
+
+def _tour_offer_in_recent_ai_messages(history: list[Message]) -> bool:
+    for message in reversed([m for m in history if m.actor == "ai" and m.text][-4:]):
+        if _already_offers_tour(message.text or ""):
+            return True
+    return False
+
+
+def _plans_presented_in_history(history: list[Message]) -> bool:
+    for message in history[-15:]:
+        if message.actor != "ai":
+            continue
+        payload = message.raw_payload or {}
+        if message.content_type == "image" and payload.get("images"):
+            return True
+        if payload.get("plan_caption"):
+            return True
+        if message.text and "Aqui estão os planos" in message.text:
+            return True
+    return False
+
+
+def _plan_tour_transfer_active(user_text: str, history: list[Message]) -> bool:
+    if not _confirms_gym_tour(user_text):
+        return False
+    if _wants_gym_tour_explicit(user_text):
+        return _plans_presented_in_history(history)
+    return _tour_offer_in_recent_ai_messages(history)
+
+
+def _apply_post_plans_tour_closing(text: str, *, plans_delivered: bool) -> str:
+    if not plans_delivered or _already_offers_tour(text):
+        return text
+    if (
+        not text.strip()
+        or _is_generic_plan_closing(text)
+        or _promised_plans_already_sent(text)
+    ):
+        return _POST_PLANS_TOUR_OFFER
+    return text
+
+
+async def _run_plan_tour_transfer_pipeline(
+    db: AsyncSession,
+    conversation: Conversation,
+    tools_by_key: dict[str, Tool],
+) -> str | None:
+    transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+    if not transfer_tool or not transfer_tool.webhook_url:
+        return (
+            "Que ótimo! Pra agendar seu *tour* e conhecer o ambiente da academia, "
+            "fale com um atendente na recepção ou pelo canal oficial da unidade — "
+            "é só uma visita, sem aula experimental. 😊"
+        )
+    if conversation.status != "with_human":
+        await execute_tool(
+            db,
+            transfer_tool,
+            {"motivo": "Cliente confirmou tour pela academia após consulta de planos."},
+            conversation,
+        )
+    return (
+        "Perfeito! Vou te encaminhar para um atendente que vai agendar seu *tour* "
+        "pra conhecer o ambiente da academia — é só uma visita, *sem* aula experimental. 😊"
+    )
+
+
 _PLAN_CAPTION_MARKERS = ("🏋️", "Faça sua matrícula", "Link de cadastro", "PLANO ANUAL", "PLANO MENSAL")
 _PLANS_SENT_PROMISE_PHRASES = (
     "ja enviei",
@@ -2802,7 +2929,7 @@ async def _present_plan_images_with_captions(
         "mensagem": (
             f"{sent_count} plano(s) já apresentados ao cliente, cada um com imagem e descrição "
             "completa. Não repita os detalhes desses planos na sua resposta de texto — só feche "
-            "com algo curto, tipo perguntar se quer mais alguma informação."
+            "oferecendo um tour pela academia pra conhecer o ambiente (sem aula experimental)."
         ),
         "dados": {},
     }
@@ -3104,6 +3231,11 @@ async def generate_ai_reply(
     has_verify_unit_tool = TOOL_KEY_VERIFY_UNIT_BY_CPF in tools_by_key
 
     ai_name = config.ai_name or "assistente virtual"
+
+    if _plan_tour_transfer_active(user_text, history):
+        tour_reply = await _run_plan_tour_transfer_pipeline(db, conversation, tools_by_key)
+        if tour_reply is not None:
+            return tour_reply, None, False
 
     guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
     physical_eval_intent = _is_physical_eval_intent(user_text)
@@ -3525,9 +3657,11 @@ async def generate_ai_reply(
                     "o cliente \"gostaria de saber mais sobre esse plano\" ou peça confirmação "
                     "de qual plano é esse — a imagem e a descrição completa JÁ foram enviadas, "
                     "perguntar de novo é redundante e só abre espaço pra respostas curtas tipo "
-                    "\"era\"/\"sim\" que não levam a nada. Prefira fechar com algo "
-                    "neutro tipo \"Deseja mais alguma informação?\" ou \"Posso ajudar com mais "
-                    "alguma coisa?\".\n\n"
+                    "\"era\"/\"sim\" que não levam a nada. Depois de apresentar plano(s), "
+                    "NÃO pergunte \"Posso ajudar com mais alguma coisa?\" — em vez disso, "
+                    "ofereça um *tour* pela academia pra conhecer o ambiente (sem aula "
+                    "experimental). Se o cliente confirmar que quer o tour, chame "
+                    "transferir_atendimento nessa mesma resposta pra um atendente agendar.\n\n"
                     "REGRA CRÍTICA sobre a ferramenta enviar_imagens_planos: toda vez que você "
                     "chamar essa ferramenta, a imagem E a descrição completa (nome, valor, "
                     "fidelidade, benefícios, link) de cada plano já são enviadas automaticamente "
@@ -3535,8 +3669,8 @@ async def generate_ai_reply(
                     "você escrever sua resposta de texto. Por isso, depois de chamar essa "
                     "ferramenta, sua resposta de texto final NÃO deve repetir nome, preço, "
                     "fidelidade, benefícios ou link de nenhum desses planos — o cliente já "
-                    "recebeu tudo isso. Só complemente com algo bem curto (ex: \"Posso ajudar "
-                    "com mais alguma coisa?\"). Escrever a descrição do plano de novo no texto "
+                    "recebeu tudo isso. Só complemente oferecendo o *tour* pra conhecer o "
+                    "ambiente (sem aula experimental). Escrever a descrição do plano de novo no texto "
                     "duplica a informação pro cliente, que é o erro mais comum aqui — evite.\n" + catalog_context
                 ),
             }
@@ -3906,10 +4040,10 @@ async def generate_ai_reply(
                         touched_units=touched_units,
                     )
             final_text = _strip_plan_captions_from_text(final_text)
-        if not final_text.strip():
-            final_text = "Deseja mais alguma informação?"
-        elif _promised_plans_already_sent(final_text):
-            final_text = "Deseja mais alguma informação?"
+    final_text = _apply_post_plans_tour_closing(
+        final_text,
+        plans_delivered=bool(touched_units),
+    )
     delivered_via_tools = bool(touched_units)
 
     transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
