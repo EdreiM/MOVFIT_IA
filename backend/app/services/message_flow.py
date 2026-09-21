@@ -2383,6 +2383,120 @@ def _apply_post_plans_tour_closing(text: str, *, plans_delivered: bool) -> str:
     return text
 
 
+_INTERNAL_STORE_CLOTHING_TOKENS = {
+    "jaqueta",
+    "jaquetas",
+    "camisa",
+    "camisas",
+    "camiseta",
+    "camisetas",
+    "bone",
+    "bones",
+    "shorts",
+    "legging",
+    "leggings",
+    "moletom",
+    "moletoms",
+    "regata",
+    "regatas",
+    "top",
+    "tops",
+    "calca",
+    "calcas",
+    "bermuda",
+    "bermudas",
+    "roupa",
+    "roupas",
+    "vestuario",
+    "uniforme",
+    "uniformes",
+    "meia",
+    "meias",
+    "tenis",
+    "agasalho",
+    "agasalhos",
+    "blusa",
+    "blusas",
+    "acessorio",
+    "acessorios",
+}
+
+_INTERNAL_STORE_PHRASE_MARKERS = (
+    "loja interna",
+    "drifit",
+    "dri fit",
+    "dry fit",
+)
+
+_INTERNAL_STORE_PRICE_TOKENS = {"quanto", "preco", "valor", "custa", "custo", "vende", "vender"}
+
+
+def _text_mentions_internal_store_product(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    normalized = _normalize_text(text)
+    tokens = _normalize_tokens(text)
+    if tokens & _INTERNAL_STORE_CLOTHING_TOKENS:
+        return True
+    if any(marker in normalized for marker in _INTERNAL_STORE_PHRASE_MARKERS):
+        return True
+    if "loja" in tokens and ("interna" in tokens or bool(tokens & _INTERNAL_STORE_CLOTHING_TOKENS)):
+        return True
+    if "estoque" in tokens and ("loja" in tokens or bool(tokens & _INTERNAL_STORE_CLOTHING_TOKENS)):
+        return True
+    if tokens & _INTERNAL_STORE_PRICE_TOKENS and (
+        bool(tokens & _INTERNAL_STORE_CLOTHING_TOKENS)
+        or any(marker in normalized for marker in ("drifit", "dri fit", "dry fit"))
+        or "loja" in tokens
+    ):
+        return True
+    return False
+
+
+def _internal_store_product_active(text: str, recent_customer_texts: list[str] | None = None) -> bool:
+    if _text_mentions_internal_store_product(text):
+        return True
+    if not recent_customer_texts:
+        return False
+    if _text_has_plan_intent(text) or _is_physical_eval_intent(text):
+        return False
+    prior = [t for t in recent_customer_texts if t and t.strip() != (text or "").strip()]
+    if not any(_text_mentions_internal_store_product(t) for t in prior[-3:]):
+        return False
+    return len(_normalize_tokens(text)) <= 6
+
+
+async def _run_internal_store_transfer_pipeline(
+    db: AsyncSession,
+    conversation: Conversation,
+    tools_by_key: dict[str, Tool],
+) -> str | None:
+    transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+    reply = (
+        "Temos uma *loja interna* na academia! 😊 Você pode ir até a unidade conferir "
+        "tamanho, cor e modelos disponíveis — depende do item (jaqueta, camiseta, boné etc.). "
+        "Vou te transferir agora pra um atendente verificar em *estoque* se temos o que você precisa."
+    )
+    if not transfer_tool or not transfer_tool.webhook_url:
+        return (
+            f"{reply} "
+            "Se preferir, fale direto na recepção da unidade que alguém confere o estoque pra você. 😊"
+        )
+    if conversation.status != "with_human":
+        await execute_tool(
+            db,
+            transfer_tool,
+            {
+                "motivo": (
+                    "Cliente interessado em produto da loja interna (vestuário/acessório) — "
+                    "verificar estoque e disponibilidade."
+                )
+            },
+            conversation,
+        )
+    return f"{reply} Um atendente continua com você em instantes! 😊"
+
+
 async def _run_plan_tour_transfer_pipeline(
     db: AsyncSession,
     conversation: Conversation,
@@ -3237,6 +3351,11 @@ async def generate_ai_reply(
         if tour_reply is not None:
             return tour_reply, None, False
 
+    if _internal_store_product_active(user_text, recent_customer_texts):
+        store_reply = await _run_internal_store_transfer_pipeline(db, conversation, tools_by_key)
+        if store_reply is not None:
+            return store_reply, None, False
+
     guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
     physical_eval_intent = _is_physical_eval_intent(user_text)
     has_schedule_tool = _has_schedule_tool(tools_by_key)
@@ -3374,6 +3493,19 @@ async def generate_ai_reply(
                 "nessa mesma resposta (se ela estiver disponível) — nunca prometa isso em texto "
                 "sem realmente executar a ferramenta. Prometer e não fazer é pior do que não "
                 "prometer nada."
+            ),
+        }
+    )
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "[Loja interna] A Mov Fit tem *loja interna* na academia (vestuário e acessórios: "
+                "jaquetas, camisetas, bonés, shorts etc.). Você NÃO consulta preço nem estoque "
+                "sozinha e NUNCA diga que a academia não vende roupas ou acessórios. Quando o "
+                "cliente perguntar sobre produto da loja, informe que ele pode ir à unidade "
+                "conferir tamanho, cor e modelos do item, e chame transferir_atendimento pra "
+                "um atendente verificar disponibilidade em estoque — nessa mesma resposta."
             ),
         }
     )
