@@ -8,6 +8,7 @@ from app.models import Message, Tool
 from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
+    _already_offers_tour,
     _apply_post_plans_tour_closing,
     _confirms_gym_tour,
     _confirms_is_student,
@@ -261,6 +262,33 @@ def test_plan_tour_transfer_not_triggered_by_random_sim():
         )
     ]
     assert _plan_tour_transfer_active("sim", history) is False
+
+
+def test_detects_tour_offer_in_natural_ai_wording():
+    text = "Se quiser conhecer a academia pessoalmente, posso ajudar a agendar um tour para você."
+    assert _already_offers_tour(text) is True
+
+
+def test_tour_transfer_on_sim_with_extra_context():
+    from app.models import Message
+
+    history = [
+        Message(
+            conversation_id=__import__("uuid").uuid4(),
+            company_id=__import__("uuid").uuid4(),
+            direction="outbound",
+            actor="ai",
+            content_type="text",
+            text="Se quiser conhecer a academia pessoalmente, posso ajudar a agendar um tour para você.",
+        )
+    ]
+    user_text = "Sim, porém cheguei agora de viagem, quero me preparar para o mês/10"
+    assert _confirms_gym_tour(user_text) is True
+    assert _plan_tour_transfer_active(user_text, history) is True
+
+
+def test_tour_transfer_without_plans_when_client_asks_directly():
+    assert _plan_tour_transfer_active("Quero agendar um tour na unidade", []) is True
 
 
 def test_history_compacts_long_plan_captions():

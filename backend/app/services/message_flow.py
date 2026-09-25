@@ -2288,6 +2288,9 @@ _POST_PLANS_TOUR_OFFER = (
 
 _TOUR_REQUEST_MARKERS = (
     "tour",
+    "agendar tour",
+    "agendar um tour",
+    "marcar tour",
     "conhecer a academia",
     "conhecer o ambiente",
     "conhecer a unidade",
@@ -2295,6 +2298,18 @@ _TOUR_REQUEST_MARKERS = (
     "visitar a academia",
     "ver a academia",
 )
+
+_TOUR_CONFIRM_START_WORDS = {
+    "sim",
+    "ok",
+    "certo",
+    "claro",
+    "pode",
+    "quero",
+    "gostaria",
+    "bora",
+    "confirmo",
+}
 
 _GENERIC_PLAN_CLOSING_PHRASES = (
     "deseja mais alguma informacao",
@@ -2308,7 +2323,10 @@ _GENERIC_PLAN_CLOSING_PHRASES = (
 
 def _already_offers_tour(text: str) -> bool:
     normalized = _normalize_text(text)
-    return "tour" in normalized and ("conhecer" in normalized or "ambiente" in normalized)
+    if "tour" in normalized:
+        return True
+    tokens = _normalize_tokens(text)
+    return bool(tokens & {"agendar", "marcar"} and "academia" in normalized)
 
 
 def _is_generic_plan_closing(text: str) -> bool:
@@ -2327,8 +2345,13 @@ def _confirms_gym_tour(text: str) -> bool:
     if _wants_gym_tour_explicit(text):
         return True
     normalized = _normalize_text(text)
+    words = normalized.split()
+    if words:
+        first = words[0].strip(".,!?;:")
+        if first in _TOUR_CONFIRM_START_WORDS:
+            return True
     tokens = _normalize_tokens(text)
-    if len(tokens) <= 5 and tokens & {"sim", "quero", "gostaria", "bora", "pode", "confirmo"}:
+    if len(tokens) <= 8 and tokens & _TOUR_CONFIRM_START_WORDS:
         return True
     return normalized in {
         "sim",
@@ -2339,12 +2362,30 @@ def _confirms_gym_tour(text: str) -> bool:
         "me interessa",
         "quero",
         "bora",
+        "certo",
+        "ok",
+        "claro",
     }
 
 
 def _tour_offer_in_recent_ai_messages(history: list[Message]) -> bool:
-    for message in reversed([m for m in history if m.actor == "ai" and m.text][-4:]):
+    for message in reversed([m for m in history if m.actor == "ai" and m.text][-10:]):
         if _already_offers_tour(message.text or ""):
+            return True
+    return False
+
+
+def _tour_discussed_in_conversation(
+    history: list[Message],
+    recent_customer_texts: list[str] | None = None,
+) -> bool:
+    if _tour_offer_in_recent_ai_messages(history):
+        return True
+    for text in (recent_customer_texts or [])[-8:]:
+        if text and _wants_gym_tour_explicit(text):
+            return True
+    for message in history[-25:]:
+        if message.actor == "ai" and message.text and _already_offers_tour(message.text):
             return True
     return False
 
@@ -2363,12 +2404,18 @@ def _plans_presented_in_history(history: list[Message]) -> bool:
     return False
 
 
-def _plan_tour_transfer_active(user_text: str, history: list[Message]) -> bool:
+def _plan_tour_transfer_active(
+    user_text: str,
+    history: list[Message],
+    recent_customer_texts: list[str] | None = None,
+) -> bool:
+    # Tour ≠ avaliação física: confirmação ou pedido explícito → transferir
+    # direto, sem CPF, unidade ou consulta de horários.
+    if _wants_gym_tour_explicit(user_text):
+        return True
     if not _confirms_gym_tour(user_text):
         return False
-    if _wants_gym_tour_explicit(user_text):
-        return _plans_presented_in_history(history)
-    return _tour_offer_in_recent_ai_messages(history)
+    return _tour_discussed_in_conversation(history, recent_customer_texts)
 
 
 def _apply_post_plans_tour_closing(text: str, *, plans_delivered: bool) -> str:
@@ -2513,7 +2560,7 @@ async def _run_plan_tour_transfer_pipeline(
         await execute_tool(
             db,
             transfer_tool,
-            {"motivo": "Cliente confirmou tour pela academia após consulta de planos."},
+            {"motivo": "Cliente confirmou tour pela academia — agendar visita com atendente."},
             conversation,
         )
     return (
@@ -3346,7 +3393,10 @@ async def generate_ai_reply(
 
     ai_name = config.ai_name or "assistente virtual"
 
-    if _plan_tour_transfer_active(user_text, history):
+    tour_context_active = _tour_discussed_in_conversation(history, recent_customer_texts) or _wants_gym_tour_explicit(
+        user_text
+    )
+    if _plan_tour_transfer_active(user_text, history, recent_customer_texts):
         tour_reply = await _run_plan_tour_transfer_pipeline(db, conversation, tools_by_key)
         if tour_reply is not None:
             return tour_reply, None, False
@@ -3363,6 +3413,7 @@ async def generate_ai_reply(
         has_verify_unit_tool
         and has_schedule_tool
         and not plan_intent_active
+        and not tour_context_active
         and (
             physical_eval_intent
             or _physical_eval_followup(user_text, recent_customer_texts, lead)
@@ -3556,6 +3607,17 @@ async def generate_ai_reply(
     custom_links_block = _format_custom_links_system_block(custom_links)
     if custom_links_block:
         messages.append({"role": "system", "content": custom_links_block})
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "[Tour pela academia] Tour = visita pra conhecer o ambiente (sem aula experimental). "
+                "Quando o cliente quiser ou confirmar tour, chame transferir_atendimento na hora — "
+                "NUNCA peça CPF, verificar_unidade_por_cpf, horários ou consultar_agendamento_horarios "
+                "pra tour. Tour não é avaliação física; o atendente humano agenda a visita."
+            ),
+        }
+    )
     messages.append(
         {
             "role": "system",
@@ -3793,7 +3855,8 @@ async def generate_ai_reply(
                     "NÃO pergunte \"Posso ajudar com mais alguma coisa?\" — em vez disso, "
                     "ofereça um *tour* pela academia pra conhecer o ambiente (sem aula "
                     "experimental). Se o cliente confirmar que quer o tour, chame "
-                    "transferir_atendimento nessa mesma resposta pra um atendente agendar.\n\n"
+                    "transferir_atendimento nessa mesma resposta pra um atendente agendar — "
+                    "NÃO peça CPF, unidade nem horários: tour é só visita, o atendente agenda.\n\n"
                     "REGRA CRÍTICA sobre a ferramenta enviar_imagens_planos: toda vez que você "
                     "chamar essa ferramenta, a imagem E a descrição completa (nome, valor, "
                     "fidelidade, benefícios, link) de cada plano já são enviadas automaticamente "
