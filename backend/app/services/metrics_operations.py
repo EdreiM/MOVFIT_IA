@@ -13,8 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AiConfig, Conversation, Lead, Message, ToolCallLog, Unit
 from app.schemas import (
     AiOperationsReport,
+    OperationsComparisonRow,
     OperationsDailyVolume,
+    OperationsHourlyVolume,
     OperationsMotivation,
+    OperationsOutcome,
+    OperationsPeriodComparison,
     OperationsResponseTimes,
     OperationsSummary,
     OperationsTransferReason,
@@ -113,6 +117,67 @@ def _is_business_hours(dt: datetime) -> bool:
     return local.weekday() < 5 and _BUSINESS_START <= local.time() < _BUSINESS_END
 
 
+def _change_pct(current: float, previous: float) -> float | None:
+    if previous == 0:
+        return None
+    return (current - previous) / previous
+
+
+def _build_period_comparison(
+    date_from: date,
+    date_to: date,
+    current: OperationsSummary,
+    previous: OperationsSummary,
+    current_rt: OperationsResponseTimes,
+    previous_rt: OperationsResponseTimes,
+) -> OperationsPeriodComparison:
+    period_days = (date_to - date_from).days + 1
+    prev_to = date_from - timedelta(days=1)
+    prev_from = prev_to - timedelta(days=period_days - 1)
+    rows = [
+        OperationsComparisonRow(
+            label="Conversas",
+            current=float(current.conversations_total),
+            previous=float(previous.conversations_total),
+            change_pct=_change_pct(current.conversations_total, previous.conversations_total),
+        ),
+        OperationsComparisonRow(
+            label="Contatos únicos",
+            current=float(current.unique_contacts),
+            previous=float(previous.unique_contacts),
+            change_pct=_change_pct(current.unique_contacts, previous.unique_contacts),
+        ),
+        OperationsComparisonRow(
+            label="Planos apresentados",
+            current=float(current.plans_presented),
+            previous=float(previous.plans_presented),
+            change_pct=_change_pct(current.plans_presented, previous.plans_presented),
+        ),
+        OperationsComparisonRow(
+            label="Pedidos de cancelamento",
+            current=float(current.cancellation_requests),
+            previous=float(previous.cancellation_requests),
+            change_pct=_change_pct(current.cancellation_requests, previous.cancellation_requests),
+        ),
+        OperationsComparisonRow(
+            label="Abandonos (cliente parou)",
+            current=float(current.abandoned_by_client),
+            previous=float(previous.abandoned_by_client),
+            change_pct=_change_pct(current.abandoned_by_client, previous.abandoned_by_client),
+        ),
+    ]
+    if current_rt.median_seconds is not None and previous_rt.median_seconds is not None:
+        rows.append(
+            OperationsComparisonRow(
+                label="1ª resposta — mediana (min)",
+                current=current_rt.median_seconds / 60,
+                previous=previous_rt.median_seconds / 60,
+                change_pct=_change_pct(current_rt.median_seconds, previous_rt.median_seconds),
+            )
+        )
+    return OperationsPeriodComparison(period_from=prev_from, period_to=prev_to, rows=rows)
+
+
 def _compute_response_stats(
     samples: list[float],
     business_samples: list[float],
@@ -144,6 +209,8 @@ async def compute_ai_operations_report(
     *,
     date_from: date,
     date_to: date,
+    include_comparison: bool = True,
+    _skip_comparison: bool = False,
 ) -> AiOperationsReport:
     start, end = _period_bounds(date_from, date_to)
 
@@ -227,6 +294,7 @@ async def compute_ai_operations_report(
     transfer_reason_counter: Counter[str] = Counter()
     daily_conv: Counter[str] = Counter()
     daily_inbound: Counter[str] = Counter()
+    hourly_inbound: Counter[int] = Counter()
     plans_presented = 0
     physical_evals = 0
     cancellations = 0
@@ -268,8 +336,9 @@ async def compute_ai_operations_report(
         messages = messages_by_conv.get(conv.id, [])
         for message in messages:
             if message.direction == "inbound":
-                d = message.created_at.astimezone(_BRAZIL_TZ).date().isoformat()
-                daily_inbound[d] += 1
+                local_dt = message.created_at.astimezone(_BRAZIL_TZ)
+                daily_inbound[local_dt.date().isoformat()] += 1
+                hourly_inbound[local_dt.hour] += 1
 
         if messages:
             last = messages[-1]
@@ -338,29 +407,85 @@ async def compute_ai_operations_report(
 
     response_times = _compute_response_stats(response_samples, business_response_samples)
 
+    total_conversations = len(conversations) or 1
+    outcomes = [
+        OperationsOutcome(
+            label="Resolvido pela IA",
+            count=ai_resolved,
+            pct=ai_resolved / total_conversations,
+        ),
+        OperationsOutcome(
+            label="Transferido para humano",
+            count=transferred,
+            pct=transferred / total_conversations,
+        ),
+        OperationsOutcome(
+            label="Com atendente agora",
+            count=with_human,
+            pct=with_human / total_conversations,
+        ),
+        OperationsOutcome(
+            label="Abandonado (cliente parou)",
+            count=abandoned,
+            pct=abandoned / total_conversations,
+        ),
+    ]
+
+    hourly_volume = [
+        OperationsHourlyVolume(hour=h, inbound_messages=hourly_inbound.get(h, 0))
+        for h in range(24)
+    ]
+
+    summary = OperationsSummary(
+        conversations_total=len(conversations),
+        unique_contacts=len(phones),
+        messages_inbound=messages_inbound,
+        messages_outbound=messages_outbound,
+        ai_resolved=ai_resolved,
+        transferred=transferred,
+        with_human=with_human,
+        abandoned_by_client=abandoned,
+        ai_resolution_rate=rate,
+        plans_presented=plans_presented,
+        physical_evals_scheduled=physical_evals,
+        cancellation_requests=cancellations,
+        avg_conversations_per_day=len(conversations) / days_span,
+    )
+
+    period_comparison = None
+    if include_comparison and not _skip_comparison and len(conversations) > 0:
+        period_days = (date_to - date_from).days + 1
+        prev_to = date_from - timedelta(days=1)
+        prev_from = prev_to - timedelta(days=period_days - 1)
+        previous_report = await compute_ai_operations_report(
+            db,
+            company_id,
+            date_from=prev_from,
+            date_to=prev_to,
+            include_comparison=False,
+            _skip_comparison=True,
+        )
+        period_comparison = _build_period_comparison(
+            date_from,
+            date_to,
+            summary,
+            previous_report.summary,
+            response_times,
+            previous_report.response_times,
+        )
+
     return AiOperationsReport(
         period_from=date_from,
         period_to=date_to,
         generated_at=datetime.now(timezone.utc),
         ai_name=ai_name,
-        summary=OperationsSummary(
-            conversations_total=len(conversations),
-            unique_contacts=len(phones),
-            messages_inbound=messages_inbound,
-            messages_outbound=messages_outbound,
-            ai_resolved=ai_resolved,
-            transferred=transferred,
-            with_human=with_human,
-            abandoned_by_client=abandoned,
-            ai_resolution_rate=rate,
-            plans_presented=plans_presented,
-            physical_evals_scheduled=physical_evals,
-            cancellation_requests=cancellations,
-            avg_conversations_per_day=len(conversations) / days_span,
-        ),
+        summary=summary,
         daily_volume=daily_volume,
         motivations=motivations,
         units=units,
         transfer_reasons=transfer_reasons,
         response_times=response_times,
+        hourly_inbound=hourly_volume,
+        outcomes=outcomes,
+        period_comparison=period_comparison,
     )

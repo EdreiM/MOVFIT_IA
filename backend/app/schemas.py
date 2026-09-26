@@ -530,6 +530,30 @@ class OperationsResponseTimes(BaseModel):
     samples: int
 
 
+class OperationsHourlyVolume(BaseModel):
+    hour: int
+    inbound_messages: int
+
+
+class OperationsOutcome(BaseModel):
+    label: str
+    count: int
+    pct: float | None
+
+
+class OperationsComparisonRow(BaseModel):
+    label: str
+    current: float
+    previous: float
+    change_pct: float | None
+
+
+class OperationsPeriodComparison(BaseModel):
+    period_from: date
+    period_to: date
+    rows: list[OperationsComparisonRow]
+
+
 class AiOperationsReport(BaseModel):
     period_from: date
     period_to: date
@@ -541,6 +565,9 @@ class AiOperationsReport(BaseModel):
     units: list[OperationsUnitRow]
     transfer_reasons: list[OperationsTransferReason]
     response_times: OperationsResponseTimes
+    hourly_inbound: list[OperationsHourlyVolume]
+    outcomes: list[OperationsOutcome]
+    period_comparison: OperationsPeriodComparison | None = None
 
 
 # API keys (acesso externo, machine-to-machine)
