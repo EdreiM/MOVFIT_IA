@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AiConfig, Conversation, Lead, Message, ToolCallLog
+from app.models import AiConfig, Conversation, Lead, Message, ToolCallLog, Unit
 from app.schemas import (
     AiOperationsReport,
     OperationsDailyVolume,
@@ -26,12 +26,33 @@ from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
     TOOL_KEY_TRANSFER,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
+    _normalize_tokens,
+    _unique_match,
     sanitize_phone_digits,
 )
 
 _BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 _BUSINESS_START = time(8, 0)
 _BUSINESS_END = time(18, 0)
+
+
+def _official_unit_label(raw: str | None, units: list[Unit]) -> str:
+    """Normaliza variações ('MOVFIT Itaituba — Prime') pro nome cadastrado no painel."""
+    if not raw or not raw.strip():
+        return "Sem unidade definida"
+    label = raw.strip()
+    lowered = label.lower()
+    for unit in units:
+        if lowered == unit.name.lower():
+            return unit.name
+    if not units:
+        return label
+    candidates = [
+        (unit.name, _normalize_tokens(f"{unit.name} {unit.city} {unit.unit_type or ''}"))
+        for unit in units
+    ]
+    matched_name = _unique_match(candidates, _normalize_tokens(label), threshold=0.4)
+    return matched_name or label
 
 
 def _period_bounds(date_from: date, date_to: date) -> tuple[datetime, datetime]:
@@ -134,6 +155,9 @@ async def compute_ai_operations_report(
     )
     ai_name = config_result.scalar() or "Mônica"
 
+    units_result = await db.execute(select(Unit).where(Unit.company_id == company_id))
+    catalog_units = units_result.scalars().all()
+
     conv_result = await db.execute(
         select(Conversation).where(
             Conversation.company_id == company_id,
@@ -232,7 +256,7 @@ async def compute_ai_operations_report(
 
         phone = sanitize_phone_digits(conv.contact_phone)
         lead = leads_by_phone.get(phone)
-        unit_label = (lead.unit if lead and lead.unit else "Sem unidade definida").strip()
+        unit_label = _official_unit_label(lead.unit if lead else None, catalog_units)
         unit_stats[unit_label]["conversations"] += 1
         if TOOL_KEY_SEND_PLAN_IMAGES in tool_keys:
             unit_stats[unit_label]["plans"] += 1

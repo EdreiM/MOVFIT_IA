@@ -1,9 +1,10 @@
 """Relatório operacional da IA — classificação e agregação."""
+import uuid
 from datetime import date, datetime, timezone
 
 import pytest
 
-from app.models import Conversation, Message, ToolCallLog
+from app.models import Conversation, Lead, Message, ToolCallLog, Unit
 from app.services.message_flow import (
     TOOL_KEY_BOOK_PHYSICAL_EVAL,
     TOOL_KEY_SEND_PLAN_IMAGES,
@@ -12,8 +13,17 @@ from app.services.message_flow import (
 from app.services.metrics_operations import (
     _classify_conversation_motive,
     _first_ai_response_seconds,
+    _official_unit_label,
     compute_ai_operations_report,
 )
+
+
+def test_official_unit_label_merges_paraphrased_name():
+    units = [
+        Unit(company_id=uuid.uuid4(), name="Itaituba", city="Itaituba", unit_type="Prime"),
+    ]
+    assert _official_unit_label("MOVFIT Itaituba — Prime", units) == "Itaituba"
+    assert _official_unit_label("Itaituba", units) == "Itaituba"
 
 
 def test_classify_plans_motive():
@@ -130,3 +140,49 @@ async def test_operations_report_counts_conversation_and_motive(db_session, comp
     assert report.motivations[0].label == "Dúvidas sobre planos"
     assert report.response_times.samples == 1
     assert report.response_times.median_seconds == pytest.approx(60.0)
+
+
+@pytest.mark.asyncio
+async def test_operations_report_merges_unit_aliases(db_session, company):
+    unit = Unit(company_id=company.id, name="Itaituba", city="Itaituba", unit_type="Prime")
+    db_session.add(unit)
+    await db_session.flush()
+
+    created = datetime(2026, 9, 11, 10, 0, 0, tzinfo=timezone.utc)
+    conv_a = Conversation(
+        company_id=company.id,
+        contact_phone="5511999000001",
+        status="open",
+        ai_enabled=True,
+        channel="whatsapp",
+        created_at=created,
+    )
+    conv_b = Conversation(
+        company_id=company.id,
+        contact_phone="5511999000002",
+        status="open",
+        ai_enabled=True,
+        channel="whatsapp",
+        created_at=created,
+    )
+    db_session.add_all([conv_a, conv_b])
+    await db_session.flush()
+
+    db_session.add_all(
+        [
+            Lead(company_id=company.id, phone="5511999000001", unit="Itaituba"),
+            Lead(company_id=company.id, phone="5511999000002", unit="MOVFIT Itaituba — Prime"),
+        ]
+    )
+    await db_session.commit()
+
+    report = await compute_ai_operations_report(
+        db_session,
+        company.id,
+        date_from=date(2026, 9, 1),
+        date_to=date(2026, 9, 30),
+    )
+
+    itaituba_rows = [row for row in report.units if row.unit == "Itaituba"]
+    assert len(itaituba_rows) == 1
+    assert itaituba_rows[0].conversations == 2
