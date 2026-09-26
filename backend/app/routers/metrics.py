@@ -1,6 +1,7 @@
+from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +9,7 @@ from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
 from app.models import Conversation, Lead, Message, MetricsDaily, Tool, ToolCallLog
 from app.schemas import (
+    AiOperationsReport,
     MetricsNarrativeReport,
     MetricsOverview,
     MetricsPoint,
@@ -16,6 +18,7 @@ from app.schemas import (
     ToolStats,
 )
 from app.services.metrics_narrative import compute_metrics_narrative
+from app.services.metrics_operations import compute_ai_operations_report
 from app.services.metrics_showcase import compute_metrics_showcase
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -297,3 +300,26 @@ async def metrics_showcase_examples(
 ):
     company_id = await resolve_company_id(current, db)
     return await compute_metrics_showcase(db, company_id)
+
+
+def _default_operations_period() -> tuple[date, date]:
+    today = date.today()
+    date_from = today.replace(day=1)
+    return date_from, today
+
+
+@router.get("/operations-report", response_model=AiOperationsReport)
+async def metrics_operations_report(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    default_from, default_to = _default_operations_period()
+    return await compute_ai_operations_report(
+        db,
+        company_id,
+        date_from=date_from or default_from,
+        date_to=date_to or default_to,
+    )

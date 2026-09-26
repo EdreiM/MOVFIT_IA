@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -13,8 +13,10 @@ from app.routers.metrics import (
     _compute_leads_funnel,
     _compute_overview,
     _compute_tools_stats,
+    _default_operations_period,
 )
 from app.schemas import (
+    AiOperationsReport,
     LeadOut,
     MetricsNarrativeReport,
     MetricsOverview,
@@ -23,6 +25,7 @@ from app.schemas import (
     ToolStats,
 )
 from app.services.metrics_narrative import compute_metrics_narrative
+from app.services.metrics_operations import compute_ai_operations_report
 from app.services.metrics_showcase import compute_metrics_showcase
 
 # Sem "/api" aqui de propósito — em produção isso já é adicionado (e
@@ -101,3 +104,19 @@ async def metrics_showcase_examples_external(
     db: AsyncSession = Depends(get_db),
 ):
     return await compute_metrics_showcase(db, company_id)
+
+
+@router.get("/metrics/operations-report", response_model=AiOperationsReport)
+async def metrics_operations_report_external(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    company_id: UUID = Depends(get_api_key_company),
+    db: AsyncSession = Depends(get_db),
+):
+    default_from, default_to = _default_operations_period()
+    return await compute_ai_operations_report(
+        db,
+        company_id,
+        date_from=date_from or default_from,
+        date_to=date_to or default_to,
+    )

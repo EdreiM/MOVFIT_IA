@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiExternal } from "../api";
+import AiOperationsReport, { type AiOperationsReportData } from "../components/AiOperationsReport";
 import MetricsShowcase, { type ShowcaseExample } from "../components/MetricsShowcase";
 
 type Overview = {
@@ -60,6 +61,15 @@ export default function PublicMetricsPage() {
   const [showcase, setShowcase] = useState<ShowcaseExample[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const fetchOperationsReport = useCallback(
+    (dateFrom: string, dateTo: string) =>
+      apiExternal<AiOperationsReportData>(
+        `/v1/metrics/operations-report?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`,
+        key,
+      ),
+    [key],
+  );
 
   useEffect(() => {
     if (searchParams.get("key")) {
@@ -194,6 +204,8 @@ export default function PublicMetricsPage() {
                 </div>
               </div>
             )}
+
+            <AiOperationsReport fetchReport={fetchOperationsReport} />
 
             <div className="border border-white/10 bg-panel px-5 py-4">
               <p className="text-xs uppercase tracking-wider text-muted">Atendimentos que realizo</p>

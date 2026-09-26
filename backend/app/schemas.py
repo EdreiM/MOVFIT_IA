@@ -481,6 +481,68 @@ class ShowcaseExample(BaseModel):
     snippets: list[ShowcaseSnippet]
 
 
+class OperationsSummary(BaseModel):
+    conversations_total: int
+    unique_contacts: int
+    messages_inbound: int
+    messages_outbound: int
+    ai_resolved: int
+    transferred: int
+    with_human: int
+    abandoned_by_client: int
+    ai_resolution_rate: float | None
+    plans_presented: int
+    physical_evals_scheduled: int
+    cancellation_requests: int
+    avg_conversations_per_day: float
+
+
+class OperationsDailyVolume(BaseModel):
+    day: str
+    conversations: int
+    inbound_messages: int
+
+
+class OperationsMotivation(BaseModel):
+    label: str
+    count: int
+    pct: float | None
+
+
+class OperationsUnitRow(BaseModel):
+    unit: str
+    conversations: int
+    plans: int
+    transfers: int
+    cancellations: int
+
+
+class OperationsTransferReason(BaseModel):
+    reason: str
+    count: int
+
+
+class OperationsResponseTimes(BaseModel):
+    median_seconds: float | None
+    median_business_hours_seconds: float | None
+    within_30min_pct: float | None
+    over_4h_pct: float | None
+    samples: int
+
+
+class AiOperationsReport(BaseModel):
+    period_from: date
+    period_to: date
+    generated_at: datetime
+    ai_name: str
+    summary: OperationsSummary
+    daily_volume: list[OperationsDailyVolume]
+    motivations: list[OperationsMotivation]
+    units: list[OperationsUnitRow]
+    transfer_reasons: list[OperationsTransferReason]
+    response_times: OperationsResponseTimes
+
+
 # API keys (acesso externo, machine-to-machine)
 class ApiKeyCreate(BaseModel):
     name: str
