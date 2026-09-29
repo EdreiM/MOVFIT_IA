@@ -2286,6 +2286,39 @@ _POST_PLANS_TOUR_OFFER = (
     "É só pra conhecer o espaço — *não* inclui aula experimental. 😊"
 )
 
+# Pitch de marketing externo (ex: "grupo VIP" do GymBot) — a Mônica não
+# convida pra grupo; se o modelo ou a RAG inventarem isso, cortamos no código.
+_FORBIDDEN_PROACTIVE_PHRASES = (
+    "grupo vip",
+    "grupo exclusivo",
+    "nosso grupo vip",
+    "entrar no nosso grupo",
+    "participar do nosso grupo",
+    "demonstr interesse na movfit express",
+    "nao tenha conseguido entrar no nosso grupo",
+)
+
+
+def _is_forbidden_proactive_pitch(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    normalized = _normalize_text(text)
+    return any(phrase in normalized for phrase in _FORBIDDEN_PROACTIVE_PHRASES)
+
+
+def _filter_forbidden_proactive_reply(text: str) -> str:
+    """Remove bolhas com pitch proibido (ex: convite de grupo VIP)."""
+    if not text or not text.strip():
+        return text
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    kept = [p for p in paragraphs if not _is_forbidden_proactive_pitch(p)]
+    if paragraphs and not kept:
+        logger.warning("Resposta inteira descartada por pitch proibido (ex: grupo VIP)")
+        return ""
+    if len(kept) < len(paragraphs):
+        logger.warning("Trecho de pitch proibido removido da resposta (ex: grupo VIP)")
+    return "\n\n".join(kept)
+
 _TOUR_REQUEST_MARKERS = (
     "tour",
     "agendar tour",
@@ -3324,7 +3357,12 @@ def compose_base_prompt(config: AiConfig) -> str:
         if config.use_emoji
         else "Não use emoji nas respostas."
     )
-    return f"Você é a {ai_name}, assistente virtual da Mov Fit. Seu tom de voz: {tone_text}. {emoji_instruction}"
+    return (
+        f"Você é a {ai_name}, assistente virtual da Mov Fit. Seu tom de voz: {tone_text}. "
+        f"{emoji_instruction} "
+        "NUNCA convide o cliente para grupo VIP, grupo de WhatsApp ou campanha de marketing "
+        "— isso não faz parte do seu atendimento; só responda o que foi perguntado."
+    )
 
 
 async def generate_ai_reply(
@@ -3866,7 +3904,9 @@ async def generate_ai_reply(
                     "fidelidade, benefícios ou link de nenhum desses planos — o cliente já "
                     "recebeu tudo isso. Só complemente oferecendo o *tour* pra conhecer o "
                     "ambiente (sem aula experimental). Escrever a descrição do plano de novo no texto "
-                    "duplica a informação pro cliente, que é o erro mais comum aqui — evite.\n" + catalog_context
+                    "duplica a informação pro cliente, que é o erro mais comum aqui — evite. "
+                    "NUNCA mencione grupo VIP, grupo do WhatsApp ou convite de campanha — "
+                    "isso não é função sua.\n" + catalog_context
                 ),
             }
         )
@@ -4477,8 +4517,16 @@ async def reply_to_pending_messages(
                 "Pode reformular ou repetir a pergunta? 🙏"
             )
 
+    reply = _filter_forbidden_proactive_reply(reply or "")
+    if not reply and delivered_via_tools:
+        if deferred_end_call:
+            end_tool, end_arguments = deferred_end_call
+            await execute_tool(db, end_tool, end_arguments, conversation)
+        return ""
+
     settings = get_settings()
     bubbles = split_into_bubbles(reply, settings.ai_bubble_max_chars)
+    bubbles = [b for b in bubbles if not _is_forbidden_proactive_pitch(b)]
     is_test = conversation.channel == "test_console"
 
     for i, bubble_text in enumerate(bubbles):

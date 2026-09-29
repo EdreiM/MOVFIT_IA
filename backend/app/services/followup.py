@@ -14,6 +14,8 @@ from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
 from app.services.message_flow import (
     TOOL_KEY_CHECK_SESSION,
     TOOL_KEY_END,
+    _filter_forbidden_proactive_reply,
+    _is_forbidden_proactive_pitch,
     _normalize_text,
     _upsert_lead,
     compose_base_prompt,
@@ -298,8 +300,15 @@ async def _process_conversation(db, conversation: Conversation) -> None:
         # _LAST_ATTEMPT_NOTICE.
         text = text + _LAST_ATTEMPT_NOTICE
 
+    text = _filter_forbidden_proactive_reply(text)
+    if not text:
+        return
+
     settings = get_settings()
     bubbles = split_into_bubbles(text, settings.ai_bubble_max_chars)
+    bubbles = [b for b in bubbles if not _is_forbidden_proactive_pitch(b)]
+    if not bubbles:
+        return
     for bubble_text in bubbles:
         out_event = NormalizedMessageEvent(
             event_type="message_outbound",
