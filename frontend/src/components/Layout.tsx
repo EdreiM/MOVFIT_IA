@@ -10,6 +10,7 @@ const links = [
   { to: "/webhook-logs", label: "Logs de Webhook" },
   { to: "/ai", label: "Config. IA" },
   { to: "/catalog", label: "Unidades & Planos" },
+  { to: "/promotions", label: "Promoções" },
   { to: "/tools", label: "Ferramentas" },
   { to: "/test-chat", label: "Chat de teste" },
   { to: "/api-keys", label: "API externa" },

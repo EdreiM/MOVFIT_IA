@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -269,6 +270,68 @@ class PlanOut(BaseModel):
     show_by_default: bool
 
     model_config = {"from_attributes": True}
+
+
+PromotionAudience = Literal["all", "women", "men", "new_students"]
+
+
+class PromotionCreate(BaseModel):
+    title: str
+    message: str
+    image_url: str | None = None
+    is_active: bool = True
+    valid_from: date | None = None
+    valid_until: date | None = None
+    audience: PromotionAudience = "all"
+    mention_on_plan_request: bool = True
+    unit_ids: list[UUID] = Field(default_factory=list)
+    requires_transfer: bool = True
+    transfer_reason: str | None = None
+    trigger_keywords: list[str] = Field(default_factory=list)
+    sort_order: int = 0
+
+
+class PromotionUpdate(BaseModel):
+    title: str | None = None
+    message: str | None = None
+    image_url: str | None = None
+    is_active: bool | None = None
+    valid_from: date | None = None
+    valid_until: date | None = None
+    audience: PromotionAudience | None = None
+    mention_on_plan_request: bool | None = None
+    unit_ids: list[UUID] | None = None
+    requires_transfer: bool | None = None
+    transfer_reason: str | None = None
+    trigger_keywords: list[str] | None = None
+    sort_order: int | None = None
+
+
+class PromotionOut(BaseModel):
+    id: UUID
+    company_id: UUID
+    title: str
+    message: str
+    image_url: str | None
+    is_active: bool
+    valid_from: date | None
+    valid_until: date | None
+    audience: PromotionAudience
+    mention_on_plan_request: bool
+    unit_ids: list[UUID]
+    requires_transfer: bool
+    transfer_reason: str | None
+    trigger_keywords: list[str]
+    sort_order: int
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("unit_ids", mode="before")
+    @classmethod
+    def _coerce_unit_ids(cls, value):
+        if not value:
+            return []
+        return [UUID(str(item)) for item in value]
 
 
 class UnitCreate(BaseModel):

@@ -21,6 +21,7 @@ from app.routers import (
     api_keys,
     auth,
     catalog,
+    promotions,
     companies,
     conversations,
     integrations,
@@ -67,6 +68,7 @@ app.add_middleware(
 
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
 os.makedirs(os.path.join(UPLOADS_DIR, "plans"), exist_ok=True)
+os.makedirs(os.path.join(UPLOADS_DIR, "promotions"), exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
 app.include_router(auth.router)
@@ -76,6 +78,7 @@ app.include_router(conversations.router)
 app.include_router(ai_configs.router)
 app.include_router(catalog.router)
 app.include_router(catalog.plans_router)
+app.include_router(promotions.router)
 app.include_router(integrations.router)
 app.include_router(leads.router)
 app.include_router(metrics.router)

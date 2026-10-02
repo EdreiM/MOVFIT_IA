@@ -4,6 +4,7 @@ from app.models.number import Number
 from app.models.conversation import Conversation, Message
 from app.models.ai_config import AiConfig, RagSource, Tool
 from app.models.catalog import Unit, Plan
+from app.models.promotion import Promotion
 from app.models.integration import Integration, WebhookLog
 from app.models.metrics import MetricsDaily
 from app.models.lead import Lead
@@ -22,6 +23,7 @@ __all__ = [
     "Tool",
     "Unit",
     "Plan",
+    "Promotion",
     "Integration",
     "WebhookLog",
     "MetricsDaily",

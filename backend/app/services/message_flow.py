@@ -33,6 +33,17 @@ from app.models import (
 from app.security import decrypt_secret
 from app.services.debounce import schedule_ai_reply
 from app.services.llm import chat_completion
+from app.services.text_normalize import normalize_text as _normalize_text
+from app.services.text_normalize import normalize_tokens as _normalize_tokens
+from app.services.promotions import (
+    find_recent_offered_promotion,
+    format_promotions_prompt_block,
+    get_active_promotions,
+    present_promotions,
+    promotion_transfer_active,
+    run_promotion_transfer_pipeline,
+    wants_promotion_inquiry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -576,21 +587,6 @@ async def _upsert_lead(
             setattr(lead, flag_name, True)
     await db.flush()
     return lead
-
-
-def _normalize_tokens(text: str) -> set[str]:
-    """Minúsculo, sem acento, só letras/números — pra comparar 'Santarém' com
-    'santarem' e 'MOVFIT Santarém — Premium (24h)' com 'Santarém - 24 horas'
-    mesmo quando a IA parafraseia em vez de copiar o nome literal."""
-    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return set(re.findall(r"[a-z0-9]+", ascii_text.lower()))
-
-
-def _normalize_text(text: str) -> str:
-    """Como _normalize_tokens, mas preserva a ordem/espaços — pra procurar
-    frase inteira (ex: 'vou encaminhar'), não só palavras soltas."""
-    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return re.sub(r"\s+", " ", ascii_text.lower())
 
 
 def _mentions_cancellation(text: str) -> bool:
@@ -3444,6 +3440,14 @@ async def generate_ai_reply(
         if store_reply is not None:
             return store_reply, None, False
 
+    active_promotions = await get_active_promotions(db, conversation.company_id)
+    offered_promotion = await find_recent_offered_promotion(db, conversation, history)
+    if promotion_transfer_active(user_text, history, recent_customer_texts, offered_promotion):
+        promo_reply = await run_promotion_transfer_pipeline(
+            db, conversation, offered_promotion, tools_by_key
+        )
+        return promo_reply, None, False
+
     guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
     physical_eval_intent = _is_physical_eval_intent(user_text)
     has_schedule_tool = _has_schedule_tool(tools_by_key)
@@ -3834,6 +3838,9 @@ async def generate_ai_reply(
             }
         )
     wants_no_fidelity = _wants_no_fidelity_plan(user_text, recent_customer_texts)
+    promotions_prompt = format_promotions_prompt_block(active_promotions)
+    if promotions_prompt:
+        messages.append({"role": "system", "content": promotions_prompt})
     catalog_context = await build_catalog_context(
         db, conversation.company_id, include_on_demand=wants_no_fidelity
     )
@@ -4280,6 +4287,23 @@ async def generate_ai_reply(
         plans_delivered=bool(touched_units),
     )
     delivered_via_tools = bool(touched_units)
+
+    promo_unit_id = plan_unit.id if plan_unit else None
+    promotions_to_send = []
+    if touched_units:
+        promotions_to_send = await get_active_promotions(
+            db,
+            conversation.company_id,
+            unit_id=promo_unit_id,
+            mention_on_plan_request=True,
+        )
+    elif wants_promotion_inquiry(user_text, active_promotions) and not _wants_plan_info(
+        user_text, recent_customer_texts
+    ):
+        promotions_to_send = active_promotions
+    if promotions_to_send:
+        promo_sent = await present_promotions(db, conversation, promotions_to_send)
+        delivered_via_tools = delivered_via_tools or promo_sent > 0
 
     transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
     if (

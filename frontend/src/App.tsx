@@ -11,6 +11,7 @@ import IntegrationsPage from "./pages/IntegrationsPage";
 import TestChatPage from "./pages/TestChatPage";
 import ToolsPage from "./pages/ToolsPage";
 import CatalogPage from "./pages/CatalogPage";
+import PromotionsPage from "./pages/PromotionsPage";
 import AccountPage from "./pages/AccountPage";
 import ApiKeysPage from "./pages/ApiKeysPage";
 import PublicMetricsPage from "./pages/PublicMetricsPage";
@@ -48,6 +49,7 @@ export default function App() {
                 <Route path="/test-chat" element={<TestChatPage />} />
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/catalog" element={<CatalogPage />} />
+                <Route path="/promotions" element={<PromotionsPage />} />
                 <Route path="/conversations" element={<ConversationsPage />} />
                 <Route path="/leads" element={<LeadsPage />} />
                 <Route path="/integrations" element={<IntegrationsPage />} />
