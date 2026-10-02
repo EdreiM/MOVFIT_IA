@@ -107,15 +107,19 @@ function PromotionForm({
   units: Unit[];
   onSubmit: (data: PromotionFormData) => Promise<void>;
   onCancel?: () => void;
-  onUploadImage?: (file: File) => Promise<void>;
+  onUploadImage?: (file: File) => Promise<string>;
   submitLabel: string;
 }) {
   const [form, setForm] = useState<PromotionFormData>(initial ? formFromPromotion(initial) : emptyForm());
+  const [imageUrl, setImageUrl] = useState(initial?.image_url ?? "");
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
 
   useEffect(() => {
     setForm(initial ? formFromPromotion(initial) : emptyForm());
-  }, [initial?.id]);
+    setImageUrl(initial?.image_url ?? "");
+  }, [initial?.id, initial?.image_url]);
 
   const toggleUnit = (unitId: string) => {
     setForm((prev) => ({
@@ -128,9 +132,18 @@ function PromotionForm({
 
   const handleImage = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !onUploadImage) return;
-    await onUploadImage(file);
     e.target.value = "";
+    if (!file || !onUploadImage) return;
+    setUploadError("");
+    setUploading(true);
+    try {
+      const newUrl = await onUploadImage(file);
+      if (newUrl) setImageUrl(newUrl);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Erro ao enviar banner");
+    } finally {
+      setUploading(false);
+    }
   };
 
   const submit = async (e: FormEvent) => {
@@ -184,14 +197,30 @@ function PromotionForm({
         />
       </label>
 
-      {initial?.image_url && (
-        <img src={initial.image_url} alt={initial.title} className="h-32 rounded-md border border-white/10 object-cover" />
-      )}
       {initial && onUploadImage && (
-        <label className="inline-block cursor-pointer rounded-md border border-white/15 px-3 py-2 text-sm text-sand/70 hover:bg-white/5">
-          {initial.image_url ? "Trocar banner" : "Enviar banner"}
-          <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleImage} />
-        </label>
+        <div className="space-y-2">
+          {imageUrl && (
+            <img
+              src={imageUrl}
+              alt={form.title || "Banner da promoção"}
+              className="max-h-48 rounded-md border border-white/10 object-contain"
+            />
+          )}
+          <label className="inline-block cursor-pointer rounded-md border border-white/15 px-3 py-2 text-sm text-sand/70 hover:bg-white/5">
+            {uploading ? "Enviando…" : imageUrl ? "Trocar banner" : "Enviar banner"}
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              className="hidden"
+              onChange={handleImage}
+              disabled={uploading}
+            />
+          </label>
+          {uploadError && <p className="text-xs text-ember">{uploadError}</p>}
+          {!imageUrl && !uploadError && (
+            <p className="text-xs text-sand/45">JPEG, PNG ou WEBP — até 5 MB. Salve a promoção antes de enviar o banner.</p>
+          )}
+        </div>
       )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -342,9 +371,13 @@ export default function PromotionsPage() {
 
   const createPromotion = async (data: PromotionFormData) => {
     setError("");
-    await api("/promotions", { method: "POST", body: JSON.stringify(payloadFromForm(data)) });
+    const created = await api<Promotion>("/promotions", {
+      method: "POST",
+      body: JSON.stringify(payloadFromForm(data)),
+    });
     setCreating(false);
-    load();
+    setEditingId(created.id);
+    setPromotions((prev) => [created, ...prev.filter((p) => p.id !== created.id)]);
   };
 
   const updatePromotion = async (id: string, data: PromotionFormData) => {
@@ -354,9 +387,10 @@ export default function PromotionsPage() {
     load();
   };
 
-  const uploadImage = async (id: string, file: File) => {
-    await apiUpload<Promotion>(`/promotions/${id}/image`, file);
-    load();
+  const uploadImage = async (id: string, file: File): Promise<string> => {
+    const updated = await apiUpload<Promotion>(`/promotions/${id}/image`, file);
+    setPromotions((prev) => prev.map((p) => (p.id === id ? updated : p)));
+    return updated.image_url ?? "";
   };
 
   const toggleActive = async (promo: Promotion) => {

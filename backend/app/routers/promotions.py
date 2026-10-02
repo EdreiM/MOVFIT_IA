@@ -15,7 +15,19 @@ router = APIRouter(prefix="/promotions", tags=["promotions"])
 
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "promotions")
 ALLOWED_IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _resolve_image_ext(file: UploadFile) -> str | None:
+    ext = ALLOWED_IMAGE_TYPES.get(file.content_type or "")
+    if ext:
+        return ext
+    name = (file.filename or "").lower()
+    for suffix in ALLOWED_IMAGE_EXTENSIONS:
+        if name.endswith(suffix):
+            return ".jpg" if suffix == ".jpeg" else suffix
+    return None
 
 
 async def _get_promotion_or_404(db: AsyncSession, promotion_id: UUID, company_id: UUID) -> Promotion:
@@ -84,7 +96,7 @@ async def upload_promotion_image(
     company_id = await resolve_company_id(current, db)
     promotion = await _get_promotion_or_404(db, promotion_id, company_id)
 
-    ext = ALLOWED_IMAGE_TYPES.get(file.content_type)
+    ext = _resolve_image_ext(file)
     if not ext:
         raise HTTPException(status_code=400, detail="Envie uma imagem JPEG, PNG ou WEBP")
 
