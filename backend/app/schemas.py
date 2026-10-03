@@ -177,6 +177,7 @@ class AiConfigUpdate(BaseModel):
     followup_enabled: bool | None = None
     followup_delay_minutes: int | None = None
     followup_max_attempts: int | None = None
+    reply_debounce_seconds: float | None = Field(default=None, ge=1, le=60)
     custom_links: list[CustomLink] | None = None
 
 
@@ -199,6 +200,7 @@ class AiConfigOut(BaseModel):
     followup_enabled: bool
     followup_delay_minutes: int
     followup_max_attempts: int
+    reply_debounce_seconds: float
     custom_links: list[CustomLink] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}

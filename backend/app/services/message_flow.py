@@ -717,6 +717,10 @@ _NON_PLAN_TOPIC_KEYWORDS = {
     "agendar", "agendamento", "avaliacao", "avaliacoes",
 }
 
+_CANCELLATION_TOKENS = {
+    "cancelar", "cancelamento", "cancelando", "trancar", "trancamento", "congelar", "desistir",
+}
+
 _STUDENT_ACTION_KEYWORDS = {
     "parcela", "parcelas", "atrasad", "atraso", "inadimpl", "boleto", "boletos",
     "convidado", "convidados", "convite", "convites", "acesso", "entrada",
@@ -730,6 +734,86 @@ def _text_has_plan_intent(text: str) -> bool:
 
 def _text_has_non_plan_topic(text: str) -> bool:
     return bool(_normalize_tokens(text) & _NON_PLAN_TOPIC_KEYWORDS)
+
+
+def _message_mentions_cancellation(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    tokens = _normalize_tokens(text)
+    if tokens & _CANCELLATION_TOKENS:
+        return True
+    return _mentions_cancellation(text)
+
+
+def _cancellation_flow_active(text: str, recent_customer_texts: list[str] | None = None) -> bool:
+    """Cliente pediu cancelamento/trancamento — planos e promoções ficam bloqueados."""
+    if _message_mentions_cancellation(text):
+        return True
+    prior = [t for t in (recent_customer_texts or []) if t and t.strip() != (text or "").strip()]
+    return any(_message_mentions_cancellation(t) for t in prior[-8:])
+
+
+def _is_general_unit_inquiry(text: str) -> bool:
+    """Pergunta se este WhatsApp é de uma unidade/cidade específica (número geral)."""
+    if not text or not text.strip():
+        return False
+    normalized = _normalize_text(text)
+    tokens = _normalize_tokens(text)
+    if any(
+        phrase in normalized
+        for phrase in (
+            "essa e a unidade",
+            "esse e o whatsapp",
+            "esse numero e",
+            "este numero e",
+            "e da unidade de",
+            "atende todas",
+            "todas as unidades",
+            "todas as cidades",
+            "numero geral",
+        )
+    ):
+        return True
+    if tokens & {"unidade", "unidades", "whatsapp", "numero", "telefone"} and tokens & {
+        "essa",
+        "esse",
+        "este",
+        "esta",
+        "todas",
+        "geral",
+        "cidade",
+        "cidades",
+    }:
+        return True
+    return False
+
+
+def _general_whatsapp_number_reply(*, ai_name: str, is_first_contact: bool) -> str:
+    intro = f"Olá! Eu sou a {ai_name}, assistente virtual da Mov Fit. " if is_first_contact else ""
+    return (
+        f"{intro}Esse WhatsApp é o *número geral da MovFit* — atende *todas as nossas unidades* "
+        "e cidades (Itaituba, Santarém, Medicilândia, Novo Progresso etc.), não é exclusivo de "
+        "uma unidade só. Com seu CPF eu localizo em qual unidade você está matriculada. 😊"
+    )
+
+
+def _should_block_plan_delivery(
+    text: str,
+    recent_customer_texts: list[str] | None = None,
+    *,
+    lead: Lead | None = None,
+) -> bool:
+    """Rede de segurança: não mandar planos/promo fora de fluxo comercial."""
+    if _cancellation_flow_active(text, recent_customer_texts):
+        return True
+    if _is_general_unit_inquiry(text) and not _text_has_plan_intent(text):
+        return True
+    if (
+        _student_operational_action(text, lead)
+        or _student_operational_followup(text, recent_customer_texts, lead)
+    ) and not _wants_plan_info(text, recent_customer_texts):
+        return True
+    return False
 
 
 def _is_guest_operational_check(text: str, lead: Lead | None = None) -> bool:
@@ -789,6 +873,9 @@ def _student_operational_action(text: str, lead: Lead | None = None) -> bool:
         return False
     if tokens & {"convidado", "convidados", "convite", "convites"}:
         return _is_guest_operational_check(text, lead)
+    if tokens & _CANCELLATION_TOKENS:
+        if tokens & {"minha", "meu", "matricula", "matriculado", "contrato", "quero", "gostaria", "fazer"}:
+            return True
     if "matricula" in tokens or "matriculado" in tokens or "aluno" in tokens:
         if tokens & {"minha", "meu", "minhas", "meus", "atrasad", "atraso", "cancelar", "pagar"}:
             return True
@@ -1831,7 +1918,7 @@ def _pick_student_operational_tool_from_text(user_text: str, tools_by_key: dict[
     )
     wants_billing = bool(
         tokens & {"parcela", "parcelas", "atrasad", "atraso", "inadimpl", "boleto", "boletos", "carne", "multa"}
-    )
+    ) or bool(tokens & _CANCELLATION_TOKENS)
     if not wants_guests and not wants_billing:
         return None
 
@@ -1939,6 +2026,17 @@ async def _run_student_operational_pipeline(
         user_text, tools_by_key, recent_customer_texts=recent_customer_texts
     )
     if not op_tool:
+        if _cancellation_flow_active(user_text, recent_customer_texts):
+            transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+            reason = "Cliente solicitou cancelamento/trancamento de matrícula"
+            reply = (
+                "Entendi! Vou te encaminhar para um atendente que finaliza o "
+                "*cancelamento da sua matrícula* com você. 😊"
+            )
+            if transfer_tool and transfer_tool.webhook_url and conversation.status != "with_human":
+                await execute_tool(db, transfer_tool, {"motivo": reason}, conversation)
+                reply = f"{reply} Um atendente continua com você em instantes!"
+            return reply, lead
         return None, lead
 
     declared_params = {
@@ -2262,6 +2360,8 @@ def _plan_flow_active(text: str, recent_customer_texts: list[str] | None = None)
 
     Turno 1 "quero planos" + turno 2 "Santarém - 24 horas" → True.
     Depois "quais os horários?" → False, mesmo tendo pedido planos antes."""
+    if _cancellation_flow_active(text, recent_customer_texts):
+        return False
     if _text_has_plan_intent(text):
         return True
     if _text_has_non_plan_topic(text):
@@ -3189,6 +3289,8 @@ async def _auto_send_plan_images(
         return None
     if not _wants_plan_info(user_text, recent_customer_texts):
         return None
+    if _should_block_plan_delivery(user_text, recent_customer_texts):
+        return None
 
     unit = await _resolve_plan_delivery_unit(
         db,
@@ -3447,6 +3549,13 @@ async def generate_ai_reply(
             db, conversation, offered_promotion, tools_by_key
         )
         return promo_reply, None, False
+
+    if _is_general_unit_inquiry(user_text) and not _wants_plan_info(user_text, recent_customer_texts):
+        return (
+            _general_whatsapp_number_reply(ai_name=ai_name, is_first_contact=is_first_contact),
+            None,
+            False,
+        )
 
     guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
     physical_eval_intent = _is_physical_eval_intent(user_text)
@@ -3838,13 +3947,28 @@ async def generate_ai_reply(
             }
         )
     wants_no_fidelity = _wants_no_fidelity_plan(user_text, recent_customer_texts)
+    cancellation_active = _cancellation_flow_active(user_text, recent_customer_texts)
+    if cancellation_active:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "[Cancelamento/trancamento — assunto atual da conversa]\n"
+                    "O cliente quer CANCELAR, TRANCAR ou CONGELAR a matrícula — NÃO é lead "
+                    "interessado em planos novos. NÃO chame enviar_imagens_planos, NÃO envie "
+                    "tabela de preços, NÃO ofereça promoções/campanhas (Outubro Rosa etc.). "
+                    "Peça CPF se ainda não tiver, consulte o sistema (parcelas/unidade) se "
+                    "precisar, e transfira para atendente humano para concluir o cancelamento."
+                ),
+            }
+        )
     promotions_prompt = format_promotions_prompt_block(active_promotions)
-    if promotions_prompt:
+    if promotions_prompt and not cancellation_active:
         messages.append({"role": "system", "content": promotions_prompt})
     catalog_context = await build_catalog_context(
         db, conversation.company_id, include_on_demand=wants_no_fidelity
     )
-    if catalog_context:
+    if catalog_context and not cancellation_active:
         messages.append(
             {
                 "role": "system",
@@ -4143,7 +4267,15 @@ async def generate_ai_reply(
 
             if key == TOOL_KEY_SEND_PLAN_IMAGES:
                 tool = tools_by_key.get(key)
-                if not tool:
+                if _should_block_plan_delivery(user_text, recent_customer_texts, lead=lead):
+                    result = {
+                        "sucesso": False,
+                        "mensagem": (
+                            "Bloqueado: cliente em cancelamento, dúvida sobre o número geral "
+                            "ou atendimento de aluno — não envie planos neste turno."
+                        ),
+                    }
+                elif not tool:
                     result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
                 else:
                     resolved_images = await _resolve_plan_images(db, conversation.company_id, arguments)
@@ -4290,17 +4422,18 @@ async def generate_ai_reply(
 
     promo_unit_id = plan_unit.id if plan_unit else None
     promotions_to_send = []
-    if touched_units:
-        promotions_to_send = await get_active_promotions(
-            db,
-            conversation.company_id,
-            unit_id=promo_unit_id,
-            mention_on_plan_request=True,
-        )
-    elif wants_promotion_inquiry(user_text, active_promotions) and not _wants_plan_info(
-        user_text, recent_customer_texts
-    ):
-        promotions_to_send = active_promotions
+    if not _cancellation_flow_active(user_text, recent_customer_texts):
+        if touched_units:
+            promotions_to_send = await get_active_promotions(
+                db,
+                conversation.company_id,
+                unit_id=promo_unit_id,
+                mention_on_plan_request=True,
+            )
+        elif wants_promotion_inquiry(user_text, active_promotions) and not _wants_plan_info(
+            user_text, recent_customer_texts
+        ):
+            promotions_to_send = active_promotions
     if promotions_to_send:
         promo_sent = await present_promotions(db, conversation, promotions_to_send)
         delivered_via_tools = delivered_via_tools or promo_sent > 0
@@ -4789,8 +4922,13 @@ async def process_normalized_event(
 
     ai_reply_scheduled = False
     if event.event_type == "message_inbound" and event.actor == "customer" and conversation.ai_enabled:
-        settings = get_settings()
-        schedule_ai_reply(conversation.id, company_id, settings.ai_reply_debounce_seconds)
+        debounce_config = await resolve_ai_config(db, conversation)
+        debounce_seconds = (
+            debounce_config.reply_debounce_seconds
+            if debounce_config
+            else get_settings().ai_reply_debounce_seconds
+        )
+        schedule_ai_reply(conversation.id, company_id, debounce_seconds)
         ai_reply_scheduled = True
 
     return {

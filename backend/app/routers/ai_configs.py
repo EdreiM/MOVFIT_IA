@@ -27,7 +27,7 @@ from app.schemas import (
 from app.config import get_settings
 from app.security import decrypt_secret, encrypt_secret, mask_api_key
 from app.services.debounce import schedule_ai_reply
-from app.services.message_flow import save_message
+from app.services.message_flow import resolve_ai_config, save_message
 
 router = APIRouter(tags=["ai-configs"])
 
@@ -76,6 +76,7 @@ def _to_out(config: AiConfig, *, custom_links: list[CustomLink] | None = None) -
         followup_enabled=config.followup_enabled,
         followup_delay_minutes=config.followup_delay_minutes,
         followup_max_attempts=config.followup_max_attempts,
+        reply_debounce_seconds=config.reply_debounce_seconds,
         custom_links=custom_links if custom_links is not None else _serialize_custom_links(config),
     )
 
@@ -108,6 +109,7 @@ async def _get_or_create_integration_config(
             followup_enabled=default_config.followup_enabled,
             followup_delay_minutes=default_config.followup_delay_minutes,
             followup_max_attempts=default_config.followup_max_attempts,
+            reply_debounce_seconds=default_config.reply_debounce_seconds,
         )
         db.add(config)
         await db.flush()
@@ -391,8 +393,9 @@ async def test_chat(
     # Debounce curto no playground: agrega rajadas rápidas sem imitar os 8s
     # do WhatsApp — e libera o lock mais cedo pro turno seguinte (horário →
     # estacionamento etc.).
-    settings = get_settings()
-    test_debounce = min(settings.ai_reply_debounce_seconds, 1.5)
+    config = await resolve_ai_config(db, conv)
+    debounce_seconds = config.reply_debounce_seconds if config else get_settings().ai_reply_debounce_seconds
+    test_debounce = min(debounce_seconds, 1.5)
     schedule_ai_reply(conv.id, company_id, test_debounce)
 
     return TestChatResponse(conversation_id=conv.id, reply=None)

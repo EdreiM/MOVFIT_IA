@@ -10,13 +10,14 @@ from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
 from app.models import Promotion
 from app.schemas import PromotionCreate, PromotionOut, PromotionUpdate
+from app.services.image_upload import MAX_UPLOAD_BYTES, optimize_uploaded_image
 
 router = APIRouter(prefix="/promotions", tags=["promotions"])
 
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "promotions")
 ALLOWED_IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
+STORED_IMAGE_EXTENSIONS = {".jpg", ".webp"}
 
 
 def _resolve_image_ext(file: UploadFile) -> str | None:
@@ -101,10 +102,19 @@ async def upload_promotion_image(
         raise HTTPException(status_code=400, detail="Envie uma imagem JPEG, PNG ou WEBP")
 
     content = await file.read()
-    if len(content) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail="Imagem muito grande (máximo 5MB)")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="Imagem muito grande (máximo 15MB)")
+
+    try:
+        content, ext = optimize_uploaded_image(content)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Não foi possível processar a imagem enviada")
 
     os.makedirs(UPLOADS_DIR, exist_ok=True)
+    for old_ext in STORED_IMAGE_EXTENSIONS:
+        old_path = os.path.join(UPLOADS_DIR, f"{promotion.id}{old_ext}")
+        if os.path.isfile(old_path):
+            os.remove(old_path)
     filename = f"{promotion.id}{ext}"
     with open(os.path.join(UPLOADS_DIR, filename), "wb") as f:
         f.write(content)

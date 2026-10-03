@@ -27,6 +27,7 @@ type AiConfig = {
   followup_enabled: boolean;
   followup_delay_minutes: number;
   followup_max_attempts: number;
+  reply_debounce_seconds: number;
   custom_links: CustomLink[];
 };
 
@@ -96,6 +97,7 @@ export default function AiConfigPage() {
         followup_enabled: config.followup_enabled,
         followup_delay_minutes: config.followup_delay_minutes,
         followup_max_attempts: config.followup_max_attempts,
+        reply_debounce_seconds: config.reply_debounce_seconds,
         custom_links: (config.custom_links ?? []).filter(
           (link) => link.label.trim() && link.url.trim()
         ),
@@ -362,6 +364,25 @@ export default function AiConfigPage() {
             <option value="suggest">Só sugerir</option>
             <option value="off">Desligado</option>
           </select>
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-sm text-sand/60">Buffer de mensagens (segundos de silêncio)</span>
+          <input
+            type="number"
+            min="1"
+            max="60"
+            step="0.5"
+            className="w-full rounded-md border border-white/15 bg-ink px-3 py-2 sm:max-w-xs"
+            value={config.reply_debounce_seconds}
+            onChange={(e) =>
+              setConfig({ ...config, reply_debounce_seconds: Number(e.target.value) })
+            }
+          />
+          <span className="block text-xs text-sand/45">
+            Quanto tempo a IA espera o cliente terminar de digitar antes de responder. Mensagens
+            seguidas (ex.: 3 textos rápidos) são agrupadas em uma só resposta. Padrão: 8s.
+          </span>
         </label>
 
         <fieldset className="space-y-3 rounded-md border border-white/10 p-3">

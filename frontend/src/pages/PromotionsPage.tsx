@@ -134,6 +134,10 @@ function PromotionForm({
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file || !onUploadImage) return;
+    if (file.size > 15 * 1024 * 1024) {
+      setUploadError("Arquivo muito grande (máximo 15 MB)");
+      return;
+    }
     setUploadError("");
     setUploading(true);
     try {
@@ -218,7 +222,9 @@ function PromotionForm({
           </label>
           {uploadError && <p className="text-xs text-ember">{uploadError}</p>}
           {!imageUrl && !uploadError && (
-            <p className="text-xs text-sand/45">JPEG, PNG ou WEBP — até 5 MB. Salve a promoção antes de enviar o banner.</p>
+            <p className="text-xs text-sand/45">
+              JPEG, PNG ou WEBP — até 15 MB (comprimimos automaticamente). Salve a promoção antes de enviar o banner.
+            </p>
           )}
         </div>
       )}

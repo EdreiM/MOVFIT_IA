@@ -61,6 +61,9 @@ class AiConfig(Base):
     followup_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     followup_delay_minutes: Mapped[int] = mapped_column(Integer, default=120)
     followup_max_attempts: Mapped[int] = mapped_column(Integer, default=2)
+    # Segundos de silêncio do cliente antes de responder, agregando rajadas
+    # de mensagem (debounce). Configurável por integração no painel.
+    reply_debounce_seconds: Mapped[float] = mapped_column(Float, default=8.0)
     # Links úteis que a IA pode enviar quando o assunto combinar (vagas,
     # formulários etc.) — lista de {label, url, when}.
     custom_links: Mapped[list] = mapped_column(JSONB, default=list)
