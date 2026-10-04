@@ -134,5 +134,5 @@ async def test_send_promotion_banner_uses_plan_image_webhook(db_session, company
     send_image_mock.assert_awaited_once()
     assert send_image_mock.await_args.args[2]["url"] == promo.image_url
     outbound_mock.assert_awaited_once()
-    assert outbound_mock.await_args.args[2] == promo.message.strip()
+    assert outbound_mock.await_args.args[3] == promo.message.strip()
     assert promo.image_url not in str(outbound_mock.await_args)
