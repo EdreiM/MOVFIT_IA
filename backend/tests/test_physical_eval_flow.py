@@ -9,6 +9,9 @@ from app.services.message_flow import (
     TOOL_KEY_CHECK_SCHEDULE,
     TOOL_KEY_VERIFY_UNIT_BY_CPF,
     _enrich_schedule_result_with_preference,
+    _physical_eval_offered_schedule_context,
+    _physical_eval_reschedule_intent,
+    _wants_any_available_slot,
     _extract_schedule_date_from_text,
     _extract_schedule_period_from_text,
     _extract_schedule_time_from_text,
@@ -55,6 +58,39 @@ def test_awaiting_slot_choice_detects_number_or_time():
     assert _physical_eval_awaiting_slot_choice("3", conv) is True
     assert _physical_eval_awaiting_slot_choice("16hs", conv) is True
     assert _physical_eval_awaiting_slot_choice("obrigado", conv) is False
+
+
+def test_offered_schedule_context_inherits_date_for_slot_choice():
+    from app.models import Conversation
+
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+        physical_eval_offered_slots={
+            "date": "20261005",
+            "period": "tarde",
+            "slots": ["12:00", "13:00", "14:00", "15:00"],
+        },
+    )
+    date, pref = _physical_eval_offered_schedule_context(
+        conv, {"date": None, "period": None, "preferred_time": None}
+    )
+    assert date == "20261005"
+    assert pref["period"] == "tarde"
+
+
+def test_reschedule_intent_detected():
+    assert _physical_eval_reschedule_intent(
+        "nao vou conseguir ir hoje",
+        ["tenho bioimpedancia agendada pra hj"],
+    )
+    assert _physical_eval_reschedule_intent("teria a possibilidade de um reagendamento?", []) is True
+
+
+def test_wants_any_available_slot():
+    assert _wants_any_available_slot("qualquer horario que estiver disponivel") is True
 
 
 def test_resolve_chosen_time_by_list_index_even_without_period_in_pref():
@@ -769,6 +805,119 @@ async def test_reply_from_schedule_filters_past_slots_today():
     assert "15:00 às 15:30" not in reply
     assert "16:00 às 16:30" in reply
     assert conv.physical_eval_offered_slots["slots"] == ["16:00"]
+
+
+@pytest.mark.asyncio
+async def test_physical_eval_pipeline_books_slot_number_without_date_in_message(db_session, company):
+    """Cliente responde só '2' — usa data da lista já mostrada, não pergunta dia de novo."""
+    from app.models import AiConfig, Conversation, Lead, Tool
+    from app.security import encrypt_secret
+
+    config = AiConfig(
+        company_id=company.id,
+        ai_name="Mônica",
+        llm_api_key_encrypted=encrypt_secret("sk-test"),
+    )
+    db_session.add(config)
+    await db_session.flush()
+    verify = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Verificar unidade",
+        tool_key=TOOL_KEY_VERIFY_UNIT_BY_CPF,
+        description="Descobre unidade",
+        parameters=[{"name": "cpf", "type": "string", "required": True}],
+        webhook_url="https://example.com/verify",
+        is_active=True,
+    )
+    schedule = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Consulta horários",
+        tool_key=TOOL_KEY_CHECK_SCHEDULE,
+        description="Consulta horários",
+        parameters=[
+            {"name": "unidade", "type": "string", "required": True},
+            {"name": "data", "type": "string", "required": True},
+        ],
+        webhook_url="https://example.com/schedule",
+        is_active=True,
+    )
+    book = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Insere agenda",
+        tool_key=TOOL_KEY_BOOK_PHYSICAL_EVAL,
+        description="Reserva avaliação",
+        parameters=[
+            {"name": "cpf", "type": "string", "required": True},
+            {"name": "unidade", "type": "string", "required": True},
+            {"name": "data", "type": "string", "required": True},
+            {"name": "horario", "type": "string", "required": True},
+        ],
+        webhook_url="https://example.com/book",
+        is_active=True,
+    )
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5593999887766",
+        channel="whatsapp",
+        status="open",
+        ai_enabled=True,
+        physical_eval_offered_slots={
+            "date": "20261005",
+            "period": "tarde",
+            "slots": ["12:00", "13:00", "14:00", "15:00"],
+        },
+    )
+    lead = Lead(
+        company_id=company.id,
+        phone="5593999887766",
+        cpf="01235490270",
+        unit="Novo Progresso",
+        is_student=True,
+        name="ERICA",
+    )
+    db_session.add_all([verify, schedule, book, conv, lead])
+    await db_session.commit()
+
+    tools_by_key = {verify.tool_key: verify, schedule.tool_key: schedule, book.tool_key: book}
+    book_payload = {
+        "sucesso": True,
+        "dados": {
+            "data": "20261005",
+            "data_formatada": "05/10/2026",
+            "horario_inicial": "13:00",
+            "unidade": "Novo Progresso",
+        },
+    }
+
+    with patch(
+        "app.services.message_flow.execute_tool",
+        new_callable=AsyncMock,
+        return_value=book_payload,
+    ) as execute_mock:
+        reply, _ = await _run_physical_eval_pipeline(
+            db_session,
+            conv,
+            "2",
+            tools_by_key,
+            lead,
+            config=config,
+            is_first_contact=False,
+            ai_name="Mônica",
+            recent_customer_texts=[
+                "tenho bioimpedancia agendada",
+                "01235490270",
+                "sim, por gentileza",
+            ],
+        )
+
+    execute_mock.assert_awaited_once()
+    assert execute_mock.await_args.args[2]["horario"] == "13:00"
+    assert execute_mock.await_args.args[2]["data"] == "20261005"
+    assert "confirmada" in (reply or "").lower()
+    assert "Qual dia" not in (reply or "")
 
 
 @pytest.mark.asyncio

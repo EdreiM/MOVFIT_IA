@@ -946,6 +946,61 @@ def _physical_eval_in_recent(recent_customer_texts: list[str] | None) -> bool:
     return any(_is_physical_eval_intent(t) for t in prior[-8:])
 
 
+def _physical_eval_reschedule_intent(
+    text: str, recent_customer_texts: list[str] | None = None
+) -> bool:
+    """Cliente quer remarcar/cancelar avaliação já existente."""
+    texts = [text] + list(reversed((recent_customer_texts or [])[-8:]))
+    for item in texts:
+        if not item:
+            continue
+        tokens = _normalize_tokens(item)
+        if tokens & {"reagendar", "remarcar", "remarca", "reagendamento", "remarcacao"}:
+            return True
+        normalized = _normalize_text(item)
+        if any(
+            phrase in normalized
+            for phrase in (
+                "nao vou conseguir ir",
+                "nao posso ir",
+                "nao consigo ir",
+                "cancelar a avaliacao",
+                "cancelar avaliacao",
+            )
+        ):
+            return True
+    return False
+
+
+def _wants_any_available_slot(text: str) -> bool:
+    normalized = _normalize_text(text or "")
+    return any(
+        phrase in normalized
+        for phrase in (
+            "qualquer horario",
+            "qualquer um",
+            "o que tiver",
+            "que estiver disponivel",
+            "que tiver disponivel",
+        )
+    )
+
+
+def _physical_eval_offered_schedule_context(
+    conversation: Conversation, pref: dict
+) -> tuple[str | None, dict]:
+    """Herda data/período da última lista mostrada quando o cliente só manda
+    o número do horário (ex: '3') — sem repetir a data na mensagem."""
+    offered = conversation.physical_eval_offered_slots or {}
+    schedule_date = pref.get("date") or offered.get("date")
+    merged = dict(pref)
+    if schedule_date:
+        merged["date"] = schedule_date
+    if not merged.get("period") and offered.get("period"):
+        merged["period"] = offered["period"]
+    return schedule_date, merged
+
+
 def _physical_eval_awaiting_slot_choice(user_text: str, conversation: Conversation) -> bool:
     """Cliente já viu a lista numerada — número ou horário escolhido deve ir pro pipeline."""
     if not conversation.physical_eval_offered_slots:
@@ -2074,7 +2129,10 @@ async def _run_student_operational_pipeline(
 
 
 def _physical_eval_schedule_args(
-    schedule_tool: Tool, unit: str, schedule_date: str
+    schedule_tool: Tool,
+    unit: str,
+    schedule_date: str,
+    cpf: str | None = None,
 ) -> dict:
     declared_params = {
         p.get("name")
@@ -2090,6 +2148,8 @@ def _physical_eval_schedule_args(
         args["data"] = schedule_date
     if "dia" in declared_params:
         args["dia"] = schedule_date
+    if cpf and "cpf" in declared_params:
+        args["cpf"] = cpf
     return args
 
 
@@ -2122,16 +2182,6 @@ def _resolve_physical_eval_chosen_time(
             "[avaliacao-fisica] escolha ignorada — lista de horarios ainda nao foi "
             "mostrada (conversa=%s, user_text=%r, offered=%r, data=%r)",
             conversation.id, user_text, offered, schedule_date,
-        )
-        return None
-
-    offered_period = offered.get("period")
-    pref_period = pref.get("period")
-    if offered_period and pref_period and offered_period != pref_period:
-        logger.info(
-            "[avaliacao-fisica] escolha ignorada — periodo mudou "
-            "(conversa=%s, offered=%r, periodo=%r)",
-            conversation.id, offered, pref_period,
         )
         return None
 
@@ -2249,12 +2299,16 @@ async def _run_physical_eval_pipeline(
     pref = _physical_eval_schedule_preference(
         user_text, recent_customer_texts, brazil_now
     )
-    schedule_date = pref["date"]
+    schedule_date, pref = _physical_eval_offered_schedule_context(conversation, pref)
     if not schedule_date:
         return _physical_eval_ask_day_reply(unit, lead), lead
 
     if _schedule_date_is_weekend(schedule_date):
         return _physical_eval_weekend_reply(schedule_date, lead), lead
+
+    schedule_args = _physical_eval_schedule_args(
+        schedule_tool, unit, schedule_date, cpf=cpf
+    )
 
     # Cliente já escolheu um horário específico (número da lista ou horário
     # explícito) — confirma a reserva de verdade em vez de consultar os
@@ -2268,6 +2322,11 @@ async def _run_physical_eval_pipeline(
         chosen_time = _resolve_physical_eval_chosen_time(
             user_text, conversation, schedule_date, pref
         )
+        if not chosen_time and _wants_any_available_slot(user_text):
+            offered_ctx = conversation.physical_eval_offered_slots or {}
+            offered_slots = offered_ctx.get("slots") or []
+            if offered_slots and offered_ctx.get("date") == schedule_date:
+                chosen_time = offered_slots[0]
     logger.info(
         "[avaliacao-fisica] chosen_time=%r (conversa=%s, book_tool=%s)",
         chosen_time, conversation.id, bool(book_tool),
@@ -2306,23 +2365,90 @@ async def _run_physical_eval_pipeline(
                 db, conversation, tools_by_key, f"ferramenta {book_tool.tool_key} falhou"
             )
         else:
-            # Não-técnico (ex: 409 do Pacto porque o horário foi ocupado
-            # entre a consulta e a confirmação) — mensagem própria em vez de
-            # repassar o texto do n8n, que é escrito pra orientar a IA, não
-            # pro cliente ler direto.
-            reply = (
-                "Esse horário já não está mais disponível — alguém deve ter reservado antes. "
-                "Consegue me dizer outro horário da lista que te mostrei? 😊"
-            )
+            offered = conversation.physical_eval_offered_slots or {}
+            remaining = [h for h in (offered.get("slots") or []) if h != chosen_time]
+            if remaining:
+                conversation.physical_eval_offered_slots = {
+                    **offered,
+                    "date": schedule_date,
+                    "slots": remaining,
+                }
+                db.add(conversation)
+            book_msg = _normalize_text(str(book_result.get("mensagem") or ""))
+            book_dados = book_result.get("dados") if isinstance(book_result.get("dados"), dict) else {}
+            conflito_existente = any(
+                phrase in book_msg
+                for phrase in (
+                    "conflita",
+                    "ja possui",
+                    "já possui",
+                    "agendamento existente",
+                    "ja tem agendamento",
+                    "reagend",
+                    "remarc",
+                )
+            ) or bool(book_dados.get("reagendamento_necessario"))
+            if conflito_existente and (
+                _physical_eval_reschedule_intent(user_text, recent_customer_texts)
+                or "conflita" in book_msg
+            ):
+                transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+                reason = "Reagendamento de bioimpedância — cliente já possui agendamento ativo"
+                reply = (
+                    "Vi que você já tem uma avaliação agendada e quer remarcar. "
+                    "Vou te encaminhar para a recepção concluir o reagendamento com você. 😊"
+                )
+                if transfer_tool and transfer_tool.webhook_url and conversation.status != "with_human":
+                    await execute_tool(db, transfer_tool, {"motivo": reason}, conversation)
+                    reply = f"{reply} Um atendente continua com você em instantes!"
+                return reply, lead
+
+            refresh_reply = None
+            schedule_result = await execute_tool(db, schedule_tool, schedule_args, conversation)
+            if schedule_result.get("sucesso"):
+                refresh_reply = await _reply_from_schedule_tool_result(
+                    user_text,
+                    schedule_result,
+                    lead,
+                    recent_customer_texts=recent_customer_texts,
+                    brazil_now=brazil_now,
+                    tool_arguments=_physical_eval_schedule_args(
+                        schedule_tool, unit, schedule_date, cpf=cpf
+                    ),
+                    conversation=conversation,
+                )
+                db.add(conversation)
+            if _physical_eval_reschedule_intent(user_text, recent_customer_texts) and not remaining:
+                transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+                reason = (
+                    "Reagendamento de bioimpedância/avaliação física — horários indisponíveis "
+                    "pelo chat; cliente precisa remarcar manualmente."
+                )
+                reply = (
+                    "Não consegui confirmar nenhum horário disponível agora pelo sistema. "
+                    "Vou te encaminhar para a recepção da unidade remarcar sua avaliação, tudo bem?"
+                )
+                if transfer_tool and transfer_tool.webhook_url and conversation.status != "with_human":
+                    await execute_tool(db, transfer_tool, {"motivo": reason}, conversation)
+                    reply = f"{reply} Um atendente continua com você em instantes! 😊"
+                return reply, lead
+            if refresh_reply:
+                reply = (
+                    "Esse horário já não está mais disponível — alguém deve ter reservado antes.\n\n"
+                    f"{refresh_reply}"
+                )
+            else:
+                reply = (
+                    "Esse horário já não está mais disponível — alguém deve ter reservado antes. "
+                    "Consegue me dizer outro horário da lista que te mostrei? 😊"
+                )
         return reply, lead
 
     logger.info(
         "[avaliacao-fisica] sem chosen_time resolvido — caindo na consulta normal (conversa=%s, user_text=%r)",
         conversation.id, user_text,
     )
-    args = _physical_eval_schedule_args(schedule_tool, unit, schedule_date)
-
-    schedule_result = await execute_tool(db, schedule_tool, args, conversation)
+    schedule_result = await execute_tool(db, schedule_tool, schedule_args, conversation)
     if schedule_result.get("sucesso"):
         reply = await _reply_from_schedule_tool_result(
             user_text,
@@ -2330,7 +2456,7 @@ async def _run_physical_eval_pipeline(
             lead,
             recent_customer_texts=recent_customer_texts,
             brazil_now=brazil_now,
-            tool_arguments=args,
+            tool_arguments=schedule_args,
             conversation=conversation,
         )
         logger.info(
@@ -3077,7 +3203,31 @@ async def execute_tool(
     return data
 
 
-async def _send_single_plan_image(db: AsyncSession, tool: Tool, image: dict, conversation: Conversation) -> bool:
+async def _resolve_plan_images_tool(db: AsyncSession, conversation: Conversation) -> Tool | None:
+    """Ferramenta enviar_imagens_planos da integração/conversa atual."""
+    result = await db.execute(
+        select(Tool).where(
+            Tool.company_id == conversation.company_id,
+            Tool.is_active.is_(True),
+            Tool.tool_key == TOOL_KEY_SEND_PLAN_IMAGES,
+            or_(Tool.integration_id.is_(None), Tool.integration_id == conversation.integration_id),
+        )
+    )
+    tools = result.scalars().all()
+    if not tools:
+        return None
+    # Escopada por integração vence a global (mesma regra do generate_ai_reply).
+    return sorted(tools, key=lambda t: t.integration_id is not None)[-1]
+
+
+async def _send_single_plan_image(
+    db: AsyncSession,
+    tool: Tool,
+    image: dict,
+    conversation: Conversation,
+    *,
+    raw_payload_extra: dict | None = None,
+) -> bool:
     """Manda o webhook da ferramenta pra UMA imagem só e espera a resposta
     antes de devolver — usado pra garantir que a legenda (texto) só saia
     depois que a imagem já foi confirmada enviada, mantendo a ordem certa
@@ -3125,7 +3275,7 @@ async def _send_single_plan_image(db: AsyncSession, tool: Tool, image: dict, con
             text=f"{image['plano']} ({image['unidade']})",
             timestamp=datetime.now(timezone.utc),
             actor="ai",
-            raw_payload={"images": [image]},
+            raw_payload={"images": [image], **(raw_payload_extra or {})},
         ),
     )
     return True

@@ -1,13 +1,15 @@
 """Promoções configuráveis — elegibilidade e transferência."""
 import uuid
 from datetime import date
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.models import Message, Promotion
+from app.models import Conversation, Message, Promotion, Tool
 from app.services.promotions import (
     get_active_promotions,
     promotion_transfer_active,
+    send_promotion_to_client,
     wants_promotion_inquiry,
     woman_context_in_conversation,
 )
@@ -86,3 +88,51 @@ def test_woman_context_and_transfer_gate():
     ]
     assert promotion_transfer_active("Quero sim", history, ["sou mulher"], promo) is True
     assert promotion_transfer_active("Quero sim", history, [], promo) is False
+
+
+@pytest.mark.asyncio
+async def test_send_promotion_banner_uses_plan_image_webhook(db_session, company):
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5593999999999",
+        channel="whatsapp",
+        status="open",
+        ai_enabled=True,
+    )
+    db_session.add(conv)
+    await db_session.flush()
+    promo = Promotion(
+        company_id=company.id,
+        title="Outubro Rosa",
+        message="50% na primeira mensalidade",
+        image_url="https://exemplo.com/banner.webp",
+        is_active=True,
+    )
+    db_session.add(promo)
+    await db_session.commit()
+
+    with patch(
+        "app.services.message_flow._resolve_plan_images_tool",
+        new_callable=AsyncMock,
+        return_value=Tool(
+            company_id=company.id,
+            name="Planos",
+            tool_key="enviar_imagens_planos",
+            webhook_url="https://example.com/planos",
+            is_active=True,
+        ),
+    ), patch(
+        "app.services.message_flow._send_single_plan_image",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as send_image_mock, patch(
+        "app.services.message_flow.send_outbound",
+        new_callable=AsyncMock,
+    ) as outbound_mock:
+        await send_promotion_to_client(db_session, conv, promo)
+
+    send_image_mock.assert_awaited_once()
+    assert send_image_mock.await_args.args[2]["url"] == promo.image_url
+    outbound_mock.assert_awaited_once()
+    assert outbound_mock.await_args.args[2] == promo.message.strip()
+    assert promo.image_url not in str(outbound_mock.await_args)

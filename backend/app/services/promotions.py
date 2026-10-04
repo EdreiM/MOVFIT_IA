@@ -206,34 +206,62 @@ async def send_promotion_to_client(
     promotion: Promotion,
 ) -> None:
     from app.adapters.base import NormalizedMessageEvent
-    from app.services.message_flow import save_message, send_outbound
+    from app.services.message_flow import (
+        _resolve_plan_images_tool,
+        _send_single_plan_image,
+        save_message,
+        send_outbound,
+    )
 
     is_test = conversation.channel == "test_console"
     company_id = conversation.company_id
 
     if promotion.image_url:
-        await save_message(
-            db,
-            conversation,
-            NormalizedMessageEvent(
-                event_type="message_outbound",
-                external_message_id=None,
-                external_conversation_id=conversation.external_conversation_id,
-                channel_to=None,
-                contact_phone=conversation.contact_phone,
-                content_type="image",
-                text=promotion.title,
-                timestamp=datetime.now(timezone.utc),
-                actor="ai",
-                raw_payload={
+        plan_tool = await _resolve_plan_images_tool(db, conversation)
+        image_payload = {
+            "unidade": "Promoção",
+            "plano": promotion.title,
+            "url": promotion.image_url,
+        }
+        sent = False
+        if plan_tool and plan_tool.webhook_url:
+            sent = await _send_single_plan_image(
+                db,
+                plan_tool,
+                image_payload,
+                conversation,
+                raw_payload_extra={
                     "promotion_id": str(promotion.id),
-                    "image_url": promotion.image_url,
-                    "generated": True,
+                    "promotion_banner": True,
                 },
-            ),
-        )
-        if not is_test:
-            await send_outbound(db, company_id, conversation, promotion.image_url)
+            )
+        if not sent:
+            logger.warning(
+                "Banner da promoção %s não enviado — ferramenta enviar_imagens_planos ausente ou falhou",
+                promotion.title,
+            )
+            await save_message(
+                db,
+                conversation,
+                NormalizedMessageEvent(
+                    event_type="message_outbound",
+                    external_message_id=None,
+                    external_conversation_id=conversation.external_conversation_id,
+                    channel_to=None,
+                    contact_phone=conversation.contact_phone,
+                    content_type="image",
+                    text=promotion.title,
+                    timestamp=datetime.now(timezone.utc),
+                    actor="ai",
+                    raw_payload={
+                        "promotion_id": str(promotion.id),
+                        "image_url": promotion.image_url,
+                        "generated": True,
+                        "promotion_banner": True,
+                        "delivery_failed": True,
+                    },
+                ),
+            )
 
     await save_message(
         db,
