@@ -2566,6 +2566,35 @@ _TOUR_CONFIRM_START_WORDS = {
     "confirmo",
 }
 
+_END_CONVERSATION_MARKERS = (
+    "encerrar o atendimento",
+    "encerrar atendimento",
+    "encerrar esse atendimento",
+    "encerrar por aqui",
+    "pode encerrar",
+    "pode finalizar",
+    "finalizar o atendimento",
+    "finalizar atendimento",
+    "fechar o atendimento",
+    "fechar atendimento",
+    "nao preciso de mais nada",
+    "não preciso de mais nada",
+    "so isso obrigado",
+    "só isso obrigado",
+    "e so isso",
+    "é só isso",
+)
+
+
+def _wants_end_conversation(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    normalized = _normalize_text(text)
+    if any(marker in normalized for marker in _END_CONVERSATION_MARKERS):
+        return True
+    tokens = _normalize_tokens(text)
+    return bool(tokens & {"encerrar", "finalizar", "fechar"} and "atendimento" in normalized)
+
 _GENERIC_PLAN_CLOSING_PHRASES = (
     "deseja mais alguma informacao",
     "posso ajudar com mais alguma coisa",
@@ -2596,6 +2625,8 @@ def _wants_gym_tour_explicit(text: str) -> bool:
 
 def _confirms_gym_tour(text: str) -> bool:
     if not text or not text.strip():
+        return False
+    if _wants_end_conversation(text):
         return False
     if _wants_gym_tour_explicit(text):
         return True
@@ -2666,6 +2697,8 @@ def _plan_tour_transfer_active(
 ) -> bool:
     # Tour ≠ avaliação física: confirmação ou pedido explícito → transferir
     # direto, sem CPF, unidade ou consulta de horários.
+    if _wants_end_conversation(user_text):
+        return False
     if _wants_gym_tour_explicit(user_text):
         return True
     if not _confirms_gym_tour(user_text):
@@ -2797,6 +2830,19 @@ async def _run_internal_store_transfer_pipeline(
             conversation,
         )
     return f"{reply} Um atendente continua com você em instantes! 😊"
+
+
+def _run_end_conversation_pipeline(
+    tools_by_key: dict[str, Tool],
+) -> tuple[str, tuple[Tool, dict] | None]:
+    """Cliente pediu encerrar — adia encerrar_atendimento até depois da despedida."""
+    end_tool = tools_by_key.get(TOOL_KEY_END)
+    reply = (
+        "Por nada! Fico feliz em ter ajudado. "
+        "Encerrando seu atendimento por aqui — qualquer coisa, é só chamar. 😊"
+    )
+    deferred_end = (end_tool, {}) if end_tool and end_tool.webhook_url else None
+    return reply, deferred_end
 
 
 async def _run_plan_tour_transfer_pipeline(
@@ -3694,6 +3740,10 @@ async def generate_ai_reply(
     has_verify_unit_tool = TOOL_KEY_VERIFY_UNIT_BY_CPF in tools_by_key
 
     ai_name = config.ai_name or "assistente virtual"
+
+    if _wants_end_conversation(user_text):
+        end_reply, deferred_end = _run_end_conversation_pipeline(tools_by_key)
+        return end_reply, deferred_end, False
 
     tour_context_active = _tour_discussed_in_conversation(history, recent_customer_texts) or _wants_gym_tour_explicit(
         user_text

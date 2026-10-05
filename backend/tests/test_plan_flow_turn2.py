@@ -11,6 +11,7 @@ from app.services.message_flow import (
     _already_offers_tour,
     _apply_post_plans_tour_closing,
     _confirms_gym_tour,
+    _wants_end_conversation,
     _confirms_is_student,
     _extract_cpf_from_text,
     _format_guest_tool_reply,
@@ -289,6 +290,26 @@ def test_tour_transfer_on_sim_with_extra_context():
 
 def test_tour_transfer_without_plans_when_client_asks_directly():
     assert _plan_tour_transfer_active("Quero agendar um tour na unidade", []) is True
+
+
+def test_end_conversation_not_confused_with_tour_confirmation():
+    from app.models import Message
+
+    history = [
+        Message(
+            conversation_id=__import__("uuid").uuid4(),
+            company_id=__import__("uuid").uuid4(),
+            direction="outbound",
+            actor="ai",
+            content_type="text",
+            text="Se quiser, posso agendar um tour para você conhecer a academia pessoalmente.",
+        )
+    ]
+    user_text = "Obrigado, pode encerrar o atendimento"
+
+    assert _wants_end_conversation(user_text) is True
+    assert _confirms_gym_tour(user_text) is False
+    assert _plan_tour_transfer_active(user_text, history) is False
 
 
 def test_history_compacts_long_plan_captions():
