@@ -17,7 +17,7 @@ router = APIRouter(prefix="/promotions", tags=["promotions"])
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "promotions")
 ALLOWED_IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-STORED_IMAGE_EXTENSIONS = {".jpg", ".webp"}
+STORED_IMAGE_EXTENSIONS = {".jpg", ".png", ".webp"}
 
 
 def _resolve_image_ext(file: UploadFile) -> str | None:

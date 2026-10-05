@@ -105,7 +105,7 @@ async def test_send_promotion_banner_uses_plan_image_webhook(db_session, company
         company_id=company.id,
         title="Outubro Rosa",
         message="50% na primeira mensalidade",
-        image_url="https://exemplo.com/banner.webp",
+        image_url="https://exemplo.com/uploads/promotions/banner.png",
         is_active=True,
     )
     db_session.add(promo)

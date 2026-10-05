@@ -208,6 +208,8 @@ async def send_promotion_to_client(
     unit_name: str | None = None,
 ) -> None:
     from app.adapters.base import NormalizedMessageEvent
+    from app.config import get_settings
+    from app.services.image_upload import ensure_whatsapp_delivery_url
     from app.services.message_flow import (
         _build_imagem_plano_entry,
         _resolve_plan_images_tool,
@@ -220,15 +222,18 @@ async def send_promotion_to_client(
     company_id = conversation.company_id
 
     if promotion.image_url:
-        if promotion.image_url.lower().rstrip("/").endswith(".webp"):
-            logger.warning(
-                "Banner da promoção %s está em WEBP — faça re-upload no painel "
-                "(JPEG) para o WhatsApp não receber como documento",
-                promotion.title,
-            )
+        settings = get_settings()
+        delivery_url = ensure_whatsapp_delivery_url(
+            promotion.id,
+            promotion.image_url,
+            settings.public_base_url,
+        )
+        if delivery_url and delivery_url != promotion.image_url:
+            promotion.image_url = delivery_url
+            await db.flush()
         plan_tool = await _resolve_plan_images_tool(db, conversation)
         image_payload = _build_imagem_plano_entry(
-            url=promotion.image_url,
+            url=delivery_url or promotion.image_url,
             unidade=unit_name or promotion.title,
             plano=promotion.title,
         )
