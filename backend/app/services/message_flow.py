@@ -3220,6 +3220,20 @@ async def _resolve_plan_images_tool(db: AsyncSession, conversation: Conversation
     return sorted(tools, key=lambda t: t.integration_id is not None)[-1]
 
 
+def _build_imagem_plano_entry(
+    *,
+    url: str,
+    unidade: str,
+    plano: str,
+    legenda: str | None = None,
+) -> dict:
+    """Formato único de `contexto.imagens_planos[]` pro webhook envia_imagem (n8n)."""
+    entry: dict = {"unidade": unidade, "plano": plano, "url": url}
+    if legenda:
+        entry["legenda"] = legenda
+    return entry
+
+
 async def _send_single_plan_image(
     db: AsyncSession,
     tool: Tool,
@@ -3231,7 +3245,9 @@ async def _send_single_plan_image(
     """Manda o webhook da ferramenta pra UMA imagem só e espera a resposta
     antes de devolver — usado pra garantir que a legenda (texto) só saia
     depois que a imagem já foi confirmada enviada, mantendo a ordem certa
-    (imagem, depois descrição) por plano em vez de mandar tudo de uma vez."""
+    (imagem, depois descrição) por plano em vez de mandar tudo de uma vez.
+
+    Também usado pro banner de promoção — o n8n lê só `imagens_planos[0].url`."""
     is_test = conversation.channel == "test_console"
     payload = {
         "ferramenta": tool.tool_key,
@@ -4585,7 +4601,12 @@ async def generate_ai_reply(
         ):
             promotions_to_send = active_promotions
     if promotions_to_send:
-        promo_sent = await present_promotions(db, conversation, promotions_to_send)
+        promo_sent = await present_promotions(
+            db,
+            conversation,
+            promotions_to_send,
+            unit_name=plan_unit.name if plan_unit else None,
+        )
         delivered_via_tools = delivered_via_tools or promo_sent > 0
 
     transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
@@ -4635,31 +4656,50 @@ async def generate_ai_reply(
     return final_text, deferred_end_call, delivered_via_tools
 
 
-async def send_outbound(
+def _guess_image_mimetype(image_url: str) -> str:
+    lower = image_url.lower().split("?", 1)[0]
+    if lower.endswith(".webp"):
+        return "image/webp"
+    if lower.endswith(".png"):
+        return "image/png"
+    return "image/jpeg"
+
+
+def _image_filename_from_url(image_url: str, fallback: str = "imagem.jpg") -> str:
+    path = image_url.split("?", 1)[0].rstrip("/").split("/")[-1]
+    if path and "." in path:
+        return path
+    return fallback
+
+
+async def _iter_outbound_integrations(
     db: AsyncSession,
     company_id: UUID,
     conversation: Conversation,
-    text: str,
-) -> None:
+):
     if conversation.integration_id:
-        # Conversa tem origem conhecida — manda só pra ela, não pra todas as
-        # integrações ativas da empresa (senão uma resposta de um canal
-        # vazaria/duplicaria pros outros).
         stmt = select(Integration).where(
             Integration.id == conversation.integration_id,
             Integration.is_active.is_(True),
             Integration.outbound_url.is_not(None),
         )
     else:
-        # Conversa antiga ou sem integração rastreada (ex: número cadastrado
-        # manualmente) — mantém o comportamento anterior como fallback.
         stmt = select(Integration).where(
             Integration.company_id == company_id,
             Integration.is_active.is_(True),
             Integration.outbound_url.is_not(None),
         )
     result = await db.execute(stmt)
-    integrations = result.scalars().all()
+    return result.scalars().all()
+
+
+async def send_outbound(
+    db: AsyncSession,
+    company_id: UUID,
+    conversation: Conversation,
+    text: str,
+) -> None:
+    integrations = await _iter_outbound_integrations(db, company_id, conversation)
     payload = {
         "conversation_id": str(conversation.id),
         "external_conversation_id": conversation.external_conversation_id,
@@ -4678,6 +4718,57 @@ async def send_outbound(
                 await client.post(integ.outbound_url, json=payload)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Outbound para %s falhou: %s", integ.name, exc)
+
+
+async def send_outbound_image(
+    db: AsyncSession,
+    company_id: UUID,
+    conversation: Conversation,
+    image_url: str,
+    *,
+    caption: str | None = None,
+) -> bool:
+    """Envia imagem direto na integração (Evolution sendMedia) — não passa pelo n8n de planos."""
+    integrations = await _iter_outbound_integrations(db, company_id, conversation)
+    if not integrations:
+        return False
+
+    mimetype = _guess_image_mimetype(image_url)
+    filename = _image_filename_from_url(image_url)
+    sent = False
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for integ in integrations:
+            if integ.adapter_key == "evolution_api_v1":
+                ok = await _send_evolution_media_outbound(
+                    db,
+                    client,
+                    integ,
+                    conversation,
+                    image_url,
+                    mimetype=mimetype,
+                    file_name=filename,
+                    caption=caption,
+                )
+                sent = sent or ok
+                continue
+            if not integ.outbound_url:
+                continue
+            payload = {
+                "conversation_id": str(conversation.id),
+                "external_conversation_id": conversation.external_conversation_id,
+                "contact_phone": conversation.contact_phone,
+                "actor": "ai",
+                "content_type": "image",
+                "media_url": image_url,
+                "text": caption or "",
+            }
+            try:
+                resp = await client.post(integ.outbound_url, json=payload)
+                if resp.status_code < 400:
+                    sent = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Outbound imagem para %s falhou: %s", integ.name, exc)
+    return sent
 
 
 def _sanitize_evolution_number(phone: str) -> str:
@@ -4732,6 +4823,69 @@ async def _send_evolution_outbound(
         log.status = "error"
         log.error_message = str(exc)
         logger.warning("Evolution outbound %s falhou: %s", integration.name, exc)
+
+
+async def _send_evolution_media_outbound(
+    db: AsyncSession,
+    client: httpx.AsyncClient,
+    integration: Integration,
+    conversation: Conversation,
+    media_url: str,
+    *,
+    mimetype: str,
+    file_name: str,
+    caption: str | None = None,
+) -> bool:
+    config = integration.config or {}
+    instance_name = config.get("instance_name") or config.get("instanceName")
+    encrypted_token = config.get("instance_token_encrypted")
+    if not integration.outbound_url or not instance_name or not encrypted_token:
+        logger.warning("Integração Evolution %s incompleta para outbound de mídia", integration.name)
+        return False
+
+    number = _sanitize_evolution_number(conversation.contact_phone)
+    if not number:
+        logger.warning("Número inválido para Evolution media outbound: %s", conversation.contact_phone)
+        return False
+
+    url = f"{integration.outbound_url.rstrip('/')}/message/sendMedia/{instance_name}"
+    body: dict = {
+        "number": number,
+        "mediatype": "image",
+        "mimetype": mimetype,
+        "media": media_url,
+        "fileName": file_name,
+    }
+    if caption:
+        body["caption"] = caption
+
+    headers = {
+        "apikey": decrypt_secret(str(encrypted_token)),
+        "Content-Type": "application/json",
+    }
+    log = WebhookLog(
+        company_id=integration.company_id,
+        integration_id=integration.id,
+        direction="outbound",
+        status="received",
+        payload={"url": url, "body": body},
+    )
+    db.add(log)
+    await db.flush()
+    try:
+        response = await client.post(url, headers=headers, json=body)
+        log.http_status = response.status_code
+        log.status = "ok" if response.status_code < 400 else "error"
+        if response.status_code >= 400:
+            log.error_message = response.text
+            logger.warning("Evolution media outbound %s falhou: %s", integration.name, response.text)
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.status = "error"
+        log.error_message = str(exc)
+        logger.warning("Evolution media outbound %s falhou: %s", integration.name, exc)
+        return False
 
 
 async def reply_to_pending_messages(

@@ -16,7 +16,7 @@ def test_optimize_uploaded_image_shrinks_large_png():
     raw = _make_png(2400, 4200)
     optimized, ext = optimize_uploaded_image(raw)
 
-    assert ext in {".webp", ".jpg"}
+    assert ext == ".jpg"
     assert len(optimized) <= MAX_STORED_BYTES
     out = Image.open(BytesIO(optimized))
     assert max(out.size) <= 1600

@@ -118,7 +118,7 @@ async def test_send_promotion_banner_uses_plan_image_webhook(db_session, company
             company_id=company.id,
             name="Planos",
             tool_key="enviar_imagens_planos",
-            webhook_url="https://example.com/planos",
+            webhook_url="https://example.com/envia_imagem",
             is_active=True,
         ),
     ), patch(
@@ -129,10 +129,18 @@ async def test_send_promotion_banner_uses_plan_image_webhook(db_session, company
         "app.services.message_flow.send_outbound",
         new_callable=AsyncMock,
     ) as outbound_mock:
-        await send_promotion_to_client(db_session, conv, promo)
+        await send_promotion_to_client(
+            db_session,
+            conv,
+            promo,
+            unit_name="Santarém - Nova República",
+        )
 
     send_image_mock.assert_awaited_once()
-    assert send_image_mock.await_args.args[2]["url"] == promo.image_url
+    image_payload = send_image_mock.await_args.args[2]
+    assert image_payload["url"] == promo.image_url
+    assert image_payload["unidade"] == "Santarém - Nova República"
+    assert image_payload["plano"] == promo.title
     outbound_mock.assert_awaited_once()
     assert outbound_mock.await_args.args[3] == promo.message.strip()
     assert promo.image_url not in str(outbound_mock.await_args)

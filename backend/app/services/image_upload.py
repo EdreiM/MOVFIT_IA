@@ -13,8 +13,7 @@ MAX_LONGEST_SIDE = 1600
 def optimize_uploaded_image(content: bytes) -> tuple[bytes, str]:
     """Redimensiona e comprime artes grandes (ex.: banner Outubro Rosa em PNG).
 
-    Aceita uploads pesados e grava uma versão leve (.webp ou .jpg) pronta
-    para WhatsApp e preview no painel.
+    Aceita uploads pesados e grava JPEG leve pronto para WhatsApp e preview no painel.
     """
     img = ImageOps.exif_transpose(Image.open(BytesIO(content)))
     if img.mode in ("RGBA", "LA", "P"):
@@ -31,12 +30,14 @@ def optimize_uploaded_image(content: bytes) -> tuple[bytes, str]:
         scale = MAX_LONGEST_SIDE / longest
         img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
+    # JPEG primeiro — WhatsApp/Evolution não tratam WEBP como imagem inline
+    # de forma confiável (vira documento .txt/.bin no cliente).
     for quality in (85, 75, 65, 55, 45):
         buf = BytesIO()
-        img.save(buf, format="WEBP", quality=quality, method=6)
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
         data = buf.getvalue()
         if len(data) <= MAX_STORED_BYTES:
-            return data, ".webp"
+            return data, ".jpg"
 
     while max(img.size) > 800:
         w, h = img.size

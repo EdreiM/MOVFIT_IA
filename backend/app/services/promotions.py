@@ -204,9 +204,12 @@ async def send_promotion_to_client(
     db: AsyncSession,
     conversation: Conversation,
     promotion: Promotion,
+    *,
+    unit_name: str | None = None,
 ) -> None:
     from app.adapters.base import NormalizedMessageEvent
     from app.services.message_flow import (
+        _build_imagem_plano_entry,
         _resolve_plan_images_tool,
         _send_single_plan_image,
         save_message,
@@ -217,12 +220,18 @@ async def send_promotion_to_client(
     company_id = conversation.company_id
 
     if promotion.image_url:
+        if promotion.image_url.lower().rstrip("/").endswith(".webp"):
+            logger.warning(
+                "Banner da promoção %s está em WEBP — faça re-upload no painel "
+                "(JPEG) para o WhatsApp não receber como documento",
+                promotion.title,
+            )
         plan_tool = await _resolve_plan_images_tool(db, conversation)
-        image_payload = {
-            "unidade": "Promoção",
-            "plano": promotion.title,
-            "url": promotion.image_url,
-        }
+        image_payload = _build_imagem_plano_entry(
+            url=promotion.image_url,
+            unidade=unit_name or promotion.title,
+            plano=promotion.title,
+        )
         sent = False
         if plan_tool and plan_tool.webhook_url:
             sent = await _send_single_plan_image(
@@ -236,10 +245,16 @@ async def send_promotion_to_client(
                 },
             )
         if not sent:
-            logger.warning(
-                "Banner da promoção %s não enviado — ferramenta enviar_imagens_planos ausente ou falhou",
-                promotion.title,
-            )
+            if not plan_tool or not plan_tool.webhook_url:
+                logger.warning(
+                    "Banner da promoção %s não enviado — ferramenta enviar_imagens_planos ausente",
+                    promotion.title,
+                )
+            elif not is_test:
+                logger.warning(
+                    "Banner da promoção %s não enviado — webhook enviar_imagens_planos falhou",
+                    promotion.title,
+                )
             await save_message(
                 db,
                 conversation,
@@ -287,6 +302,8 @@ async def present_promotions(
     db: AsyncSession,
     conversation: Conversation,
     promotions: list[Promotion],
+    *,
+    unit_name: str | None = None,
 ) -> int:
     if not promotions:
         return 0
@@ -296,7 +313,7 @@ async def present_promotions(
         pid = str(promotion.id)
         if pid in sent_ids:
             continue
-        await send_promotion_to_client(db, conversation, promotion)
+        await send_promotion_to_client(db, conversation, promotion, unit_name=unit_name)
         sent_ids.add(pid)
         count += 1
     return count
