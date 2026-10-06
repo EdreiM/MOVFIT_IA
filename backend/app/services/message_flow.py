@@ -903,7 +903,7 @@ _INTERNAL_OR_GENERIC_TOOL_KEYS = frozenset(
 )
 
 _PHYSICAL_EVAL_KEYWORDS = {"avaliacao", "avaliacoes", "agendar", "agendamento", "marcar", "marca"}
-_PHYSICAL_EVAL_BODY_KEYWORDS = {"fisica", "fisico", "fisicas", "fisicos"}
+_PHYSICAL_EVAL_BODY_KEYWORDS = {"fisica", "fisico", "fisicas", "fisicos", "bioimpedancia"}
 _DATE_YYYYMMDD_RE = re.compile(r"\b(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b")
 _DATE_DMY_RE = re.compile(
     r"\b(0?[1-9]|[12]\d|3[01])[/.-](0?[1-9]|1[0-2])(?:[/.-]((?:20)?\d{2}))?\b"
@@ -944,6 +944,33 @@ def _is_physical_eval_intent(text: str) -> bool:
 def _physical_eval_in_recent(recent_customer_texts: list[str] | None) -> bool:
     prior = [t for t in (recent_customer_texts or []) if t and t.strip()]
     return any(_is_physical_eval_intent(t) for t in prior[-8:])
+
+
+def _physical_eval_ai_scheduling_context(history: list[Message]) -> bool:
+    """IA acabou de pedir unidade/data/horário de avaliação ou bioimpedância."""
+    for message in reversed([m for m in history if m.actor == "ai" and m.text][-4:]):
+        normalized = _normalize_text(message.text or "")
+        if "bioimpedancia" in normalized or "avaliacao fisica" in normalized:
+            return True
+        if "horarios disponiveis" in normalized and "unidade" in normalized:
+            return True
+        if "confirmar" in normalized and "unidade" in normalized:
+            return True
+    return False
+
+
+def _physical_eval_conversation_active(
+    user_text: str,
+    recent_customer_texts: list[str] | None,
+    history: list[Message] | None = None,
+) -> bool:
+    if _is_physical_eval_intent(user_text):
+        return True
+    if _physical_eval_in_recent(recent_customer_texts):
+        return True
+    if history and _physical_eval_ai_scheduling_context(history):
+        return True
+    return False
 
 
 def _physical_eval_reschedule_intent(
@@ -1015,11 +1042,15 @@ def _physical_eval_followup(
     text: str,
     recent_customer_texts: list[str] | None,
     lead: Lead | None = None,
+    history: list[Message] | None = None,
 ) -> bool:
     """CPF, data, período ou horário depois que o cliente pediu avaliação física."""
     if _is_physical_eval_intent(text):
         return False
-    if not _physical_eval_in_recent(recent_customer_texts):
+    eval_context = _physical_eval_in_recent(recent_customer_texts) or (
+        history and _physical_eval_ai_scheduling_context(history)
+    )
+    if not eval_context:
         return False
     if _extract_cpf_from_text(text):
         return True
@@ -1042,6 +1073,14 @@ def _physical_eval_followup(
         return True
     tokens = _normalize_tokens(text)
     if tokens & set(_WEEKDAY_TO_INDEX) and len(tokens) <= 5:
+        return True
+    if tokens <= {"sim", "certo", "isso", "exato", "ok", "claro", "confirmo", "isso mesmo"}:
+        return True
+    if (
+        len(tokens) <= 4
+        and not _wants_gym_tour_explicit(text)
+        and not _wants_plan_info(text, recent_customer_texts)
+    ):
         return True
     return False
 
@@ -2699,6 +2738,8 @@ def _plan_tour_transfer_active(
     # direto, sem CPF, unidade ou consulta de horários.
     if _wants_end_conversation(user_text):
         return False
+    if _physical_eval_conversation_active(user_text, recent_customer_texts, history):
+        return False
     if _wants_gym_tour_explicit(user_text):
         return True
     if not _confirms_gym_tour(user_text):
@@ -2799,6 +2840,73 @@ def _internal_store_product_active(text: str, recent_customer_texts: list[str] |
     if not any(_text_mentions_internal_store_product(t) for t in prior[-3:]):
         return False
     return len(_normalize_tokens(text)) <= 6
+
+
+_APP_SUPPORT_OPERATIONAL_MARKERS = (
+    "bioimpedancia",
+    "sem treino",
+    "bloqueado",
+    "nao consigo treinar",
+    "nao aparece",
+    "login",
+    "senha",
+    "marcar",
+    "agendar",
+)
+
+
+def _mentions_mobile_app(text: str) -> bool:
+    normalized = _normalize_text(text or "")
+    if "aplicativo" in normalized:
+        return True
+    return bool(re.search(r"\bapp\b", normalized))
+
+
+def _wants_app_support_transfer(
+    text: str,
+    recent_customer_texts: list[str] | None = None,
+) -> bool:
+    """Problema operacional no app (bio, treino bloqueado etc.) → atendente humano."""
+    burst = [text] + [t for t in (recent_customer_texts or [])[-6:] if t and t.strip()]
+    if not any(_mentions_mobile_app(t) for t in burst):
+        return False
+    combined = " ".join(_normalize_text(t) for t in burst if t)
+    if any(marker in combined for marker in _APP_SUPPORT_OPERATIONAL_MARKERS):
+        return True
+    if _is_physical_eval_intent(text) or _physical_eval_in_recent(recent_customer_texts):
+        return True
+    return False
+
+
+async def _run_app_support_transfer_pipeline(
+    db: AsyncSession,
+    conversation: Conversation,
+    tools_by_key: dict[str, Tool],
+) -> str | None:
+    transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+    reply = (
+        "Entendi! Para resolver isso no *aplicativo*, vou te transferir agora "
+        "para um *atendente* que consegue verificar sua situação e te ajudar "
+        "com o agendamento ou liberação do treino. 😊"
+    )
+    if not transfer_tool or not transfer_tool.webhook_url:
+        return (
+            f"{reply} "
+            "Se preferir, fale direto na recepção da unidade que alguém te ajuda por lá."
+        )
+    if conversation.status != "with_human":
+        await execute_tool(
+            db,
+            transfer_tool,
+            {
+                "motivo": (
+                    "Cliente com dúvida ou problema no aplicativo "
+                    "(bioimpedância, treino bloqueado ou agendamento no app)."
+                )
+            },
+            conversation,
+        )
+    return f"{reply} Um atendente continua com você em instantes! 😊"
 
 
 async def _run_internal_store_transfer_pipeline(
@@ -3745,9 +3853,39 @@ async def generate_ai_reply(
         end_reply, deferred_end = _run_end_conversation_pipeline(tools_by_key)
         return end_reply, deferred_end, False
 
-    tour_context_active = _tour_discussed_in_conversation(history, recent_customer_texts) or _wants_gym_tour_explicit(
-        user_text
+    if _wants_app_support_transfer(user_text, recent_customer_texts):
+        app_reply = await _run_app_support_transfer_pipeline(db, conversation, tools_by_key)
+        if app_reply is not None:
+            return app_reply, None, False
+
+    guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
+    physical_eval_intent = _is_physical_eval_intent(user_text)
+    has_schedule_tool = _has_schedule_tool(tools_by_key)
+    physical_eval_active = (
+        has_verify_unit_tool
+        and has_schedule_tool
+        and not plan_intent_active
+        and (
+            physical_eval_intent
+            or _physical_eval_followup(user_text, recent_customer_texts, lead, history)
+            or _physical_eval_awaiting_slot_choice(user_text, conversation)
+        )
     )
+    if physical_eval_active:
+        pipeline_reply, lead = await _run_physical_eval_pipeline(
+            db,
+            conversation,
+            user_text,
+            tools_by_key,
+            lead,
+            config=config,
+            is_first_contact=is_first_contact,
+            ai_name=ai_name,
+            recent_customer_texts=recent_customer_texts,
+        )
+        if pipeline_reply is not None:
+            return pipeline_reply, None, False
+
     if _plan_tour_transfer_active(user_text, history, recent_customer_texts):
         tour_reply = await _run_plan_tour_transfer_pipeline(db, conversation, tools_by_key)
         if tour_reply is not None:
@@ -3772,35 +3910,6 @@ async def generate_ai_reply(
             None,
             False,
         )
-
-    guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
-    physical_eval_intent = _is_physical_eval_intent(user_text)
-    has_schedule_tool = _has_schedule_tool(tools_by_key)
-    physical_eval_active = (
-        has_verify_unit_tool
-        and has_schedule_tool
-        and not plan_intent_active
-        and not tour_context_active
-        and (
-            physical_eval_intent
-            or _physical_eval_followup(user_text, recent_customer_texts, lead)
-            or _physical_eval_awaiting_slot_choice(user_text, conversation)
-        )
-    )
-    if physical_eval_active:
-        pipeline_reply, lead = await _run_physical_eval_pipeline(
-            db,
-            conversation,
-            user_text,
-            tools_by_key,
-            lead,
-            config=config,
-            is_first_contact=is_first_contact,
-            ai_name=ai_name,
-            recent_customer_texts=recent_customer_texts,
-        )
-        if pipeline_reply is not None:
-            return pipeline_reply, None, False
 
     student_pipeline_active = has_verify_unit_tool and (
         ((student_operational or guest_who_followup) and not plan_intent_active)

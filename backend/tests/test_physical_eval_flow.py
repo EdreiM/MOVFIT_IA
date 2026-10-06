@@ -38,6 +38,7 @@ def test_physical_eval_intent_detected():
     assert _is_physical_eval_intent("Quero agendar avaliação física") is True
     assert _is_physical_eval_intent("Preciso marcar minha avaliação") is True
     assert _is_physical_eval_intent("Fazer a avaliação") is True
+    assert _is_physical_eval_intent("Queria marca minha Bioimpedância pra amanhã") is True
     assert _is_physical_eval_intent("Quais os horários de funcionamento?") is False
 
 
@@ -279,6 +280,14 @@ def test_physical_eval_followup_after_intent():
     assert _physical_eval_followup(
         "então terça",
         ["Quero agendar avaliação física", "52998224725", "segunda de manhã"],
+    ) is True
+    assert _physical_eval_followup(
+        "Sim",
+        ["Queria marca minha Bioimpedância pra amanhã", "No aplicativo"],
+    ) is True
+    assert _physical_eval_followup(
+        "Itaituba",
+        ["Queria marca minha Bioimpedância pra amanhã", "Sim"],
     ) is True
 
 

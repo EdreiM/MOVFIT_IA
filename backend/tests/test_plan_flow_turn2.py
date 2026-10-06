@@ -23,6 +23,7 @@ from app.services.message_flow import (
     _pick_student_operational_tool,
     _plan_flow_active,
     _plan_tour_transfer_active,
+    _wants_app_support_transfer,
     _run_student_operational_pipeline,
     _safe_tool_result_json,
     _student_operational_action,
@@ -290,6 +291,49 @@ def test_tour_transfer_on_sim_with_extra_context():
 
 def test_tour_transfer_without_plans_when_client_asks_directly():
     assert _plan_tour_transfer_active("Quero agendar um tour na unidade", []) is True
+
+
+def test_plan_tour_not_triggered_after_bioimpedancia_confirmation():
+    from app.models import Message
+
+    history = [
+        Message(
+            conversation_id=__import__("uuid").uuid4(),
+            company_id=__import__("uuid").uuid4(),
+            direction="outbound",
+            actor="ai",
+            content_type="text",
+            text="Se quiser, posso agendar um tour para você conhecer a academia pessoalmente.",
+        ),
+        Message(
+            conversation_id=__import__("uuid").uuid4(),
+            company_id=__import__("uuid").uuid4(),
+            direction="outbound",
+            actor="ai",
+            content_type="text",
+            text=(
+                "Rejane, para agendar sua avaliação física com bioimpedância, preciso confirmar "
+                "o nome exato da sua unidade. A sua unidade é Itaituba, certo?"
+            ),
+        ),
+    ]
+    recent = [
+        "Queria marca minha Bioimpedância pra amanhã",
+        "Porque to sem treino",
+        "No aplicativo",
+    ]
+    assert _plan_tour_transfer_active("Sim", history, recent) is False
+    assert _plan_tour_transfer_active("Itaituba", history, recent + ["Sim"]) is False
+
+
+def test_app_support_transfer_on_aplicativo_bioimpedancia():
+    recent = [
+        "Queria marca minha Bioimpedância pra amanhã",
+        "Porque to sem treino",
+    ]
+    assert _wants_app_support_transfer("No aplicativo", recent) is True
+    assert _wants_app_support_transfer("Sim", recent + ["No aplicativo"]) is True
+    assert _wants_app_support_transfer("Quero ver os planos", []) is False
 
 
 def test_end_conversation_not_confused_with_tour_confirmation():
