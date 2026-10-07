@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
@@ -9,6 +9,9 @@ type Conversation = {
   status: string;
   ai_enabled: boolean;
   last_message_at: string | null;
+  last_message_preview?: string | null;
+  last_message_actor?: string | null;
+  external_conversation_id?: string | null;
 };
 
 type Message = {
@@ -21,6 +24,19 @@ type Message = {
   created_at: string;
 };
 
+const STATUS_LABELS: Record<string, string> = {
+  open: "Aberta",
+  with_human: "Com atendente",
+  resolved: "Encerrada",
+};
+
+function actorLabel(actor: string | null | undefined): string {
+  if (actor === "customer") return "Cliente";
+  if (actor === "human_agent") return "Atendente";
+  if (actor === "ai") return "IA";
+  return actor || "";
+}
+
 export default function ConversationsPage() {
   const { user } = useAuth();
   const isSuperAdmin = user?.role === "super_admin";
@@ -30,15 +46,28 @@ export default function ConversationsPage() {
   const [reply, setReply] = useState("");
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [aiFilter, setAiFilter] = useState<"" | "on" | "off">("");
 
-  const load = () =>
-    api<Conversation[]>("/conversations")
+  const load = useCallback(() => {
+    const params = new URLSearchParams();
+    if (statusFilter) params.set("status", statusFilter);
+    if (aiFilter === "on") params.set("ai_enabled", "true");
+    if (aiFilter === "off") params.set("ai_enabled", "false");
+    const q = search.trim();
+    if (q) params.set("q", q);
+    const qs = params.toString();
+    return api<Conversation[]>(`/conversations${qs ? `?${qs}` : ""}`)
       .then(setItems)
       .catch((e) => setError(e.message));
+  }, [statusFilter, aiFilter, search]);
 
   useEffect(() => {
-    load();
-  }, []);
+    const timer = window.setTimeout(() => {
+      load();
+    }, search.trim() ? 350 : 0);
+    return () => window.clearTimeout(timer);
+  }, [load, search]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -47,7 +76,8 @@ export default function ConversationsPage() {
       (c) =>
         c.id.toLowerCase().includes(q) ||
         c.contact_phone.toLowerCase().includes(q) ||
-        (c.contact_name || "").toLowerCase().includes(q)
+        (c.contact_name || "").toLowerCase().includes(q) ||
+        (c.last_message_preview || "").toLowerCase().includes(q)
     );
   }, [items, search]);
 
@@ -106,10 +136,31 @@ export default function ConversationsPage() {
         <div className="space-y-2">
           <input
             className="w-full rounded-md border border-white/15 bg-ink px-3 py-2 text-sm"
-            placeholder="Buscar por nome, telefone ou ID..."
+            placeholder="Buscar nome, telefone ou texto…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          <div className="flex flex-wrap gap-2">
+            <select
+              className="flex-1 rounded-md border border-white/15 bg-ink px-2 py-2 text-sm"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              <option value="">Todos os status</option>
+              <option value="open">Abertas</option>
+              <option value="with_human">Com atendente</option>
+              <option value="resolved">Encerradas</option>
+            </select>
+            <select
+              className="flex-1 rounded-md border border-white/15 bg-ink px-2 py-2 text-sm"
+              value={aiFilter}
+              onChange={(e) => setAiFilter(e.target.value as "" | "on" | "off")}
+            >
+              <option value="">IA: todas</option>
+              <option value="on">IA ligada</option>
+              <option value="off">IA pausada</option>
+            </select>
+          </div>
           <ul className="max-h-[70vh] overflow-auto border border-white/10">
             {filtered.map((c) => (
               <li key={c.id}>
@@ -120,8 +171,20 @@ export default function ConversationsPage() {
                   }`}
                 >
                   <p className="font-medium">{c.contact_name || c.contact_phone}</p>
-                  <p className="text-xs text-sand/50">
-                    {c.status} · IA {c.ai_enabled ? "ligada" : "pausada"}
+                  {c.last_message_preview && (
+                    <p className="mt-1 line-clamp-2 text-xs text-sand/60">
+                      {actorLabel(c.last_message_actor)}: {c.last_message_preview}
+                    </p>
+                  )}
+                  <p className="mt-1 text-xs text-sand/50">
+                    {STATUS_LABELS[c.status] || c.status} · IA {c.ai_enabled ? "ligada" : "pausada"}
+                    {c.last_message_at &&
+                      ` · ${new Date(c.last_message_at).toLocaleString("pt-BR", {
+                        day: "2-digit",
+                        month: "2-digit",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}`}
                   </p>
                 </button>
               </li>
@@ -143,6 +206,15 @@ export default function ConversationsPage() {
                 <div>
                   <p className="font-medium">{selected.contact_name || selected.contact_phone}</p>
                   <p className="text-xs text-sand/50">{selected.contact_phone}</p>
+                  {selected.external_conversation_id ? (
+                    <p className="text-xs text-sand/40" title="sessionId WTS/GYMBOT — necessário pro envio no WhatsApp">
+                      Sessão: {selected.external_conversation_id}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-ember/80">
+                      Sem sessão WTS — respostas podem não chegar no WhatsApp até o cliente mandar msg de novo.
+                    </p>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <button

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import NormalizedMessageEvent
@@ -16,14 +16,35 @@ from app.schemas import (
     MessageCreate,
     MessageOut,
 )
+from app.services.conversation_context import message_preview_text
 from app.services.message_flow import save_message, send_outbound
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
+def _conversation_out_with_preview(
+    conv: Conversation,
+    last_message: Message | None,
+) -> ConversationOut:
+    base = ConversationOut.model_validate(conv)
+    if not last_message:
+        return base
+    preview = message_preview_text(last_message.text)
+    if last_message.content_type == "image" and not preview:
+        preview = "📷 Imagem"
+    return base.model_copy(
+        update={
+            "last_message_preview": preview,
+            "last_message_actor": last_message.actor,
+        }
+    )
+
+
 @router.get("", response_model=list[ConversationOut])
 async def list_conversations(
     status: str | None = None,
+    ai_enabled: bool | None = None,
+    q: str | None = Query(None, min_length=1, max_length=120),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -34,9 +55,33 @@ async def list_conversations(
     )
     if status:
         stmt = stmt.where(Conversation.status == status)
+    if ai_enabled is not None:
+        stmt = stmt.where(Conversation.ai_enabled.is_(ai_enabled))
+    if q:
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Conversation.contact_phone.ilike(pattern),
+                Conversation.contact_name.ilike(pattern),
+            )
+        )
     stmt = stmt.order_by(Conversation.last_message_at.desc().nullslast())
     result = await db.execute(stmt)
-    return result.scalars().all()
+    conversations = result.scalars().all()
+    if not conversations:
+        return []
+
+    conv_ids = [c.id for c in conversations]
+    msg_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id.in_(conv_ids))
+        .order_by(Message.conversation_id, Message.created_at.desc())
+        .distinct(Message.conversation_id)
+    )
+    last_by_conv = {m.conversation_id: m for m in msg_result.scalars().all()}
+    return [
+        _conversation_out_with_preview(c, last_by_conv.get(c.id)) for c in conversations
+    ]
 
 
 @router.get("/{conversation_id}", response_model=ConversationOut)

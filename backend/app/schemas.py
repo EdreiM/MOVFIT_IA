@@ -117,6 +117,9 @@ class ConversationOut(BaseModel):
     channel: str | None
     last_message_at: datetime | None
     created_at: datetime
+    last_message_preview: str | None = None
+    last_message_actor: str | None = None
+    external_conversation_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -585,6 +588,18 @@ class OperationsUnitRow(BaseModel):
 class OperationsTransferReason(BaseModel):
     reason: str
     count: int
+
+
+class TransfersCategoryCount(BaseModel):
+    category: str
+    count: int
+
+
+class TransfersSummary(BaseModel):
+    period_days: int
+    total_transfers: int
+    by_category: list[TransfersCategoryCount]
+    top_reasons: list[OperationsTransferReason]
 
 
 class OperationsResponseTimes(BaseModel):

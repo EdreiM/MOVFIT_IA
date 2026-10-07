@@ -352,8 +352,12 @@ export default function IntegrationsPage() {
               </div>
             </div>
             <p className="mt-1 break-all text-sm text-lime">Inbound: {inboundUrl(i)}</p>
-            {i.outbound_url && (
+            {i.outbound_url ? (
               <p className="mt-1 break-all text-sm text-sand/50">Outbound: {i.outbound_url}</p>
+            ) : (
+              <p className="mt-1 text-sm text-ember/90">
+                Sem URL outbound — a IA grava respostas no painel, mas nada é enviado pro WhatsApp/n8n.
+              </p>
             )}
             {i.field_mapping && Object.keys(i.field_mapping).length > 0 && (
               <p className="mt-1 text-xs text-sand/40">

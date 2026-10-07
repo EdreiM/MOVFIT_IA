@@ -14,7 +14,9 @@ from app.services.metrics_operations import (
     _classify_conversation_motive,
     _first_ai_response_seconds,
     _official_unit_label,
+    categorize_transfer_motivo,
     compute_ai_operations_report,
+    compute_transfers_summary,
 )
 
 
@@ -34,6 +36,11 @@ def test_classify_plans_motive():
 def test_classify_transfer_cancellation():
     label = _classify_conversation_motive({TOOL_KEY_TRANSFER}, "Cliente pediu cancelamento")
     assert label == "Solicitação de cancelamento"
+
+
+def test_categorize_transfer_motivo_app_and_tour():
+    assert categorize_transfer_motivo("Cliente com dúvida no aplicativo") == "Aplicativo"
+    assert categorize_transfer_motivo("Cliente confirmou tour") == "Tour pela academia"
 
 
 def test_classify_physical_eval():
@@ -186,3 +193,34 @@ async def test_operations_report_merges_unit_aliases(db_session, company):
     itaituba_rows = [row for row in report.units if row.unit == "Itaituba"]
     assert len(itaituba_rows) == 1
     assert itaituba_rows[0].conversations == 2
+
+
+@pytest.mark.asyncio
+async def test_transfers_summary_groups_by_category(db_session, company):
+    created = datetime.now(timezone.utc)
+    conv = Conversation(
+        company_id=company.id,
+        contact_phone="5511888777666",
+        status="with_human",
+        ai_enabled=False,
+        channel="whatsapp",
+        created_at=created,
+    )
+    db_session.add(conv)
+    await db_session.flush()
+    db_session.add(
+        ToolCallLog(
+            company_id=company.id,
+            conversation_id=conv.id,
+            tool_key=TOOL_KEY_TRANSFER,
+            tool_name="Transferir",
+            success=True,
+            arguments={"motivo": "Cliente confirmou tour pela academia"},
+            created_at=created,
+        )
+    )
+    await db_session.commit()
+
+    summary = await compute_transfers_summary(db_session, company.id, period_days=30)
+    assert summary.total_transfers == 1
+    assert any(c.category == "Tour pela academia" for c in summary.by_category)

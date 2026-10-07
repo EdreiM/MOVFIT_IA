@@ -1,19 +1,33 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
 
-const links = [
-  { to: "/", label: "Métricas" },
-  { to: "/conversations", label: "Conversas" },
-  { to: "/leads", label: "Clientes" },
-  { to: "/numbers", label: "Números" },
-  { to: "/integrations", label: "Integrações" },
-  { to: "/webhook-logs", label: "Logs de Webhook" },
-  { to: "/ai", label: "Config. IA" },
-  { to: "/catalog", label: "Unidades & Planos" },
-  { to: "/promotions", label: "Promoções" },
-  { to: "/tools", label: "Ferramentas" },
-  { to: "/test-chat", label: "Chat de teste" },
-  { to: "/api-keys", label: "API externa" },
+const navGroups: { label: string; links: { to: string; label: string }[] }[] = [
+  {
+    label: "Atendimento",
+    links: [
+      { to: "/", label: "Métricas" },
+      { to: "/conversations", label: "Conversas" },
+      { to: "/leads", label: "Clientes" },
+    ],
+  },
+  {
+    label: "Operação",
+    links: [
+      { to: "/integrations", label: "Integrações" },
+      { to: "/webhook-logs", label: "Logs de Webhook" },
+      { to: "/test-chat", label: "Chat de teste" },
+    ],
+  },
+  {
+    label: "Configuração",
+    links: [
+      { to: "/ai", label: "Config. IA" },
+      { to: "/catalog", label: "Unidades & Planos" },
+      { to: "/promotions", label: "Promoções" },
+      { to: "/tools", label: "Ferramentas" },
+      { to: "/api-keys", label: "API externa" },
+    ],
+  },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -37,22 +51,29 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </p>
           </div>
 
-          <nav className="flex flex-wrap gap-1">
-            {links.map((l) => (
-              <NavLink
-                key={l.to}
-                to={l.to}
-                end={l.to === "/"}
-                className={({ isActive }) =>
-                  `rounded-md px-3 py-2 text-sm transition ${
-                    isActive
-                      ? "bg-leaf text-white shadow-brand"
-                      : "text-muted hover:bg-white/5 hover:text-sand"
-                  }`
-                }
-              >
-                {l.label}
-              </NavLink>
+          <nav className="flex max-w-3xl flex-wrap items-end gap-x-4 gap-y-2">
+            {navGroups.map((group) => (
+              <div key={group.label} className="flex flex-wrap items-center gap-1">
+                <span className="mr-1 hidden text-[10px] font-semibold uppercase tracking-wider text-sand/35 lg:inline">
+                  {group.label}
+                </span>
+                {group.links.map((l) => (
+                  <NavLink
+                    key={l.to}
+                    to={l.to}
+                    end={l.to === "/"}
+                    className={({ isActive }) =>
+                      `rounded-md px-3 py-2 text-sm transition ${
+                        isActive
+                          ? "bg-leaf text-white shadow-brand"
+                          : "text-muted hover:bg-white/5 hover:text-sand"
+                      }`
+                    }
+                  >
+                    {l.label}
+                  </NavLink>
+                ))}
+              </div>
             ))}
           </nav>
 

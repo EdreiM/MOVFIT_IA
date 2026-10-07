@@ -20,7 +20,8 @@ const statusStyle: Record<string, string> = {
 export default function WebhookLogsPage() {
   const [items, setItems] = useState<WebhookLog[]>([]);
   const [error, setError] = useState("");
-  const [onlyErrors, setOnlyErrors] = useState(true);
+  const [onlyErrors, setOnlyErrors] = useState(false);
+  const [directionFilter, setDirectionFilter] = useState<"" | "inbound" | "outbound">("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
@@ -35,6 +36,7 @@ export default function WebhookLogsPage() {
 
   const filtered = items.filter((l) => {
     if (onlyErrors && l.status !== "error") return false;
+    if (directionFilter && l.direction !== directionFilter) return false;
     if (search.trim() && !JSON.stringify(l.payload ?? {}).toLowerCase().includes(search.trim().toLowerCase()))
       return false;
     return true;
@@ -53,6 +55,15 @@ export default function WebhookLogsPage() {
       {error && <p className="text-ember">{error}</p>}
 
       <div className="flex flex-wrap items-center gap-3">
+        <select
+          className="rounded-md border border-white/15 bg-ink px-2 py-2 text-sm"
+          value={directionFilter}
+          onChange={(e) => setDirectionFilter(e.target.value as "" | "inbound" | "outbound")}
+        >
+          <option value="">Entrada e saída</option>
+          <option value="inbound">Só inbound (cliente → IA)</option>
+          <option value="outbound">Só outbound (IA → n8n/WhatsApp)</option>
+        </select>
         <label className="flex items-center gap-2 text-sm text-sand/70">
           <input
             type="checkbox"

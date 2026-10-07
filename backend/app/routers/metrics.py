@@ -16,9 +16,10 @@ from app.schemas import (
     ShowcaseExample,
     StageCount,
     ToolStats,
+    TransfersSummary,
 )
 from app.services.metrics_narrative import compute_metrics_narrative
-from app.services.metrics_operations import compute_ai_operations_report
+from app.services.metrics_operations import compute_ai_operations_report, compute_transfers_summary
 from app.services.metrics_showcase import compute_metrics_showcase
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -237,6 +238,16 @@ async def _compute_featured_tools_stats(db: AsyncSession, company_id: UUID) -> l
             )
         )
     return stats
+
+
+@router.get("/transfers-summary", response_model=TransfersSummary)
+async def metrics_transfers_summary(
+    days: int = Query(30, ge=1, le=365),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    company_id = await resolve_company_id(current, db)
+    return await compute_transfers_summary(db, company_id, period_days=days)
 
 
 @router.get("/overview", response_model=MetricsOverview)

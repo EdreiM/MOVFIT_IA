@@ -35,6 +35,12 @@ from app.services.debounce import schedule_ai_reply
 from app.services.llm import chat_completion
 from app.services.text_normalize import normalize_text as _normalize_text
 from app.services.text_normalize import normalize_tokens as _normalize_tokens
+from app.services.conversation_context import (
+    build_active_topic_system_block,
+    build_history_summary_system_block,
+    infer_active_topic_label,
+    trim_history_for_llm,
+)
 from app.services.promotions import (
     find_recent_offered_promotion,
     format_promotions_prompt_block,
@@ -3765,6 +3771,75 @@ async def resolve_ai_config(db: AsyncSession, conversation: Conversation) -> AiC
     return config
 
 
+def _llm_whatsapp_and_tone_instructions() -> str:
+    """Formatação WhatsApp + tom humano (bloco único para economizar tokens)."""
+    return (
+        "[Comunicação no WhatsApp]\n"
+        "Formatação: isso vai pro WhatsApp, não markdown de verdade. Use *um "
+        "asterisco* pra negrito (nunca **dois**) e _sublinhado_ pra itálico — sem "
+        "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. NUNCA use \"---\", "
+        "\"***\" ou qualquer linha divisória pra separar seções/planos — isso vira uma "
+        "mensagem separada e sem sentido pro cliente; uma linha em branco entre "
+        "parágrafos já separa o suficiente. Listas: hífen ou • "
+        "simples, sem numerar a menos que a ordem importe. Links: manda a URL pura "
+        "(https://...) solta no texto — NUNCA no formato [texto](url) do markdown, "
+        "porque o WhatsApp não interpreta isso, aparece literalmente com colchetes e "
+        "parênteses pro cliente; uma URL pura o WhatsApp já deixa clicável sozinho. Ao "
+        "apresentar planos, não repita a descrição/slogan geral da academia em cada "
+        "plano — isso já foi dito (ou nem precisa ser dito) uma vez só. Cada plano "
+        "individual segue este modelo visual (adapte os dados de cada plano, mas "
+        "mantenha a estrutura, os emojis e as quebras de linha — pule qualquer linha "
+        "cujo dado não exista para aquele plano, tipo taxa de matrícula zerada):\n\n"
+        "🏋️ *NOME DO PLANO EM MAIÚSCULAS*\n\n"
+        "💰 *R$ 000,00 por mês*\n"
+        "💳 Pagamento em [forma de pagamento]\n"
+        "📅 Fidelidade de N meses\n\n"
+        "✅ *Você terá:*\n"
+        "• benefício 1\n"
+        "• benefício 2\n\n"
+        "👉 *Faça sua matrícula pelo link:*\n"
+        "https://...\n\n"
+        "Tom — escreva como uma pessoa de verdade atendendo pelo WhatsApp, "
+        "não como um bot decorado:\n"
+        "1) NÃO termine toda resposta com \"Posso ajudar com mais alguma coisa?\", "
+        "\"Estou à disposição!\" ou frases parecidas. Só use algo assim quando a conversa "
+        "realmente estiver terminando.\n"
+        "2) NÃO quebre uma resposta simples em várias mensagens separadas só por estilo. "
+        "Quebras em bolhas diferentes são só pra listas genuinamente longas ou planos.\n"
+        "3) NUNCA mencione termos técnicos internos (\"falha no sistema\", \"erro ao processar\").\n"
+        "4) NUNCA invente valor ou condição fora do catálogo/RAG. Se não souber, diga e "
+        "ofereça transferir — mas não se contradiga ao que você mesma disse há pouco no histórico.\n"
+        "5) Se prometer transferir ou encaminhar pra atendente, chame transferir_atendimento "
+        "nessa mesma resposta quando a ferramenta existir."
+    )
+
+
+def _llm_operations_tools_and_transfer_instructions() -> str:
+    """Regras de ferramentas, RAG, transferência, tour e loja interna."""
+    return (
+        "[Operação: ferramentas, RAG, transferência]\n"
+        "Loja interna: vestuário/acessórios na academia — você não consulta estoque; "
+        "informe que pode ir à unidade conferir e chame transferir_atendimento pra "
+        "verificar disponibilidade.\n"
+        "Tour = visita pra conhecer o ambiente (sem aula experimental). Quando o cliente "
+        "quiser ou confirmar tour, chame transferir_atendimento na hora — NUNCA peça CPF, "
+        "verificar_unidade_por_cpf, horários ou consultar_agendamento_horarios pra tour. "
+        "Tour não é avaliação física.\n"
+        "Se existir ferramenta específica pro pedido (parcela, link de pagamento etc.), "
+        "chame ESSA ferramenta primeiro — não transfira direto só porque é pagamento. "
+        "Transferir pra humano (transferir_atendimento) quando: (1) pediu atendente; "
+        "(2) reclamação/cobrança que nenhuma ferramenta resolve; (3) cancelamento de matrícula; "
+        "(4) desconto fora do catálogo; (5) assunto fora do RAG/catálogo; (6) saúde/jurídico; "
+        "(7) insiste 2+ vezes na mesma dúvida; (8) irritação/xingamento. "
+        "Dúvidas normais (planos, horários, endereço, matrícula via link): resolva sozinha.\n"
+        "Ferramentas e RAG: se ferramenta falhar ou não existir, responda com RAG/histórico — "
+        "não fique em silêncio. Se não tiver a informação, não invente; transferir se couber. "
+        "Perguntas simples (horário, endereço, estacionamento, estrutura): RAG/histórico — "
+        "não peça CPF nem ferramentas de aluno só por causa disso. "
+        "Mensagem sem contexto claro: peça pra explicar melhor — não adivinhe nem transfira de cara."
+    )
+
+
 def compose_base_prompt(config: AiConfig) -> str:
     """Nome, tom de voz e uso de emoji são campos estruturados (editáveis sem
     mexer em prompt) — o prompt "de verdade" é montado a partir deles aqui."""
@@ -3956,110 +4031,8 @@ async def generate_ai_reply(
             ),
         }
     )
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "Formatação: isso vai pro WhatsApp, não markdown de verdade. Use *um "
-                "asterisco* pra negrito (nunca **dois**) e _sublinhado_ pra itálico — sem "
-                "cabeçalho tipo ### ou ##, sem \"**\" em lugar nenhum. NUNCA use \"---\", "
-                "\"***\" ou qualquer linha divisória pra separar seções/planos — isso vira uma "
-                "mensagem separada e sem sentido pro cliente; uma linha em branco entre "
-                "parágrafos já separa o suficiente. Listas: hífen ou • "
-                "simples, sem numerar a menos que a ordem importe. Links: manda a URL pura "
-                "(https://...) solta no texto — NUNCA no formato [texto](url) do markdown, "
-                "porque o WhatsApp não interpreta isso, aparece literalmente com colchetes e "
-                "parênteses pro cliente; uma URL pura o WhatsApp já deixa clicável sozinho. Ao "
-                "apresentar planos, não repita a descrição/slogan geral da academia em cada "
-                "plano — isso já foi dito (ou nem precisa ser dito) uma vez só. Cada plano "
-                "individual segue este modelo visual (adapte os dados de cada plano, mas "
-                "mantenha a estrutura, os emojis e as quebras de linha — pule qualquer linha "
-                "cujo dado não exista para aquele plano, tipo taxa de matrícula zerada):\n\n"
-                "🏋️ *NOME DO PLANO EM MAIÚSCULAS*\n\n"
-                "💰 *R$ 000,00 por mês*\n"
-                "💳 Pagamento em [forma de pagamento]\n"
-                "📅 Fidelidade de N meses\n\n"
-                "✅ *Você terá:*\n"
-                "• benefício 1\n"
-                "• benefício 2\n\n"
-                "👉 *Faça sua matrícula pelo link:*\n"
-                "https://..."
-            ),
-        }
-    )
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "Tom de conversa — escreva como uma pessoa de verdade atendendo pelo WhatsApp, "
-                "não como um bot decorado:\n"
-                "1) NÃO termine toda resposta com \"Posso ajudar com mais alguma coisa?\", "
-                "\"Estou à disposição!\" ou frases parecidas. Isso é repetitivo e soa robótico "
-                "quando aparece em toda mensagem. Só use algo assim quando a conversa realmente "
-                "estiver terminando (cliente agradeceu, confirmou que não precisa de mais nada, "
-                "ou claramente encerrou o assunto) — no meio de uma troca ativa, só responda a "
-                "pergunta e pare.\n"
-                "2) NÃO quebre uma resposta simples em várias mensagens separadas só por estilo "
-                "(ex: uma frase, depois uma lista em bolha separada, depois uma pergunta em outra "
-                "bolha). Escreva como uma pessoa escreveria — um parágrafo natural corrido. "
-                "Quebras em bolhas diferentes são só pra listas genuinamente longas (tipo o "
-                "catálogo de unidades) ou pra apresentação de planos.\n"
-                "3) NUNCA mencione termos técnicos internos pro cliente — coisas como \"houve um "
-                "problema ao enviar\", \"falha no sistema\", \"erro ao processar\", \"tentando "
-                "novamente\". Se algo não funcionar, siga a conversa naturalmente sem expor isso "
-                "— o cliente não precisa saber que existe um sistema por trás.\n"
-                "4) NUNCA invente valor, condição ou informação que não esteja no catálogo ou na "
-                "base de conhecimento (ex: diária, day use, aula experimental, desconto não "
-                "listado, promoção). Se não tiver certeza ou o dado não existir aqui, diga "
-                "claramente que não tem essa informação agora e ofereça transferir pra um "
-                "atendente confirmar — nunca chute um número. Antes de dizer \"não tenho essa "
-                "informação\", olhe o histórico da conversa: se você mesma já respondeu isso há "
-                "pouco, não se contradiga — reafirme o que já foi dito em vez de negar.\n"
-                "5) Se você disser ao cliente que vai transferir, encaminhar pro atendimento ou "
-                "chamar um atendente, você TEM que chamar a ferramenta transferir_atendimento "
-                "nessa mesma resposta (se ela estiver disponível) — nunca prometa isso em texto "
-                "sem realmente executar a ferramenta. Prometer e não fazer é pior do que não "
-                "prometer nada."
-            ),
-        }
-    )
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "[Loja interna] A Mov Fit tem *loja interna* na academia (vestuário e acessórios: "
-                "jaquetas, camisetas, bonés, shorts etc.). Você NÃO consulta preço nem estoque "
-                "sozinha e NUNCA diga que a academia não vende roupas ou acessórios. Quando o "
-                "cliente perguntar sobre produto da loja, informe que ele pode ir à unidade "
-                "conferir tamanho, cor e modelos do item, e chame transferir_atendimento pra "
-                "um atendente verificar disponibilidade em estoque — nessa mesma resposta."
-            ),
-        }
-    )
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "IMPORTANTE: se existir uma ferramenta específica disponível pra resolver o que o "
-                "cliente está pedindo (ex: consultar parcela/mensalidade em atraso, gerar link de "
-                "pagamento), chame ESSA ferramenta primeiro — não transfira direto só porque o "
-                "assunto é sobre pagamento. Só transfira se a ferramenta específica não existir, "
-                "não resolver, ou o próprio resultado dela indicar que precisa de atendente.\n"
-                "Quando transferir pra atendente humano (ferramenta transferir_atendimento), se "
-                "ela estiver disponível: (1) cliente pediu explicitamente por atendente; (2) "
-                "reclamação, cobrança errada, ou problema de pagamento que NENHUMA ferramenta "
-                "disponível resolve (ex: trocar cartão, cobrança duplicada) — se tiver ferramenta "
-                "específica pra consultar isso, use-a antes; (3) CANCELAMENTO de matrícula; (4) "
-                "pedido de desconto/condição especial fora do catálogo; (5) pergunta fora do que "
-                "você sabe (RAG/catálogo não cobre, assunto sem relação com a academia); (6) "
-                "assunto sensível — lesão, saúde, questão jurídica; (7) cliente insiste na mesma "
-                "dúvida ou pedido mais de 2 vezes mesmo depois de você já ter respondido; (8) "
-                "cliente parece irritado, indignado, com raiva, ou usa xingamentos/palavrões. Pra "
-                "dúvidas normais (planos, preços, horários, endereço, estrutura, matrícula via "
-                "link), resolva sozinha — não transfira à toa."
-            ),
-        }
-    )
+    messages.append({"role": "system", "content": _llm_whatsapp_and_tone_instructions()})
+    messages.append({"role": "system", "content": _llm_operations_tools_and_transfer_instructions()})
     if is_first_contact:
         messages.append(
             {
@@ -4083,38 +4056,6 @@ async def generate_ai_reply(
     custom_links_block = _format_custom_links_system_block(custom_links)
     if custom_links_block:
         messages.append({"role": "system", "content": custom_links_block})
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "[Tour pela academia] Tour = visita pra conhecer o ambiente (sem aula experimental). "
-                "Quando o cliente quiser ou confirmar tour, chame transferir_atendimento na hora — "
-                "NUNCA peça CPF, verificar_unidade_por_cpf, horários ou consultar_agendamento_horarios "
-                "pra tour. Tour não é avaliação física; o atendente humano agenda a visita."
-            ),
-        }
-    )
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "Ferramentas e RAG: se uma ferramenta não existir, falhar (sucesso=false) "
-                "ou não retornar dados úteis, NÃO fique em silêncio — responda em texto "
-                "usando a base de conhecimento (RAG) e o histórico desta conversa. Se o "
-                "cliente perguntou algo específico e nem a RAG nem o histórico têm essa "
-                "informação, NÃO chute nem invente — diga honestamente que não tem essa "
-                "informação agora e chame transferir_atendimento pra um atendente confirmar "
-                "(se a ferramenta estiver disponível). Perguntas simples (horário, endereço, "
-                "estacionamento, estrutura) devem ser respondidas pelo RAG/histórico — não "
-                "peça CPF nem chame ferramentas de aluno só por causa disso.\n"
-                "Mensagem sem contexto claro: se a mensagem do cliente (ou a descrição de uma "
-                "imagem que ele mandou) não deixar claro o que ele quer, e não tiver relação "
-                "óbvia com nenhum assunto de atendimento (planos, horários, parcelas, etc.), "
-                "NÃO tente adivinhar nem transfira de cara — diga que não entendeu muito bem e "
-                "peça pra ele explicar melhor o que precisa."
-            ),
-        }
-    )
     if _text_has_non_plan_topic(user_text):
         messages.append(
             {
@@ -4441,7 +4382,31 @@ async def generate_ai_reply(
         }
     )
 
-    for m in history:
+    topic_label = infer_active_topic_label(
+        user_text=user_text,
+        recent_customer_texts=recent_customer_texts,
+        history=history,
+        cancellation_active=cancellation_active,
+        app_support_active=_wants_app_support_transfer(user_text, recent_customer_texts),
+        physical_eval_context=_physical_eval_conversation_active(
+            user_text, recent_customer_texts, history
+        ),
+        plan_intent_active=plan_intent_active,
+        tour_discussed=_tour_discussed_in_conversation(history, recent_customer_texts),
+        tour_explicit=_wants_gym_tour_explicit(user_text),
+        student_operational=bool(student_operational),
+        promotion_transfer=promotion_transfer_active(
+            user_text, history, recent_customer_texts, offered_promotion
+        ),
+    )
+    messages.append(
+        {"role": "system", "content": build_active_topic_system_block(topic_label)}
+    )
+    history_summary = build_history_summary_system_block(history, lead, conversation)
+    if history_summary:
+        messages.append({"role": "system", "content": history_summary})
+
+    for m in trim_history_for_llm(history):
         role = "assistant" if m.actor in {"ai", "human_agent"} else "user"
         content = _history_text_for_llm(m)
         if content:
@@ -4831,6 +4796,81 @@ def _image_filename_from_url(image_url: str, fallback: str = "imagem.jpg") -> st
     return fallback
 
 
+def _build_outbound_text_payload(conversation: Conversation, text: str) -> dict:
+    """Payload pro webhook de outbound (n8n Envio mensagem / WTS).
+
+    Inclui sessionId/session_id — o fluxo GYMBOT/WTS depende disso no If do n8n.
+    """
+    session = conversation.external_conversation_id
+    return {
+        "conversation_id": str(conversation.id),
+        "external_conversation_id": session,
+        "session_id": session,
+        "sessionId": session,
+        "contact_phone": conversation.contact_phone,
+        "text": text,
+        "actor": "ai",
+        "content_type": "text",
+        "content": {
+            "type": "TEXT",
+            "text": text,
+            "sessionId": session,
+            "session_id": session,
+        },
+    }
+
+
+async def _post_outbound_webhook(
+    db: AsyncSession,
+    client: httpx.AsyncClient,
+    integration: Integration,
+    conversation: Conversation,
+    payload: dict,
+) -> bool:
+    """POST no outbound_url com registro em WebhookLog (mesmo padrão da Evolution)."""
+    if not integration.outbound_url:
+        return False
+    log = WebhookLog(
+        company_id=integration.company_id,
+        integration_id=integration.id,
+        direction="outbound",
+        status="received",
+        payload={
+            "url": integration.outbound_url,
+            "body": payload,
+            "conversation_id": str(conversation.id),
+        },
+    )
+    db.add(log)
+    await db.flush()
+    try:
+        response = await client.post(integration.outbound_url, json=payload)
+        log.http_status = response.status_code
+        if response.status_code < 400:
+            log.status = "ok"
+            return True
+        log.status = "error"
+        log.error_message = (response.text or "")[:2000]
+        logger.error(
+            "Outbound n8n/webhook %s HTTP %s (conversa %s): %s",
+            integration.name,
+            response.status_code,
+            conversation.id,
+            log.error_message[:500],
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log.status = "error"
+        log.error_message = str(exc)[:2000]
+        logger.error(
+            "Outbound n8n/webhook %s falhou (conversa %s): %s",
+            integration.name,
+            conversation.id,
+            exc,
+        )
+        return False
+
+
 async def _iter_outbound_integrations(
     db: AsyncSession,
     company_id: UUID,
@@ -4859,24 +4899,46 @@ async def send_outbound(
     text: str,
 ) -> None:
     integrations = await _iter_outbound_integrations(db, company_id, conversation)
-    payload = {
-        "conversation_id": str(conversation.id),
-        "external_conversation_id": conversation.external_conversation_id,
-        "contact_phone": conversation.contact_phone,
-        "text": text,
-        "actor": "ai",
-    }
+    if not integrations:
+        logger.error(
+            "Outbound NÃO enviado: integração sem outbound_url ou inativa "
+            "(conversa=%s, integration_id=%s). Cliente vê resposta só no painel.",
+            conversation.id,
+            conversation.integration_id,
+        )
+        log = WebhookLog(
+            company_id=company_id,
+            integration_id=conversation.integration_id,
+            direction="outbound",
+            status="error",
+            error_message=(
+                "Nenhuma integração ativa com outbound_url para esta conversa — "
+                "mensagem gravada no banco mas não disparada pro WhatsApp/n8n."
+            ),
+            payload={
+                "conversation_id": str(conversation.id),
+                "contact_phone": conversation.contact_phone,
+                "text_preview": (text or "")[:200],
+            },
+        )
+        db.add(log)
+        await db.flush()
+        return
+
+    if not conversation.external_conversation_id:
+        logger.warning(
+            "Outbound sem external_conversation_id/sessionId (conversa %s) — "
+            "fluxo WTS/GYMBOT no n8n pode cair no If e não enviar pro cliente.",
+            conversation.id,
+        )
+
+    payload = _build_outbound_text_payload(conversation, text)
     async with httpx.AsyncClient(timeout=15.0) as client:
         for integ in integrations:
             if integ.adapter_key == "evolution_api_v1":
                 await _send_evolution_outbound(db, client, integ, conversation, text)
                 continue
-            if not integ.outbound_url:
-                continue
-            try:
-                await client.post(integ.outbound_url, json=payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Outbound para %s falhou: %s", integ.name, exc)
+            await _post_outbound_webhook(db, client, integ, conversation, payload)
 
 
 async def send_outbound_image(
@@ -4910,23 +4972,26 @@ async def send_outbound_image(
                 )
                 sent = sent or ok
                 continue
-            if not integ.outbound_url:
-                continue
+            session = conversation.external_conversation_id
             payload = {
                 "conversation_id": str(conversation.id),
-                "external_conversation_id": conversation.external_conversation_id,
+                "external_conversation_id": session,
+                "session_id": session,
+                "sessionId": session,
                 "contact_phone": conversation.contact_phone,
                 "actor": "ai",
                 "content_type": "image",
                 "media_url": image_url,
                 "text": caption or "",
+                "content": {
+                    "type": "IMAGE",
+                    "text": caption or "",
+                    "sessionId": session,
+                    "media_url": image_url,
+                },
             }
-            try:
-                resp = await client.post(integ.outbound_url, json=payload)
-                if resp.status_code < 400:
-                    sent = True
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Outbound imagem para %s falhou: %s", integ.name, exc)
+            if await _post_outbound_webhook(db, client, integ, conversation, payload):
+                sent = True
     return sent
 
 

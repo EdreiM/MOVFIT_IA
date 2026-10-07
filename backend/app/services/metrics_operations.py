@@ -23,6 +23,8 @@ from app.schemas import (
     OperationsSummary,
     OperationsTransferReason,
     OperationsUnitRow,
+    TransfersCategoryCount,
+    TransfersSummary,
 )
 from app.services.message_flow import (
     TOOL_KEY_BOOK_PHYSICAL_EVAL,
@@ -63,6 +65,32 @@ def _period_bounds(date_from: date, date_to: date) -> tuple[datetime, datetime]:
     start = datetime.combine(date_from, time.min, tzinfo=_BRAZIL_TZ)
     end = datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=_BRAZIL_TZ)
     return start, end
+
+
+def categorize_transfer_motivo(motivo: str) -> str:
+    """Agrupa motivos textuais de transferir_atendimento para o painel."""
+    n = (motivo or "").lower()
+    if not n.strip():
+        return "Sem motivo informado"
+    if "aplicativo" in n or " app " in f" {n} ":
+        return "Aplicativo"
+    if "tour" in n:
+        return "Tour pela academia"
+    if "loja interna" in n or "estoque" in n or "vestu" in n:
+        return "Loja interna"
+    if any(w in n for w in ("cancel", "cancelamento")):
+        return "Cancelamento"
+    if "bioimped" in n or "avaliacao fisica" in n or "avaliação física" in n:
+        return "Avaliação física"
+    if "promo" in n:
+        return "Promoção / campanha"
+    if "matricula manual" in n or "matrícula manual" in n:
+        return "Matrícula manual"
+    if "ferramenta" in n and "falhou" in n:
+        return "Falha técnica"
+    if "atendente" in n and "confirm" in n:
+        return "Confirmação humana"
+    return "Outros"
 
 
 def _classify_conversation_motive(tool_keys: set[str], transfer_motivo: str | None) -> str:
@@ -488,4 +516,54 @@ async def compute_ai_operations_report(
         hourly_inbound=hourly_volume,
         outcomes=outcomes,
         period_comparison=period_comparison,
+    )
+
+
+async def compute_transfers_summary(
+    db: AsyncSession,
+    company_id: UUID,
+    *,
+    period_days: int = 30,
+) -> TransfersSummary:
+    """Transferências recentes agrupadas por categoria (painel principal)."""
+    period_days = max(1, min(period_days, 365))
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=period_days)
+
+    logs_result = await db.execute(
+        select(ToolCallLog)
+        .join(Conversation, Conversation.id == ToolCallLog.conversation_id)
+        .where(
+            ToolCallLog.company_id == company_id,
+            Conversation.company_id == company_id,
+            Conversation.channel != "test_console",
+            ToolCallLog.tool_key == TOOL_KEY_TRANSFER,
+            ToolCallLog.success.is_(True),
+            ToolCallLog.created_at >= start,
+            ToolCallLog.created_at < end,
+        )
+    )
+
+    category_counter: Counter[str] = Counter()
+    reason_counter: Counter[str] = Counter()
+    total = 0
+    for log in logs_result.scalars().all():
+        total += 1
+        motivo = str((log.arguments or {}).get("motivo") or "")
+        category_counter[categorize_transfer_motivo(motivo)] += 1
+        reason_counter[motivo.strip()[:200] or "Sem motivo informado"] += 1
+
+    by_category = [
+        TransfersCategoryCount(category=cat, count=count)
+        for cat, count in category_counter.most_common()
+    ]
+    top_reasons = [
+        OperationsTransferReason(reason=reason, count=count)
+        for reason, count in reason_counter.most_common(10)
+    ]
+    return TransfersSummary(
+        period_days=period_days,
+        total_transfers=total,
+        by_category=by_category,
+        top_reasons=top_reasons,
     )

@@ -3,7 +3,6 @@ import { useAuth } from "./auth";
 import Layout from "./components/Layout";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
-import NumbersPage from "./pages/NumbersPage";
 import AiConfigPage from "./pages/AiConfigPage";
 import ConversationsPage from "./pages/ConversationsPage";
 import LeadsPage from "./pages/LeadsPage";
@@ -44,7 +43,7 @@ export default function App() {
             <Layout>
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
-                <Route path="/numbers" element={<NumbersPage />} />
+                <Route path="/numbers" element={<Navigate to="/integrations" replace />} />
                 <Route path="/ai" element={<AiConfigPage />} />
                 <Route path="/test-chat" element={<TestChatPage />} />
                 <Route path="/tools" element={<ToolsPage />} />

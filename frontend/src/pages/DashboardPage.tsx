@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import AiOperationsReport, { type AiOperationsReportData } from "../components/AiOperationsReport";
 import MetricsShowcase, { type ShowcaseExample } from "../components/MetricsShowcase";
+import TransfersSummaryCard from "../components/TransfersSummaryCard";
 
 type Overview = {
   conversations_total: number;
@@ -274,6 +275,8 @@ export default function DashboardPage() {
           </div>
         ))}
       </div>
+
+      <TransfersSummaryCard />
 
       <AiOperationsReport fetchReport={fetchOperationsReport} />
 
