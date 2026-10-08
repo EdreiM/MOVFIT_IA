@@ -227,7 +227,11 @@ _NO_FIDELITY_MARKERS = (
     "por um mes", "por 30 dias", "trinta dias", "so 30 dias", "apenas 30 dias",
     "so enquanto", "so por um tempo", "so de passagem", "estou de passagem",
     "nao vou ficar mais", "nao moro aqui",
+    "day use", "pagar por dia", "so um dia", "apenas um dia", "um dia so",
+    "so uma semana", "uma semana so",
 )
+# Palavra inteira (não trecho): "diariamente" não é pedido de diária.
+_SHORT_TERM_PLAN_TOKENS = {"diaria", "diarias", "semanal", "semanais"}
 
 
 def _wants_no_fidelity_plan(text: str, recent_customer_texts: list[str] | None = None) -> bool:
@@ -239,6 +243,8 @@ def _wants_no_fidelity_plan(text: str, recent_customer_texts: list[str] | None =
     texts = list(recent_customer_texts or [])[-4:]
     if text:
         texts.append(text)
+    if any(_normalize_tokens(t) & _SHORT_TERM_PLAN_TOKENS for t in texts):
+        return True
     return any(
         marker in _normalize_text(t)
         for t in texts
@@ -964,15 +970,49 @@ def _physical_eval_in_recent(recent_customer_texts: list[str] | None) -> bool:
     return any(_is_physical_eval_intent(t) for t in prior[-8:])
 
 
+_CONTEXT_MAX_AGE = timedelta(hours=24)
+_GREETING_TOKENS = {
+    "oi", "oie", "ola", "opa", "bom", "boa", "dia", "tarde", "noite", "tudo", "bem", "td", "blz",
+}
+_GREETING_MARKERS = ("oi", "oie", "ola", "opa", "bom dia", "boa tarde", "boa noite")
+
+
+def _is_plain_greeting(text: str) -> bool:
+    """Só cumprimento ("Boa tarde", "Oi, tudo bem?") — abre conversa nova, não
+    responde nada do que estava pendente."""
+    tokens = _normalize_tokens(text or "")
+    if not tokens or not tokens <= _GREETING_TOKENS:
+        return False
+    normalized = _normalize_text(text)
+    return any(marker in normalized for marker in _GREETING_MARKERS)
+
+
+def _is_recent_message(message: Message, now: datetime | None = None) -> bool:
+    """Mensagem das últimas 24h — o que foi dito antes disso é outro
+    atendimento e não deve manter um fluxo determinístico "em andamento"."""
+    if not message.created_at:
+        return True
+    return (now or datetime.now(timezone.utc)) - message.created_at <= _CONTEXT_MAX_AGE
+
+
 def _physical_eval_ai_scheduling_context(history: list[Message]) -> bool:
     """IA acabou de pedir unidade/data/horário de avaliação ou bioimpedância."""
-    for message in reversed([m for m in history if m.actor == "ai" and m.text][-4:]):
+    recent_ai = [m for m in history if m.actor == "ai" and m.text and _is_recent_message(m)]
+    for message in reversed(recent_ai[-4:]):
         normalized = _normalize_text(message.text or "")
         if "bioimpedancia" in normalized or "avaliacao fisica" in normalized:
             return True
         if "horarios disponiveis" in normalized and "unidade" in normalized:
             return True
-        if "confirmar" in normalized and "unidade" in normalized:
+        # "confirmar" + "unidade" sozinhos aparecem em resposta de qualquer
+        # assunto (visto em produção: "...na recepção da unidade ... um
+        # atendente confirmar para você" virou contexto de avaliação) — só
+        # conta quando a frase também fala de agendar/horário.
+        if (
+            "confirmar" in normalized
+            and "unidade" in normalized
+            and any(word in normalized for word in ("agendar", "agendamento", "horario"))
+        ):
             return True
     return False
 
@@ -1065,6 +1105,15 @@ def _physical_eval_followup(
     """CPF, data, período ou horário depois que o cliente pediu avaliação física."""
     if _is_physical_eval_intent(text):
         return False
+    if _is_plain_greeting(text):
+        # "Boa tarde" não é o período "tarde" de um agendamento.
+        return False
+    if history:
+        # Com o histórico em mãos, só vale o que o cliente pediu nas últimas
+        # 24h — um pedido de avaliação de dias atrás não mantém o fluxo aberto.
+        recent_customer_texts = [
+            m.text for m in history if m.actor == "customer" and m.text and _is_recent_message(m)
+        ]
     eval_context = _physical_eval_in_recent(recent_customer_texts) or (
         history and _physical_eval_ai_scheduling_context(history)
     )
@@ -1341,7 +1390,10 @@ def _extract_schedule_time_from_text(text: str) -> str | None:
 
 
 def _extract_schedule_period_from_text(text: str) -> str | None:
-    tokens = _normalize_tokens(text)
+    # Cumprimento não é preferência de horário: "boa tarde, pode ser de
+    # manhã" é manhã, e "boa tarde" sozinho não é nada.
+    without_greeting = re.sub(r"\bboa (tarde|noite)\b", " ", _normalize_text(text or ""))
+    tokens = _normalize_tokens(without_greeting)
     if "manha" in tokens:
         return "manha"
     if "noite" in tokens:
@@ -4082,6 +4134,47 @@ def _sales_mode(config: AiConfig | None) -> bool:
     return bool(getattr(config, "sales_mode_enabled", False))
 
 
+_DENIAL_PHRASES = (
+    "nao oferecemos", "nao temos", "nao trabalhamos", "nao existe", "nao disponibilizamos",
+    "nao possuimos", "nao ha opc", "nao ha plano",
+)
+_SHORT_TERM_WORDS = ("diaria", "diario", "por dia", "semanal", "por semana", "avuls")
+_SHORT_TERM_UNCONFIRMED_INTRO = (
+    "Aqui comigo eu tenho os planos que te passei. Sobre diária, semanal ou outra forma de "
+    "pagamento, prefiro confirmar com a equipe pra não te passar informação errada."
+)
+_SHORT_TERM_TRANSFER_QUESTION = "Posso te passar pra um atendente confirmar isso pra você?"
+
+
+def _fix_short_term_denial(text: str) -> str:
+    """Trava do modo vendedor (reforço no código): a IA não tem como saber
+    que uma modalidade fora do catálogo NÃO existe — já negou diária que
+    existia. Tira a frase que nega e põe no lugar o encaminhamento pra um
+    atendente confirmar."""
+    removed = False
+    kept_paragraphs: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        kept = []
+        for sentence in re.split(r"(?<=[.!?])\s+", paragraph.strip()):
+            normalized = _normalize_text(sentence)
+            if any(d in normalized for d in _DENIAL_PHRASES) and any(w in normalized for w in _SHORT_TERM_WORDS):
+                removed = True
+                continue
+            if sentence:
+                kept.append(sentence)
+        if kept:
+            kept_paragraphs.append(" ".join(kept))
+    if not removed:
+        return text
+    rest = "\n\n".join(kept_paragraphs)
+    parts = [_SHORT_TERM_UNCONFIRMED_INTRO]
+    if rest:
+        parts.append(rest)
+    if "atendente" not in _normalize_text(rest):
+        parts.append(_SHORT_TERM_TRANSFER_QUESTION)
+    return "\n\n".join(parts)
+
+
 def _fix_whatsapp_bold(text: str) -> str:
     """**negrito** de markdown vira *negrito* de WhatsApp — o prompt já pede
     isso, mas com texto livre de planos o modelo escorrega e os asteriscos
@@ -4166,6 +4259,10 @@ def _sales_plans_system_block(catalog_context: str, wants_no_fidelity: bool) -> 
         "experimental).\n"
         "- Fidelidade: explique o que ela significa na prática; só ofereça plano sem fidelidade "
         "se ele constar no catálogo abaixo.\n"
+        "- Modalidade que NÃO aparece no catálogo abaixo (diária, semanal, pagamento à vista, "
+        "plano família etc.): NUNCA afirme que não existe. Veja se a base de conhecimento fala "
+        "disso e responda por ela; se não falar, diga que você tem em mãos os planos acima e "
+        "ofereça passar pra um atendente confirmar essa opção.\n"
         "- Regras de contrato (multa, cancelamento, carência, reajuste): só afirme o que estiver "
         "na base de conhecimento; se não estiver lá, diga que confirma com um atendente em vez "
         "de supor.\n"
@@ -4806,6 +4903,24 @@ async def generate_ai_reply(
         if content:
             messages.append({"role": role, "content": content})
 
+    if sales_mode and wants_no_fidelity and not cancellation_active:
+        # Visto em produção: cliente perguntou se dava pra pagar por dia e a
+        # IA respondeu que não existia (existe, só não estava no catálogo).
+        # A regra geral do bloco de planos não bastou — reforço por turno.
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "LEMBRETE DESTE TURNO: o cliente perguntou por uma modalidade curta ou sem "
+                    "compromisso (diária, semanal, avulso). Se ela estiver no catálogo, apresente "
+                    "com o valor. Se NÃO estiver, é PROIBIDO dizer que não existe ou que \"não "
+                    "oferecemos\": diga que os planos que você tem em mãos são os do catálogo e "
+                    "que vai passar pra um atendente confirmar essa opção e o valor — e pergunte "
+                    "se pode transferir."
+                ),
+            }
+        )
+
     if sales_mode and plan_intent_active and not cancellation_active:
         # Reforço por turno (vem depois do histórico, onde o modelo dá mais
         # peso): a instrução geral de oferecer promoção sozinha não bastava —
@@ -5111,6 +5226,8 @@ async def generate_ai_reply(
         # unidade, cortar descrição de plano do texto, fechamento fixo de
         # tour) não se aplicam. plan_unit só serve pra promoção por unidade.
         final_text = _fix_whatsapp_bold(final_text)
+        if wants_no_fidelity:
+            final_text = _fix_short_term_denial(final_text)
         if not touched_units and (plan_intent_active or not confirmed_student):
             await _auto_send_recommended_plan_art(
                 db,

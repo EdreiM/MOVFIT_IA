@@ -16,9 +16,11 @@ from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
     TOOL_KEY_TRANSFER,
     _plan_tour_transfer_active,
+    _fix_short_term_denial,
     _present_plan_art_sales_mode,
     _resolve_plan_images,
     _single_plan_mentioned,
+    _wants_no_fidelity_plan,
     compose_base_prompt,
     generate_ai_reply,
 )
@@ -469,3 +471,37 @@ async def test_sales_mode_transfers_when_customer_confirms_promotion(db_session,
     llm_mock.assert_not_awaited()  # transferência determinística, sem depender do modelo
     assert promotion.title in reply
     assert conv.status == "with_human" and conv.ai_enabled is False
+
+
+def test_daily_or_weekly_request_brings_on_demand_plans_into_catalog():
+    # Regressão de produção: "Tem como pagar anual semanal e por dia" não abria
+    # os planos sob demanda e a IA respondia que a opção não existia.
+    assert _wants_no_fidelity_plan("Tem como pagar anual semanal e por dia") is True
+    assert _wants_no_fidelity_plan("vocês têm diária?") is True
+    assert _wants_no_fidelity_plan("quero só um dia pra testar") is True
+    # "diariamente" e frequência de treino não são pedido de plano curto.
+    assert _wants_no_fidelity_plan("pretendo treinar diariamente") is False
+    assert _wants_no_fidelity_plan("vou umas 3 vezes por semana, qual o valor do plano?") is False
+
+
+def test_denial_of_daily_option_is_replaced_by_handoff_offer():
+    denied = (
+        "Atualmente, os planos que temos disponíveis são apenas o *Plano Mensal Recorrente* e não "
+        "oferecemos opções de pagamento anual, semanal ou por dia.\n\n"
+        "Posso transferir você para um atendente que pode confirmar essas opções e valores?"
+    )
+    fixed = _fix_short_term_denial(denied)
+    assert "não oferecemos" not in fixed
+    assert fixed.startswith("Aqui comigo eu tenho os planos que te passei.")
+    assert fixed.endswith("Posso transferir você para um atendente que pode confirmar essas opções e valores?")
+
+    # Sem oferta de atendente no que sobrou: a pergunta de encaminhamento entra.
+    only_denial = "Não temos diária na unidade. O plano mensal sai por R$ 217,00."
+    fixed = _fix_short_term_denial(only_denial)
+    assert "Não temos diária" not in fixed
+    assert "O plano mensal sai por R$ 217,00." in fixed
+    assert fixed.endswith("Posso te passar pra um atendente confirmar isso pra você?")
+
+    # Resposta que não nega nada fica como está.
+    ok = "Temos o Mensal Avulso por R$ 250,00, sem fidelidade."
+    assert _fix_short_term_denial(ok) == ok

@@ -1003,3 +1003,66 @@ async def test_physical_eval_pipeline_rejects_weekend(db_session, company):
     assert reply is not None
     assert "segunda" in reply.lower()
     assert "sexta" in reply.lower()
+
+
+def _history_message(actor: str, text: str, *, hours_ago: float = 0) -> "Message":
+    from app.models import Message
+
+    return Message(
+        actor=actor,
+        direction="inbound" if actor == "customer" else "outbound",
+        content_type="text",
+        text=text,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+    )
+
+
+def test_greeting_after_unrelated_answer_does_not_start_physical_eval():
+    """Regressão de produção: a resposta sobre o telefone da unidade tinha
+    "unidade" e "confirmar"; dois dias depois o cliente mandou "Boa tarde" e
+    recebeu "Para agendar sua avaliação física, preciso do seu CPF"."""
+    history = [
+        _history_message("customer", "Olá, boa tarde!"),
+        _history_message("ai", "Olá! Aqui é a Mônica, assistente virtual da Mov Fit. Como posso ajudar você hoje?"),
+        _history_message("customer", "Gostaria de número para contato da academia da movfi express?"),
+        _history_message(
+            "ai",
+            "Você pode entrar em contato com a Mov Fit pelo WhatsApp, Instagram ou diretamente na "
+            "recepção da unidade. Sobre o número específico da Mov Fit Express, não tenho essa "
+            "informação aqui na base. Se quiser, posso transferir para um atendente confirmar "
+            "para você. Quer que eu faça isso?",
+        ),
+        _history_message("customer", "Boa tarde"),
+    ]
+    customer_texts = [m.text for m in history if m.actor == "customer"]
+
+    assert _physical_eval_followup("Boa tarde", customer_texts, None, history) is False
+    # Nem uma resposta curta qualquer deve cair no fluxo de avaliação aqui.
+    assert _physical_eval_followup("pode sim", customer_texts, None, history) is False
+
+
+def test_greeting_is_not_a_schedule_period_even_inside_eval_context():
+    history = [
+        _history_message("customer", "Quero agendar avaliação física"),
+        _history_message("ai", "Para agendar sua avaliação física, preciso do seu CPF (só os números)."),
+    ]
+    assert _physical_eval_followup("Boa tarde", ["Quero agendar avaliação física"], None, history) is False
+    assert _extract_schedule_period_from_text("Boa tarde") is None
+    assert _extract_schedule_period_from_text("boa noite, pode ser de manhã") == "manha"
+    assert _extract_schedule_period_from_text("boa tarde, prefiro à tarde") == "tarde"
+    # Resposta de verdade continua entrando no fluxo.
+    assert _physical_eval_followup("quarta à tarde", ["Quero agendar avaliação física"], None, history) is True
+
+
+def test_old_physical_eval_request_does_not_keep_flow_open():
+    old = [
+        _history_message("customer", "Quero agendar avaliação física", hours_ago=50),
+        _history_message("ai", "Para agendar sua avaliação física, preciso do seu CPF.", hours_ago=50),
+    ]
+    assert _physical_eval_followup("queria uma informação", [m.text for m in old if m.actor == "customer"], None, old) is False
+
+    fresh = [
+        _history_message("customer", "Quero agendar avaliação física", hours_ago=1),
+        _history_message("ai", "Para agendar sua avaliação física, preciso do seu CPF.", hours_ago=1),
+    ]
+    assert _physical_eval_followup("52998224725", [m.text for m in fresh if m.actor == "customer"], None, fresh) is True
