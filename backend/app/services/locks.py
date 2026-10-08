@@ -24,19 +24,20 @@ async def advisory_lock(db: AsyncSession, namespace: int, key: int = 0):
     tempo (hoje roda sempre uma cópia só, mas isso protege o dia em que
     escalar pra múltiplas).
 
-    pg_try_advisory_lock/pg_advisory_unlock têm efeito imediato — não fazem
-    parte da transação, não precisam (nem devem) de commit pra "valer".
-    Por isso é seguro usar a mesma `db` que o chamador já usa pro resto do
-    trabalho: nunca damos commit aqui, quem decide se o trabalho deve ser
-    persistido continua sendo o chamador.
+    O lock pertence à CONEXÃO que o pegou, e só ela consegue soltá-lo. Por
+    isso ele vive numa conexão própria (autocommit, tirada do mesmo engine da
+    `db`), que fica reservada do lock ao unlock — não na conexão da `db`: a
+    sessão devolve a conexão dela pro pool a cada commit/rollback do
+    chamador, e o unlock podia sair por outra conexão sem soltar nada. O
+    lock ficava preso numa conexão ociosa e a próxima tentativa encontrava
+    "ocupado" sem ter ninguém trabalhando (visto no Chat de teste como
+    resposta adiada por quase um minuto sem nenhum turno rodando).
 
-    Se o bloco `yield` estourar uma exceção, damos rollback antes de tentar
-    soltar o lock — o Postgres rejeita qualquer novo comando (inclusive o
-    pg_advisory_unlock) numa transação já abortada por erro, então sem esse
-    rollback defensivo o unlock falharia silenciosamente. É seguro o
-    chamador dar rollback de novo depois (ex: no próprio `except`) — a
-    mesma sessão aceita `rollback()` repetido sem erro quando não há
-    transação pendente.
+    Nunca damos commit na `db`: quem decide se o trabalho deve ser persistido
+    continua sendo o chamador, que pode dar commit à vontade dentro do bloco.
+    Se o bloco estourar uma exceção, damos rollback na `db` antes de sair —
+    é seguro o chamador dar rollback de novo depois (ex: no próprio
+    `except`), a mesma sessão aceita `rollback()` repetido sem erro.
 
     Uso:
         async with advisory_lock(db, LOCK_NAMESPACE_X, key) as acquired:
@@ -44,32 +45,34 @@ async def advisory_lock(db: AsyncSession, namespace: int, key: int = 0):
                 return  # outro processo já está fazendo isso agora
             ...trabalho...
     """
-    acquired = bool(await db.scalar(select(func.pg_try_advisory_lock(namespace, key))))
-    if not acquired:
-        logger.debug("Lock (namespace=%s, key=%s) já está em uso por outro processo.", namespace, key)
-    try:
-        yield acquired
-    except BaseException:
-        if acquired:
-            try:
-                await db.rollback()
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Rollback após erro dentro do advisory_lock (namespace=%s, key=%s)",
-                    namespace,
-                    key,
-                )
-        raise
-    finally:
-        if acquired:
-            try:
-                await db.execute(select(func.pg_advisory_unlock(namespace, key)))
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Falha ao liberar advisory_lock (namespace=%s, key=%s)",
-                    namespace,
-                    key,
-                )
+    async with db.bind.connect() as raw_conn:
+        lock_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+        acquired = bool(await lock_conn.scalar(select(func.pg_try_advisory_lock(namespace, key))))
+        if not acquired:
+            logger.debug("Lock (namespace=%s, key=%s) já está em uso por outro processo.", namespace, key)
+        try:
+            yield acquired
+        except BaseException:
+            if acquired:
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Rollback após erro dentro do advisory_lock (namespace=%s, key=%s)",
+                        namespace,
+                        key,
+                    )
+            raise
+        finally:
+            if acquired:
+                try:
+                    await lock_conn.execute(select(func.pg_advisory_unlock(namespace, key)))
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Falha ao liberar advisory_lock (namespace=%s, key=%s)",
+                        namespace,
+                        key,
+                    )
 
 
 def uuid_lock_key(value) -> int:
