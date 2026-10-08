@@ -206,7 +206,10 @@ async def send_promotion_to_client(
     promotion: Promotion,
     *,
     unit_name: str | None = None,
+    banner_only: bool = False,
 ) -> None:
+    """`banner_only` (modo vendedor): manda só a arte da promoção — o texto
+    oficial não vai, quem apresenta a promoção é a IA com as palavras dela."""
     from app.adapters.base import NormalizedMessageEvent
     from app.config import get_settings
     from app.services.image_upload import ensure_whatsapp_delivery_url
@@ -283,6 +286,9 @@ async def send_promotion_to_client(
                 ),
             )
 
+    if banner_only:
+        return
+
     await save_message(
         db,
         conversation,
@@ -309,6 +315,7 @@ async def present_promotions(
     promotions: list[Promotion],
     *,
     unit_name: str | None = None,
+    banner_only: bool = False,
 ) -> int:
     if not promotions:
         return 0
@@ -318,7 +325,11 @@ async def present_promotions(
         pid = str(promotion.id)
         if pid in sent_ids:
             continue
-        await send_promotion_to_client(db, conversation, promotion, unit_name=unit_name)
+        if banner_only and not promotion.image_url:
+            continue
+        await send_promotion_to_client(
+            db, conversation, promotion, unit_name=unit_name, banner_only=banner_only
+        )
         sent_ids.add(pid)
         count += 1
     return count
@@ -365,6 +376,122 @@ def promotion_transfer_active(
         if m.actor == "ai"
     )
     return offered
+
+
+# --- Modo vendedor -----------------------------------------------------
+# A IA apresenta a promoção em texto livre (sem o texto oficial pronto) e
+# segue respondendo dúvidas; a transferência determinística só dispara quando
+# o cliente confirma que quer a PROMOÇÃO — não em qualquer "sim"/"essa" solto
+# no meio da conversa de venda, como no fluxo de catálogo.
+
+_GENERIC_PROMO_WORDS = {"promocao", "promocoes", "promo", "desconto", "campanha"}
+_TITLE_NOISE_TOKENS = _GENERIC_PROMO_WORDS | {
+    "mensalidade", "mensalidades", "matricula", "plano", "planos", "primeira", "para", "especial",
+}
+_PROMO_CLOSING_WORDS = _GENERIC_PROMO_WORDS | {"condicao", "aproveitar", "atendente"}
+_INQUIRY_TOKENS = {
+    "qual", "quais", "como", "quanto", "quanta", "quando", "onde", "porque", "saber", "entender",
+    "duvida", "duvidas", "detalhe", "detalhes", "informacao", "informacoes", "funciona", "vale",
+    "explica", "explicar",
+}
+_SALES_CONFIRM_TOKENS = {
+    "sim", "quero", "gostaria", "bora", "vamos", "aceito", "claro", "fechado", "topo", "pode", "isso",
+}
+_SALES_CONFIRM_PHRASES = (
+    "tenho interesse", "me interessa", "quero aproveitar", "quero essa", "quero esse",
+    "quero a promo", "quero o desconto",
+)
+
+
+def promotion_mentioned_in_text(text: str | None, promotion: Promotion, *, only_promotion: bool = False) -> bool:
+    """O texto fala DESSA promoção? Vale palavra-chave cadastrada, ou as
+    palavras que identificam o título ("outubro rosa"). Palavra genérica
+    ("promoção", "desconto") só conta quando ela é a única promoção ativa."""
+    if not text:
+        return False
+    normalized = _normalize_text(text)
+    tokens = _normalize_tokens(text)
+    custom = [_normalize_text(k) for k in (promotion.trigger_keywords or []) if k and k.strip()]
+    if any(keyword in normalized for keyword in custom):
+        return True
+    title_tokens = {
+        t for t in _normalize_tokens(promotion.title) if len(t) >= 4 and t not in _TITLE_NOISE_TOKENS
+    }
+    if title_tokens and len(title_tokens & tokens) >= min(2, len(title_tokens)):
+        return True
+    return only_promotion and bool(tokens & _GENERIC_PROMO_WORDS)
+
+
+def promotions_mentioned_in_reply(
+    text: str, promotions: list[Promotion], unit_id: UUID | None = None
+) -> list[Promotion]:
+    """Promoções que a resposta da IA citou — pra arte acompanhar a oferta."""
+    only = len(promotions) == 1
+    return [
+        p
+        for p in promotions
+        if _promotion_unit_matches(p, unit_id) and promotion_mentioned_in_text(text, p, only_promotion=only)
+    ]
+
+
+def confirms_promotion_interest(text: str) -> bool:
+    """Confirmação curta e sem pergunta ("sim", "quero aproveitar"). Dúvida
+    sobre a promoção ("essa promoção vale pra qual plano?", "quero saber
+    mais") não é confirmação — a IA segue atendendo."""
+    if not text or "?" in text:
+        return False
+    tokens = _normalize_tokens(text)
+    if not tokens or tokens & _INQUIRY_TOKENS:
+        return False
+    normalized = _normalize_text(text)
+    if any(phrase in normalized for phrase in _SALES_CONFIRM_PHRASES):
+        return True
+    return len(tokens) <= 8 and bool(tokens & _SALES_CONFIRM_TOKENS)
+
+
+def _last_ai_turn(history: list[Message]) -> list[Message]:
+    """Bolhas da última resposta da IA, em ordem (ignora as mensagens do
+    cliente que vieram depois dela)."""
+    turn: list[Message] = []
+    for message in reversed(history):
+        if message.actor == "customer":
+            if turn:
+                break
+            continue
+        turn.append(message)
+    return list(reversed(turn))
+
+
+def sales_promotion_to_transfer(
+    user_text: str, history: list[Message], promotions: list[Promotion]
+) -> Promotion | None:
+    """Promoção sem link que o cliente acabou de confirmar que quer — hora de
+    passar pro atendente. Dispara em dois casos: o cliente pediu a promoção
+    com as próprias palavras ("quero o desconto"), ou a última pergunta da IA
+    era sobre aproveitar a promoção e ele confirmou. Um "sim" pra outra
+    pergunta (ex: "posso te mandar o link?") não dispara."""
+    if not confirms_promotion_interest(user_text):
+        return None
+    only = len(promotions) == 1
+    last_turn = _last_ai_turn(history)
+    closing = next((m.text for m in reversed(last_turn) if m.actor == "ai" and m.text), "")
+    closing_tokens = _normalize_tokens(closing)
+    for promotion in promotions:
+        if not promotion.requires_transfer:
+            continue
+        if promotion_mentioned_in_text(user_text, promotion, only_promotion=only):
+            return promotion
+        offered_in_turn = any(
+            (isinstance(m.raw_payload, dict) and str(m.raw_payload.get("promotion_id")) == str(promotion.id))
+            or promotion_mentioned_in_text(m.text, promotion, only_promotion=only)
+            for m in last_turn
+        )
+        closing_is_about_promo = promotion_mentioned_in_text(
+            closing, promotion, only_promotion=only
+        ) or bool(closing_tokens & _PROMO_CLOSING_WORDS)
+        if offered_in_turn and closing_is_about_promo:
+            return promotion
+    return None
 
 
 async def run_promotion_transfer_pipeline(

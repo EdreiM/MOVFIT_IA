@@ -9,11 +9,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from app.models import AiConfig, Conversation, Message, Plan, Tool, Unit
+from app.models import AiConfig, Conversation, Message, Plan, Promotion, Tool, Unit
 from app.security import encrypt_secret
 from app.services.followup import _generate_followup_text
 from app.services.message_flow import (
     TOOL_KEY_SEND_PLAN_IMAGES,
+    TOOL_KEY_TRANSFER,
     _plan_tour_transfer_active,
     _present_plan_art_sales_mode,
     _resolve_plan_images,
@@ -21,6 +22,7 @@ from app.services.message_flow import (
     compose_base_prompt,
     generate_ai_reply,
 )
+from app.services.promotions import confirms_promotion_interest, sales_promotion_to_transfer
 
 UNIT_NAME = "Santarém - 24 horas"
 SELLER_REPLY = (
@@ -338,3 +340,132 @@ async def test_followup_gets_sales_instruction_only_in_sales_mode(sales_mode):
         m["content"] for m in llm_mock.await_args.kwargs["messages"] if m["role"] == "system"
     )
     assert ("MODO VENDEDOR" in system) is sales_mode
+
+
+# --- Promoções no modo vendedor ------------------------------------------
+
+PROMO_TITLE = "Outubro Rosa — 50% na 1ª mensalidade"
+PROMO_TEMPLATE = "✨ OUTUBRO É MÊS DE SE CUIDAR! 💪💗 Novas alunas ganham 50% de desconto na primeira mensalidade."
+PROMO_PITCH = (
+    "Lá o Plano Anual Parcelado sai por R$ 197,00 por mês — e nesse mês tem o Outubro Rosa: "
+    "novas alunas pagam metade da primeira mensalidade.\n\n"
+    "Quer aproveitar essa condição? Te passo pra um atendente garantir."
+)
+
+
+async def _add_promotion(db_session, company, **overrides) -> Promotion:
+    promotion = Promotion(
+        company_id=company.id,
+        title=PROMO_TITLE,
+        message=PROMO_TEMPLATE,
+        image_url="https://exemplo.com/outubro-rosa.png",
+        audience="women",
+        requires_transfer=True,
+        mention_on_plan_request=True,
+        **overrides,
+    )
+    db_session.add(promotion)
+    await db_session.commit()
+    return promotion
+
+
+@pytest.mark.asyncio
+async def test_sales_mode_sends_promo_banner_without_official_text(db_session, company, sales_setup):
+    _, _, conv = sales_setup
+    promotion = await _add_promotion(db_session, company)
+
+    (reply, _, _), llm_mock = await _ask_for_plans(
+        db_session, conv, [{"content": PROMO_PITCH, "tool_calls": None}]
+    )
+
+    # Quem apresenta a promoção é o texto da IA; o texto oficial não é enviado.
+    assert reply == PROMO_PITCH
+    ai_messages = await _ai_messages(db_session, conv)
+    assert all(m.text != PROMO_TEMPLATE for m in ai_messages)
+    assert [m.content_type for m in ai_messages] == ["image", "image"]  # arte do plano + banner
+    banner = next(m for m in ai_messages if (m.raw_payload or {}).get("promotion_banner"))
+    assert banner.raw_payload["promotion_id"] == str(promotion.id)
+    # A IA recebe a promoção como contexto, com a instrução de falar do jeito dela.
+    system = _system_text(llm_mock)
+    assert "[Promoções ativas" in system and "NUNCA copie o texto oficial" in system
+
+
+@pytest.mark.asyncio
+async def test_sales_mode_sends_no_promo_art_when_reply_does_not_mention_it(db_session, company, sales_setup):
+    _, _, conv = sales_setup
+    await _add_promotion(db_session, company)
+
+    await _ask_for_plans(db_session, conv, [{"content": SELLER_REPLY, "tool_calls": None}])
+
+    ai_messages = await _ai_messages(db_session, conv)
+    assert not any((m.raw_payload or {}).get("promotion_id") for m in ai_messages)
+
+
+def test_promotion_confirmation_is_not_triggered_by_questions():
+    assert confirms_promotion_interest("sim") is True
+    assert confirms_promotion_interest("quero aproveitar sim") is True
+    assert confirms_promotion_interest("pode ser") is True
+    # No fluxo de catálogo "essa" já contava como confirmação.
+    assert confirms_promotion_interest("essa promoção vale pra qual plano?") is False
+    assert confirms_promotion_interest("quero saber mais sobre isso") is False
+    assert confirms_promotion_interest("e como funciona o treino grátis") is False
+
+
+def test_sales_promotion_transfer_needs_confirmation_of_the_promotion_itself():
+    promotion = Promotion(title=PROMO_TITLE, message=PROMO_TEMPLATE, requires_transfer=True, trigger_keywords=[])
+    offer = [
+        _msg("customer", "queria ver os planos", 5),
+        _msg("ai", "O anual sai por R$ 197,00 — e tem o Outubro Rosa, com 50% na primeira mensalidade.", 4),
+        _msg("ai", "Quer aproveitar essa condição? Te passo pra um atendente garantir.", 4),
+    ]
+
+    assert sales_promotion_to_transfer("sim", offer + [_msg("customer", "sim", 0)], [promotion]) is promotion
+    # Dúvida não transfere: a IA continua atendendo.
+    question = "essa promoção vale pro plano mensal?"
+    assert sales_promotion_to_transfer(question, offer + [_msg("customer", question, 0)], [promotion]) is None
+
+    # A última pergunta da IA era sobre o link, não sobre a promoção: "sim" não transfere.
+    link_offer = offer[:2] + [_msg("ai", "Posso te mandar o link pra garantir a vaga?", 4)]
+    assert sales_promotion_to_transfer("sim", link_offer + [_msg("customer", "sim", 0)], [promotion]) is None
+    # Mas se o cliente pedir a promoção com as próprias palavras, transfere.
+    assert sales_promotion_to_transfer("quero o desconto", link_offer, [promotion]) is promotion
+
+
+@pytest.mark.asyncio
+async def test_sales_mode_transfers_when_customer_confirms_promotion(db_session, company, sales_setup):
+    config, _, conv = sales_setup
+    promotion = await _add_promotion(db_session, company)
+    transfer_tool = Tool(
+        company_id=company.id,
+        ai_config_id=config.id,
+        name="Transferir atendimento",
+        tool_key=TOOL_KEY_TRANSFER,
+        description="Transfere pra um atendente",
+        parameters=[{"name": "motivo", "type": "string", "required": True}],
+        webhook_url="https://example.com/transferir",
+        is_active=True,
+    )
+    db_session.add(transfer_tool)
+    for actor, text_ in (("customer", "queria ver os planos"), ("ai", PROMO_PITCH), ("customer", "quero sim")):
+        db_session.add(
+            Message(
+                company_id=company.id,
+                conversation_id=conv.id,
+                direction="inbound" if actor == "customer" else "outbound",
+                actor=actor,
+                content_type="text",
+                text=text_,
+            )
+        )
+        await db_session.flush()
+    await db_session.commit()
+
+    with patch(
+        "app.services.message_flow.fetch_rag_context", new_callable=AsyncMock, return_value=""
+    ), patch("app.services.message_flow.chat_completion", new_callable=AsyncMock) as llm_mock:
+        reply, _, _ = await generate_ai_reply(db_session, conv, "quero sim")
+        await db_session.commit()
+
+    llm_mock.assert_not_awaited()  # transferência determinística, sem depender do modelo
+    assert promotion.title in reply
+    assert conv.status == "with_human" and conv.ai_enabled is False

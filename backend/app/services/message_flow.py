@@ -46,8 +46,11 @@ from app.services.promotions import (
     format_promotions_prompt_block,
     get_active_promotions,
     present_promotions,
+    promotion_mentioned_in_text,
     promotion_transfer_active,
+    promotions_mentioned_in_reply,
     run_promotion_transfer_pipeline,
+    sales_promotion_to_transfer,
     wants_promotion_inquiry,
 )
 
@@ -4168,8 +4171,21 @@ def _sales_plans_system_block(catalog_context: str, wants_no_fidelity: bool) -> 
         "de supor.\n"
         "- Se o cliente confirmar que quer o tour, chame transferir_atendimento nessa mesma "
         "resposta — NÃO peça CPF, unidade nem horários: o atendente agenda.\n"
-        "- Promoção ativa que se aplique ao cliente é argumento de venda: cite com as suas "
-        "palavras, sem mudar as condições.\n"
+        "PROMOÇÕES (bloco [Promoções ativas], quando existir):\n"
+        "- Promoção ativa é seu melhor argumento: ao apresentar os planos, ofereça a que pode "
+        "servir pro cliente com as SUAS palavras, em 1 ou 2 frases de conversa — o que ele "
+        "ganha, pra quem vale e até quando. NUNCA copie o texto oficial da promoção, nem use "
+        "título em maiúsculas ou sequência de emojis; não mude nem invente condição.\n"
+        "- Se a promoção é pra um público específico (ex: mulheres, novos alunos), diga pra "
+        "quem é em vez de presumir que o cliente se encaixa.\n"
+        "- Responda as dúvidas sobre a promoção normalmente e continue conduzindo a venda — "
+        "tirar dúvida não é motivo pra transferir.\n"
+        "- Promoção marcada como \"sem link de matrícula\": quem finaliza é um atendente. "
+        "Quando o cliente confirmar que quer aproveitar, chame transferir_atendimento NESSA "
+        "mesma resposta com o motivo indicado na promoção. Nesse caso NÃO mande link de plano "
+        "(pelo link ele perde a condição), e ao oferecer a promoção faça da última frase a "
+        "pergunta sobre aproveitá-la (ex: se quer que você passe pra um atendente garantir a "
+        "condição) — sem misturar com oferta de link ou tour na mesma resposta.\n"
         "IMAGEM (ferramenta enviar_imagens_planos): no modo vendedor ela manda SÓ a arte do "
         "plano, sem nenhum texto — a explicação é sempre sua. Na primeira vez que recomendar um "
         "plano (ou quando o cliente demonstrar interesse em um), chame a ferramenta UMA vez pra "
@@ -4330,7 +4346,20 @@ async def generate_ai_reply(
 
     active_promotions = await get_active_promotions(db, conversation.company_id)
     offered_promotion = await find_recent_offered_promotion(db, conversation, history)
-    if promotion_transfer_active(user_text, history, recent_customer_texts, offered_promotion):
+    if sales_mode:
+        # Modo vendedor: a IA apresenta a promoção e responde dúvidas; só
+        # transfere quando o cliente confirma que quer a promoção em si.
+        confirmed_promotion = (
+            None
+            if _cancellation_flow_active(user_text, recent_customer_texts)
+            else sales_promotion_to_transfer(user_text, history, active_promotions)
+        )
+        if confirmed_promotion:
+            promo_reply = await run_promotion_transfer_pipeline(
+                db, conversation, confirmed_promotion, tools_by_key
+            )
+            return promo_reply, None, False
+    elif promotion_transfer_active(user_text, history, recent_customer_texts, offered_promotion):
         promo_reply = await run_promotion_transfer_pipeline(
             db, conversation, offered_promotion, tools_by_key
         )
@@ -4773,6 +4802,35 @@ async def generate_ai_reply(
         if content:
             messages.append({"role": role, "content": content})
 
+    if sales_mode and plan_intent_active and not cancellation_active:
+        # Reforço por turno (vem depois do histórico, onde o modelo dá mais
+        # peso): a instrução geral de oferecer promoção sozinha não bastava —
+        # ela apresentava os planos e esquecia a promoção.
+        only_promotion = len(active_promotions) == 1
+        ai_texts = [m.text for m in history if m.actor == "ai" and m.text]
+        not_offered_yet = [
+            p
+            for p in active_promotions
+            if p.mention_on_plan_request
+            and not any(promotion_mentioned_in_text(t, p, only_promotion=only_promotion) for t in ai_texts)
+        ]
+        if not_offered_yet:
+            titles = "; ".join(p.title for p in not_offered_yet)
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"LEMBRETE DESTE TURNO: há promoção ativa que você ainda NÃO ofereceu nesta "
+                        f"conversa: {titles}. Se nesta resposta você apresentar planos ou valores "
+                        "(unidade já definida), ofereça essa promoção junto, do seu jeito: pra quem "
+                        "vale e o que a pessoa ganha, em 1 ou 2 frases, sem copiar o texto oficial. "
+                        "Se ainda estiver perguntando a unidade, deixe a promoção pra quando "
+                        "apresentar os planos. Só não ofereça se as condições dela claramente não "
+                        "servirem pra esse cliente."
+                    ),
+                }
+            )
+
     # TOOL_KEY_CHECK_SESSION é só pro follow-up consultar por conta própria
     # (ver TOOL_KEY_CHECK_SESSION acima) — nunca deve ser oferecida como uma
     # função que a IA decide chamar durante a conversa. TOOL_KEY_BOOK_
@@ -5110,7 +5168,12 @@ async def generate_ai_reply(
 
     promo_unit_id = plan_unit.id if plan_unit else None
     promotions_to_send = []
-    if not _cancellation_flow_active(user_text, recent_customer_texts):
+    if sales_mode:
+        # A promoção quem apresenta é o texto da IA; aqui vai só a arte, e só
+        # da promoção que ela de fato citou nessa resposta.
+        if not _cancellation_flow_active(user_text, recent_customer_texts):
+            promotions_to_send = promotions_mentioned_in_reply(final_text, active_promotions, promo_unit_id)
+    elif not _cancellation_flow_active(user_text, recent_customer_texts):
         if touched_units:
             promotions_to_send = await get_active_promotions(
                 db,
@@ -5128,6 +5191,7 @@ async def generate_ai_reply(
             conversation,
             promotions_to_send,
             unit_name=plan_unit.name if plan_unit else None,
+            banner_only=sales_mode,
         )
         delivered_via_tools = delivered_via_tools or promo_sent > 0
 
