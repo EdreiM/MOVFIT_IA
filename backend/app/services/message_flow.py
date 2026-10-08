@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import unicodedata
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
@@ -24,6 +25,7 @@ from app.models import (
     MetricsDaily,
     Number,
     Plan,
+    Promotion,
     RagSource,
     Tool,
     ToolCallLog,
@@ -3660,41 +3662,25 @@ async def _present_plan_images_with_captions(
     }
 
 
-async def _present_plan_art_sales_mode(
-    db: AsyncSession,
-    conversation: Conversation,
-    tool: Tool,
-    images: list[dict],
-    *,
-    explicit_request: bool,
-    touched_units: set[str],
-) -> dict:
-    """enviar_imagens_planos no modo vendedor: a arte é apoio da conversa,
-    não a apresentação em si — vai só a imagem (sem introdução nem legenda)
-    e só de UM plano por chamada. Trava no código, não só no prompt: se a IA
-    chamar sem dizer qual plano (o que resolveria pra todos os planos da
-    unidade), nada é enviado e ela é orientada a especificar — a exceção é o
-    cliente ter pedido as imagens explicitamente."""
-    if len(images) > 1 and not explicit_request:
-        return {
-            "sucesso": False,
-            "mensagem": (
-                "Nenhuma imagem enviada: no modo vendedor mande a arte de UM plano por vez — o "
-                "que você está recomendando. Chame de novo informando também o nome exato do "
-                "plano (se a ferramenta não tiver campo próprio pra isso, escreva o nome do "
-                "plano junto no campo da unidade), ou siga a conversa só em texto."
-            ),
-        }
-    return await _present_plan_images_with_captions(
-        db,
-        conversation,
-        conversation.company_id,
-        tool,
-        images,
-        force_resend=explicit_request,
-        touched_units=touched_units,
-        with_captions=False,
-    )
+@dataclass
+class SalesMediaContext:
+    """O que o modo vendedor precisa pra mandar cada imagem logo depois da
+    bolha de texto que fala dela (ver reply_to_pending_messages): o texto é
+    enviado depois que generate_ai_reply devolve, então as artes não podem
+    sair de dentro dele — chegariam todas antes da explicação, fora de ordem
+    e longe do trecho a que pertencem (visto em produção)."""
+
+    unit_id: UUID | None
+    unit_name: str | None
+    plans: list[Plan]
+    promotions: list[Promotion]
+    force_resend: bool = False
+
+
+# Contexto de mídia da resposta em andamento, por conversa. generate_ai_reply
+# preenche, reply_to_pending_messages consome — o lock por conversa garante
+# que só existe uma resposta em andamento por vez.
+_pending_sales_media: dict[UUID, SalesMediaContext] = {}
 
 
 _GENERIC_PLAN_NAME_TOKENS = {"plano", "planos"}
@@ -3775,29 +3761,23 @@ async def _resolve_sales_art_unit(
     return None
 
 
-async def _auto_send_recommended_plan_art(
+async def _build_sales_media_context(
     db: AsyncSession,
     conversation: Conversation,
     user_text: str,
     assistant_text: str,
-    tools_by_key: dict[str, Tool],
-    touched_units: set[str],
+    promotions: list[Promotion],
     recent_customer_texts: list[str] | None = None,
     recent_ai_texts: list[str] | None = None,
     lead: Lead | None = None,
-) -> None:
-    """Rede de segurança do modo vendedor (reforço no código, não só no
-    prompt): a arte do plano recomendado deve acompanhar a recomendação, mas
-    o modelo nem sempre chama a ferramenta. Se a resposta indica UM plano com
-    imagem da unidade em questão (ver _single_plan_mentioned), manda a arte
-    dele — uma vez por conversa (dedup por URL). Citou vários planos
-    (comparação) ou nenhum: não manda nada, pra não virar o despejo de
-    imagens do fluxo de catálogo."""
-    tool = tools_by_key.get(TOOL_KEY_SEND_PLAN_IMAGES)
-    if not tool or not tool.webhook_url or not assistant_text.strip():
-        return
+) -> SalesMediaContext | None:
+    """Planos e promoções cujas imagens podem acompanhar essa resposta — a
+    escolha de qual imagem vai depois de qual bolha é feita na hora do envio
+    (ver _pick_sales_media_for_bubble). Não envia nada."""
+    if not assistant_text.strip():
+        return None
     if _should_block_plan_delivery(user_text, recent_customer_texts, lead=lead):
-        return
+        return None
     unit = await _resolve_sales_art_unit(
         db,
         conversation.company_id,
@@ -3805,21 +3785,61 @@ async def _auto_send_recommended_plan_art(
         assistant_text,
         recent_customer_texts,
         recent_ai_texts or [],
-        touched_units,
+        set(),
     )
-    if not unit:
+    plans = [p for p in unit.plans if p.is_active] if unit else []
+    if not plans and not promotions:
+        return None
+    return SalesMediaContext(
+        unit_id=unit.id if unit else None,
+        unit_name=unit.name if unit else None,
+        plans=plans,
+        promotions=promotions,
+        force_resend=_wants_image_explicitly(user_text),
+    )
+
+
+def _pick_sales_media_for_bubble(
+    bubble_text: str, context: SalesMediaContext, already_picked: set[str]
+) -> list[Plan | Promotion]:
+    """O que deve ir logo depois de uma bolha de texto: a arte do plano que
+    ela apresenta (quando fala de UM plano — ver _single_plan_mentioned) e o
+    banner da promoção que ela cita, nessa ordem. Cada imagem entra uma vez
+    só por resposta (`already_picked`)."""
+    picked: list[Plan | Promotion] = []
+    plan = _single_plan_mentioned(bubble_text, context.plans)
+    if plan and plan.image_url and f"plan:{plan.id}" not in already_picked:
+        already_picked.add(f"plan:{plan.id}")
+        picked.append(plan)
+    for promotion in promotions_mentioned_in_reply(bubble_text, context.promotions, context.unit_id):
+        if promotion.image_url and f"promo:{promotion.id}" not in already_picked:
+            already_picked.add(f"promo:{promotion.id}")
+            picked.append(promotion)
+    return picked
+
+
+async def _send_sales_media(
+    db: AsyncSession,
+    conversation: Conversation,
+    item: Plan | Promotion,
+    context: SalesMediaContext,
+) -> None:
+    """Envia uma imagem do modo vendedor, sem texto junto. Uma vez por
+    conversa: arte de plano já enviada (dedup por URL) só vai de novo se o
+    cliente pediu imagem; promoção já enviada não repete."""
+    if isinstance(item, Promotion):
+        await present_promotions(db, conversation, [item], unit_name=context.unit_name, banner_only=True)
         return
-    plan = _single_plan_mentioned(assistant_text, [p for p in unit.plans if p.is_active])
-    if not plan or not plan.image_url:
+    tool = await _resolve_plan_images_tool(db, conversation)
+    if not tool or not tool.webhook_url:
         return
     await _present_plan_images_with_captions(
         db,
         conversation,
         conversation.company_id,
         tool,
-        [_build_imagem_plano_entry(url=plan.image_url, unidade=unit.name, plano=plan.name)],
-        force_resend=False,
-        touched_units=touched_units,
+        [_build_imagem_plano_entry(url=item.image_url, unidade=context.unit_name or "", plano=item.name)],
+        force_resend=context.force_resend,
         with_captions=False,
     )
 
@@ -4211,7 +4231,7 @@ def _sales_plans_system_block(catalog_context: str, wants_no_fidelity: bool) -> 
         "pra ela no catálogo (o cabeçalho da unidade diz quantos são), cada um com o valor. "
         "Nunca omita um plano nem diga que só existe um se o catálogo listar mais.\n"
         "- Explique os planos da unidade com as SUAS palavras, em texto corrido e curto, como "
-        "alguém digitando no WhatsApp: 2 a 4 parágrafos curtos separados por linha em branco. "
+        "alguém digitando no WhatsApp: parágrafos curtos separados por linha em branco. "
         "PROIBIDO formato de ficha ou lista: nada de título em maiúsculas, linha de emoji por "
         "item, nem linha começando com hífen, • ou número — escreva frases. Negrito só com *um "
         "asterisco*, e no máximo no nome do plano ou no valor.\n"
@@ -4283,12 +4303,19 @@ def _sales_plans_system_block(catalog_context: str, wants_no_fidelity: bool) -> 
         "(pelo link ele perde a condição), e ao oferecer a promoção faça da última frase a "
         "pergunta sobre aproveitá-la (ex: se quer que você passe pra um atendente garantir a "
         "condição) — sem misturar com oferta de link ou tour na mesma resposta.\n"
-        "IMAGEM (ferramenta enviar_imagens_planos): no modo vendedor ela manda SÓ a arte do "
-        "plano, sem nenhum texto — a explicação é sempre sua. Na primeira vez que recomendar um "
-        "plano (ou quando o cliente demonstrar interesse em um), chame a ferramenta UMA vez pra "
-        "mandar a arte DESSE plano: informe a unidade E o nome exato do plano. Não mande a arte "
-        "de todos os planos de uma vez, a não ser que o cliente peça as imagens/fotos dos "
+        "IMAGENS: você NÃO envia imagem nem chama ferramenta pra isso. A arte de cada plano e o "
+        "banner da promoção são enviados automaticamente logo DEPOIS do parágrafo em que você "
+        "fala de cada um — por isso a estrutura abaixo importa. Não escreva \"segue a imagem\" "
+        "nem \"vou te mandar a arte\".\n"
+        "ESTRUTURA ao apresentar os planos de uma unidade (parágrafos separados por linha em "
+        "branco, nesta ordem, como um vendedor mostrando uma coisa de cada vez):\n"
+        "1) Um parágrafo POR PLANO: nome, valor e o que ele oferece. Nunca fale de dois planos "
+        "no mesmo parágrafo.\n"
+        "2) Se houver promoção que sirva pro cliente, um parágrafo SÓ pra ela, depois dos "
         "planos.\n"
+        "3) Um parágrafo final com a sua recomendação e UMA pergunta de fechamento (qual das "
+        "opções ele prefere, ou o próximo passo). Não repita plano nem promoção nesse "
+        "parágrafo além do necessário.\n"
         "HONESTIDADE: nada de urgência falsa nem promessa fora do catálogo. Limite de vagas ou "
         "prazo você só cita se constar no catálogo/promoção (ex: \"são só 20 vagas\") — e você "
         "NÃO sabe quantas vagas restam: se perguntarem se ainda tem vaga, diga que o plano tem "
@@ -4351,6 +4378,7 @@ async def generate_ai_reply(
 
     api_key = decrypt_secret(config.llm_api_key_encrypted)
     sales_mode = _sales_mode(config)
+    _pending_sales_media.pop(conversation.id, None)
     custom_links = await _get_company_custom_links(db, conversation.company_id)
     rag_context = await fetch_rag_context(db, conversation.company_id, user_text)
 
@@ -4941,8 +4969,9 @@ async def generate_ai_reply(
                     "content": (
                         f"LEMBRETE DESTE TURNO: há promoção ativa que você ainda NÃO ofereceu nesta "
                         f"conversa: {titles}. Se nesta resposta você apresentar planos ou valores "
-                        "(unidade já definida), ofereça essa promoção junto, do seu jeito: pra quem "
-                        "vale e o que a pessoa ganha, em 1 ou 2 frases, sem copiar o texto oficial. "
+                        "(unidade já definida), ofereça essa promoção num parágrafo só dela, depois "
+                        "dos planos e antes da pergunta final, do seu jeito: pra quem vale e o que a "
+                        "pessoa ganha, em 1 ou 2 frases, sem copiar o texto oficial. "
                         "Se ainda estiver perguntando a unidade, deixe a promoção pra quando "
                         "apresentar os planos. Só não ofereça se as condições dela claramente não "
                         "servirem pra esse cliente."
@@ -4962,6 +4991,10 @@ async def generate_ai_reply(
         t
         for t in active_tools
         if t.tool_key not in (TOOL_KEY_CHECK_SESSION, TOOL_KEY_BOOK_PHYSICAL_EVAL)
+        # Modo vendedor: as artes saem logo depois da bolha que fala de cada
+        # plano (ver SalesMediaContext). Se a IA pudesse chamar a ferramenta,
+        # a imagem chegaria antes do texto, fora de ordem.
+        and not (sales_mode and t.tool_key == TOOL_KEY_SEND_PLAN_IMAGES)
     ]
     for t in offered_tools:
         if not _is_valid_openai_tool(t):
@@ -5108,14 +5141,13 @@ async def generate_ai_reply(
                 else:
                     resolved_images = await _resolve_plan_images(db, conversation.company_id, arguments)
                     if sales_mode:
-                        result = await _present_plan_art_sales_mode(
-                            db,
-                            conversation,
-                            tool,
-                            resolved_images,
-                            explicit_request=_wants_image_explicitly(user_text),
-                            touched_units=touched_units,
-                        )
+                        result = {
+                            "sucesso": True,
+                            "mensagem": (
+                                "As artes dos planos são enviadas automaticamente logo depois do "
+                                "trecho do seu texto que fala de cada plano. Siga explicando."
+                            ),
+                        }
                     else:
                         result = await _present_plan_images_with_captions(
                             db,
@@ -5228,25 +5260,22 @@ async def generate_ai_reply(
         final_text = _fix_whatsapp_bold(final_text)
         if wants_no_fidelity:
             final_text = _fix_short_term_denial(final_text)
-        if not touched_units and (plan_intent_active or not confirmed_student):
-            await _auto_send_recommended_plan_art(
+        if not _cancellation_flow_active(user_text, recent_customer_texts) and (
+            plan_intent_active or not confirmed_student
+        ):
+            media_context = await _build_sales_media_context(
                 db,
                 conversation,
                 user_text,
                 final_text,
-                tools_by_key,
-                touched_units,
+                active_promotions,
                 recent_customer_texts=recent_customer_texts,
                 recent_ai_texts=[m.text for m in history if m.actor == "ai" and m.text],
                 lead=lead,
             )
-        plan_unit = (
-            await _resolve_plan_delivery_unit(
-                db, conversation.company_id, user_text, final_text, recent_customer_texts, touched_units
-            )
-            if touched_units
-            else None
-        )
+            if media_context:
+                _pending_sales_media[conversation.id] = media_context
+        plan_unit = None
     else:
         plan_unit = await _auto_send_plan_images(
             db,
@@ -5289,12 +5318,9 @@ async def generate_ai_reply(
 
     promo_unit_id = plan_unit.id if plan_unit else None
     promotions_to_send = []
-    if sales_mode:
-        # A promoção quem apresenta é o texto da IA; aqui vai só a arte, e só
-        # da promoção que ela de fato citou nessa resposta.
-        if not _cancellation_flow_active(user_text, recent_customer_texts):
-            promotions_to_send = promotions_mentioned_in_reply(final_text, active_promotions, promo_unit_id)
-    elif not _cancellation_flow_active(user_text, recent_customer_texts):
+    # No modo vendedor a promoção quem apresenta é o texto da IA, e o banner
+    # sai depois da bolha que fala dela (ver _send_sales_media).
+    if not sales_mode and not _cancellation_flow_active(user_text, recent_customer_texts):
         if touched_units:
             promotions_to_send = await get_active_promotions(
                 db,
@@ -5312,7 +5338,6 @@ async def generate_ai_reply(
             conversation,
             promotions_to_send,
             unit_name=plan_unit.name if plan_unit else None,
-            banner_only=sales_mode,
         )
         delivered_via_tools = delivered_via_tools or promo_sent > 0
 
@@ -5796,6 +5821,8 @@ async def reply_to_pending_messages(
     bubbles = split_into_bubbles(reply, settings.ai_bubble_max_chars)
     bubbles = [b for b in bubbles if not _is_forbidden_proactive_pitch(b)]
     is_test = conversation.channel == "test_console"
+    media_context = _pending_sales_media.pop(conversation.id, None)
+    media_picked: set[str] = set()
 
     for i, bubble_text in enumerate(bubbles):
         out_event = NormalizedMessageEvent(
@@ -5817,6 +5844,17 @@ async def reply_to_pending_messages(
         await save_message(db, conversation, out_event)
         if not is_test:
             await send_outbound(db, company_id, conversation, bubble_text)
+        if media_context:
+            # Modo vendedor: a imagem do que essa bolha acabou de apresentar
+            # (arte do plano, banner da promoção) vai logo em seguida.
+            for item in _pick_sales_media_for_bubble(bubble_text, media_context, media_picked):
+                if not is_test:
+                    await asyncio.sleep(settings.ai_bubble_delay_seconds)
+                try:
+                    await _send_sales_media(db, conversation, item, media_context)
+                except Exception:  # noqa: BLE001
+                    # Imagem é apoio: falha nela não pode impedir o resto do texto.
+                    logger.exception("Falha ao enviar imagem do modo vendedor (conversa %s)", conversation_id)
         # No chat de teste não espera entre bolhas — libera o lock mais cedo
         # pro próximo turno do cliente (visto travar follow-up tipo estacionamento).
         if not is_test and i < len(bubbles) - 1:

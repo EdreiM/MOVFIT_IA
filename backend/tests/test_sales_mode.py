@@ -1,7 +1,6 @@
 """Modo vendedor: planos explicados em conversa (sem legenda/frases prontas),
 arte do plano só como apoio. Com a chave desligada o fluxo de catálogo de
 sempre tem que continuar idêntico."""
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -17,12 +16,11 @@ from app.services.message_flow import (
     TOOL_KEY_TRANSFER,
     _plan_tour_transfer_active,
     _fix_short_term_denial,
-    _present_plan_art_sales_mode,
-    _resolve_plan_images,
     _single_plan_mentioned,
     _wants_no_fidelity_plan,
     compose_base_prompt,
     generate_ai_reply,
+    reply_to_pending_messages,
 )
 from app.services.promotions import confirms_promotion_interest, sales_promotion_to_transfer
 
@@ -99,7 +97,9 @@ async def sales_setup(db_session, company):
 
 async def _ai_messages(db_session, conv) -> list[Message]:
     result = await db_session.execute(
-        select(Message).where(Message.conversation_id == conv.id, Message.actor == "ai")
+        select(Message)
+        .where(Message.conversation_id == conv.id, Message.actor == "ai")
+        .order_by(Message.created_at)
     )
     return list(result.scalars().all())
 
@@ -107,6 +107,43 @@ async def _ai_messages(db_session, conv) -> list[Message]:
 def _system_text(llm_mock) -> str:
     messages = llm_mock.await_args_list[0].kwargs["messages"]
     return "\n".join(m["content"] for m in messages if m["role"] == "system")
+
+
+def _kind(message: Message) -> str:
+    """Rótulo curto de uma mensagem enviada, pra conferir a sequência."""
+    payload = message.raw_payload or {}
+    if payload.get("promotion_banner"):
+        return "banner"
+    if message.content_type == "image":
+        return "arte:" + payload["images"][0]["plano"]
+    return "texto"
+
+
+async def _converse(db_session, conv, customer_text: str, llm_reply: str):
+    """Passa pelo caminho real de envio (reply_to_pending_messages): no modo
+    vendedor as imagens saem intercaladas com as bolhas de texto."""
+    db_session.add(
+        Message(
+            company_id=conv.company_id,
+            conversation_id=conv.id,
+            direction="inbound",
+            actor="customer",
+            content_type="text",
+            text=customer_text,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+    with patch(
+        "app.services.message_flow.fetch_rag_context", new_callable=AsyncMock, return_value=""
+    ), patch(
+        "app.services.message_flow.chat_completion",
+        new_callable=AsyncMock,
+        return_value={"content": llm_reply, "tool_calls": None},
+    ) as llm_mock:
+        await reply_to_pending_messages(db_session, conv.id, conv.company_id)
+        await db_session.commit()
+    return await _ai_messages(db_session, conv), llm_mock
 
 
 async def _ask_for_plans(db_session, conv, llm_side_effect):
@@ -124,24 +161,66 @@ async def _ask_for_plans(db_session, conv, llm_side_effect):
 async def test_sales_mode_keeps_ai_text_and_sends_no_template(db_session, sales_setup):
     _, _, conv = sales_setup
 
-    (reply, _, delivered), llm_mock = await _ask_for_plans(
+    (reply, _, _), llm_mock = await _ask_for_plans(
         db_session, conv, [{"content": SELLER_REPLY, "tool_calls": None}]
     )
 
-    # O texto da IA é a apresentação: sai como ela escreveu, sem fechamento fixo de tour.
+    # O texto da IA é a apresentação: sai como ela escreveu, sem fechamento fixo de tour,
+    # e nada é enviado antes dele (as imagens saem junto das bolhas, no envio).
     assert reply == SELLER_REPLY
-    # A IA recomendou um plano sem chamar a ferramenta: a rede de segurança manda
-    # só a arte desse plano — sem introdução, sem legenda e sem os outros planos.
-    assert delivered is True
-    ai_messages = await _ai_messages(db_session, conv)
-    assert [m.content_type for m in ai_messages] == ["image"]
-    assert ai_messages[0].raw_payload["images"][0]["plano"] == "Plano Anual Parcelado"
+    assert await _ai_messages(db_session, conv) == []
 
     system = _system_text(llm_mock)
     assert "[Planos — modo vendedor]" in system
     assert "R$ 197,00" in system and "https://exemplo.com/matricula/anual" in system
     assert "NOME DO PLANO EM MAIÚSCULAS" not in system
     assert "fora do assunto planos/matrícula, só responda o que foi perguntado" in system
+    # A IA não recebe a ferramenta de imagem: se chamasse, a arte chegaria antes do texto.
+    offered = [t["function"]["name"] for t in llm_mock.await_args_list[0].kwargs["tools"]]
+    assert TOOL_KEY_SEND_PLAN_IMAGES not in offered
+
+
+@pytest.mark.asyncio
+async def test_sales_mode_sends_each_image_right_after_the_text_about_it(db_session, company, sales_setup):
+    """Regressão de produção: banner e arte chegavam juntos antes do texto,
+    longe do trecho que falava de cada um."""
+    _, _, conv = sales_setup
+    await _add_promotion(db_session, company)
+    reply = (
+        f"Na {UNIT_NAME} o Plano Anual Parcelado sai por R$ 197,00 por mês, com acesso 24 horas.\n\n"
+        "Tem também o Plano Mensal Recorrente, por R$ 217,00 por mês.\n\n"
+        "E nesse mês tem o Outubro Rosa: novas alunas pagam metade da primeira mensalidade.\n\n"
+        "Qual dessas opções faz mais sentido pra você?"
+    )
+
+    ai_messages, _ = await _converse(db_session, conv, f"Quero saber os planos de {UNIT_NAME}", reply)
+
+    assert [_kind(m) for m in ai_messages] == [
+        "texto",
+        "arte:Plano Anual Parcelado",
+        "texto",
+        "arte:Plano Mensal Recorrente",
+        "texto",
+        "banner",
+        "texto",
+    ]
+    # Só imagem: nem legenda de plano, nem o texto oficial da promoção.
+    assert all(m.text != PROMO_TEMPLATE for m in ai_messages)
+    assert not any((m.raw_payload or {}).get("plan_caption") for m in ai_messages)
+    assert all("legenda" not in m.raw_payload["images"][0] for m in ai_messages if _kind(m).startswith("arte:"))
+
+
+@pytest.mark.asyncio
+async def test_sales_mode_does_not_repeat_images_later_in_the_conversation(db_session, sales_setup):
+    _, _, conv = sales_setup
+    first = f"Na {UNIT_NAME} o Plano Anual Parcelado sai por R$ 197,00 por mês.\n\nPosso te mandar o link?"
+    await _converse(db_session, conv, f"Quero saber os planos de {UNIT_NAME}", first)
+
+    ai_messages, _ = await _converse(
+        db_session, conv, "achei caro", "O Plano Anual Parcelado dá menos de R$ 7 por dia. Quer o link?"
+    )
+
+    assert [_kind(m) for m in ai_messages].count("arte:Plano Anual Parcelado") == 1
 
 
 @pytest.mark.asyncio
@@ -149,37 +228,24 @@ async def test_sales_mode_finds_unit_from_ai_reply_when_customer_abbreviates(db_
     """Cliente escreve "24h": o código não reconhece a unidade por esse texto,
     mas a IA responde com o nome cadastrado — a arte tem que ir mesmo assim."""
     _, _, conv = sales_setup
-    llm_reply = {
-        "content": f"Na unidade *{UNIT_NAME}* eu indicaria o Plano Mensal Recorrente, por R$ 217,00 por mês.",
-        "tool_calls": None,
-    }
+    reply = f"Na unidade *{UNIT_NAME}* eu indicaria o Plano Mensal Recorrente, por R$ 217,00 por mês."
 
-    with patch(
-        "app.services.message_flow.fetch_rag_context", new_callable=AsyncMock, return_value=""
-    ), patch("app.services.message_flow.chat_completion", new_callable=AsyncMock, return_value=llm_reply):
-        await generate_ai_reply(db_session, conv, "24h")
-        await db_session.commit()
+    ai_messages, _ = await _converse(db_session, conv, "24h", reply)
 
-    ai_messages = await _ai_messages(db_session, conv)
-    assert [m.content_type for m in ai_messages] == ["image"]
-    assert ai_messages[0].raw_payload["images"][0]["plano"] == "Plano Mensal Recorrente"
+    assert [_kind(m) for m in ai_messages] == ["texto", "arte:Plano Mensal Recorrente"]
 
 
 @pytest.mark.asyncio
-async def test_sales_mode_sends_no_art_when_reply_compares_plans(db_session, sales_setup):
+async def test_sales_mode_sends_no_art_for_a_paragraph_comparing_plans(db_session, sales_setup):
     _, _, conv = sales_setup
     comparison = (
         "Lá tem o Plano Anual Parcelado por R$ 197,00 e o Plano Mensal Recorrente por R$ 217,00 "
         "por mês.\n\nVocê pretende treinar o ano todo?"
     )
 
-    (reply, _, delivered), _ = await _ask_for_plans(
-        db_session, conv, [{"content": comparison, "tool_calls": None}]
-    )
+    ai_messages, _ = await _converse(db_session, conv, f"Quero saber os planos de {UNIT_NAME}", comparison)
 
-    assert reply == comparison
-    assert delivered is False
-    assert await _ai_messages(db_session, conv) == []
+    assert [_kind(m) for m in ai_messages] == ["texto", "texto"]
 
 
 @pytest.mark.asyncio
@@ -193,65 +259,14 @@ async def test_sales_mode_off_keeps_catalog_flow(db_session, company):
     system = _system_text(llm_mock)
     assert "[Planos — modo vendedor]" not in system
     assert "NOME DO PLANO EM MAIÚSCULAS" in system
+    offered = [t["function"]["name"] for t in llm_mock.await_args_list[0].kwargs["tools"]]
+    assert TOOL_KEY_SEND_PLAN_IMAGES in offered
     # Rede de segurança de sempre: introdução + imagem e legenda de cada plano.
     ai_messages = await _ai_messages(db_session, conv)
     assert delivered is True
     assert any(m.text == f"Aqui estão os planos da unidade {UNIT_NAME}:" for m in ai_messages)
     assert sum(1 for m in ai_messages if m.content_type == "image") == 2
     assert sum(1 for m in ai_messages if (m.raw_payload or {}).get("plan_caption")) == 2
-
-
-@pytest.mark.asyncio
-async def test_sales_mode_tool_sends_only_the_recommended_plan_art(db_session, sales_setup):
-    _, _, conv = sales_setup
-    tool_call = {
-        "content": None,
-        "tool_calls": [
-            {
-                "id": "call_1",
-                "function": {
-                    "name": TOOL_KEY_SEND_PLAN_IMAGES,
-                    "arguments": json.dumps(
-                        {"Unidade": UNIT_NAME, "Nome do Plano": "Plano Anual Parcelado"}
-                    ),
-                },
-            }
-        ],
-    }
-
-    (reply, _, delivered), _ = await _ask_for_plans(
-        db_session, conv, [tool_call, {"content": SELLER_REPLY, "tool_calls": None}]
-    )
-
-    assert reply == SELLER_REPLY
-    assert delivered is True
-    ai_messages = await _ai_messages(db_session, conv)
-    assert [m.content_type for m in ai_messages] == ["image"]
-    image = ai_messages[0].raw_payload["images"][0]
-    assert image["plano"] == "Plano Anual Parcelado"
-    assert "legenda" not in image
-
-
-@pytest.mark.asyncio
-async def test_sales_mode_refuses_all_plans_unless_customer_asked_for_images(db_session, sales_setup):
-    _, tool, conv = sales_setup
-    all_images = await _resolve_plan_images(db_session, conv.company_id, {"Unidade": UNIT_NAME})
-    assert len(all_images) == 2
-
-    touched: set[str] = set()
-    refused = await _present_plan_art_sales_mode(
-        db_session, conv, tool, all_images, explicit_request=False, touched_units=touched
-    )
-    assert refused["sucesso"] is False
-    assert touched == set()
-    assert await _ai_messages(db_session, conv) == []
-
-    sent = await _present_plan_art_sales_mode(
-        db_session, conv, tool, all_images, explicit_request=True, touched_units=touched
-    )
-    assert sent["sucesso"] is True
-    ai_messages = await _ai_messages(db_session, conv)
-    assert [m.content_type for m in ai_messages] == ["image", "image"]
 
 
 @pytest.mark.asyncio
@@ -372,22 +387,17 @@ async def _add_promotion(db_session, company, **overrides) -> Promotion:
 
 
 @pytest.mark.asyncio
-async def test_sales_mode_sends_promo_banner_without_official_text(db_session, company, sales_setup):
+async def test_sales_mode_promotion_goes_to_the_ai_as_context_not_as_template(db_session, company, sales_setup):
     _, _, conv = sales_setup
-    promotion = await _add_promotion(db_session, company)
+    await _add_promotion(db_session, company)
 
-    (reply, _, _), llm_mock = await _ask_for_plans(
-        db_session, conv, [{"content": PROMO_PITCH, "tool_calls": None}]
+    ai_messages, llm_mock = await _converse(
+        db_session, conv, f"Quero saber os planos de {UNIT_NAME}", PROMO_PITCH
     )
 
     # Quem apresenta a promoção é o texto da IA; o texto oficial não é enviado.
-    assert reply == PROMO_PITCH
-    ai_messages = await _ai_messages(db_session, conv)
     assert all(m.text != PROMO_TEMPLATE for m in ai_messages)
-    assert [m.content_type for m in ai_messages] == ["image", "image"]  # arte do plano + banner
-    banner = next(m for m in ai_messages if (m.raw_payload or {}).get("promotion_banner"))
-    assert banner.raw_payload["promotion_id"] == str(promotion.id)
-    # A IA recebe a promoção como contexto, com a instrução de falar do jeito dela.
+    assert [_kind(m) for m in ai_messages] == ["texto", "arte:Plano Anual Parcelado", "banner", "texto"]
     system = _system_text(llm_mock)
     assert "[Promoções ativas" in system and "NUNCA copie o texto oficial" in system
 
@@ -397,10 +407,9 @@ async def test_sales_mode_sends_no_promo_art_when_reply_does_not_mention_it(db_s
     _, _, conv = sales_setup
     await _add_promotion(db_session, company)
 
-    await _ask_for_plans(db_session, conv, [{"content": SELLER_REPLY, "tool_calls": None}])
+    ai_messages, _ = await _converse(db_session, conv, f"Quero saber os planos de {UNIT_NAME}", SELLER_REPLY)
 
-    ai_messages = await _ai_messages(db_session, conv)
-    assert not any((m.raw_payload or {}).get("promotion_id") for m in ai_messages)
+    assert "banner" not in [_kind(m) for m in ai_messages]
 
 
 def test_promotion_confirmation_is_not_triggered_by_questions():
