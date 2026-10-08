@@ -77,6 +77,7 @@ def _to_out(config: AiConfig, *, custom_links: list[CustomLink] | None = None) -
         followup_delay_minutes=config.followup_delay_minutes,
         followup_max_attempts=config.followup_max_attempts,
         reply_debounce_seconds=config.reply_debounce_seconds,
+        sales_mode_enabled=config.sales_mode_enabled,
         custom_links=custom_links if custom_links is not None else _serialize_custom_links(config),
     )
 
@@ -110,6 +111,7 @@ async def _get_or_create_integration_config(
             followup_delay_minutes=default_config.followup_delay_minutes,
             followup_max_attempts=default_config.followup_max_attempts,
             reply_debounce_seconds=default_config.reply_debounce_seconds,
+            sales_mode_enabled=default_config.sales_mode_enabled,
         )
         db.add(config)
         await db.flush()

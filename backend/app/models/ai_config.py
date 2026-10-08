@@ -64,6 +64,10 @@ class AiConfig(Base):
     # Segundos de silêncio do cliente antes de responder, agregando rajadas
     # de mensagem (debounce). Configurável por integração no painel.
     reply_debounce_seconds: Mapped[float] = mapped_column(Float, default=8.0)
+    # Modo vendedor: ao falar de planos, a IA conversa e recomenda com as
+    # próprias palavras (sem legenda/frases prontas) e conduz pro fechamento;
+    # a arte do plano vira só apoio. Desligado = fluxo de catálogo de sempre.
+    sales_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     # Links úteis que a IA pode enviar quando o assunto combinar (vagas,
     # formulários etc.) — lista de {label, url, when}.
     custom_links: Mapped[list] = mapped_column(JSONB, default=list)

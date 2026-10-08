@@ -28,6 +28,7 @@ type AiConfig = {
   followup_delay_minutes: number;
   followup_max_attempts: number;
   reply_debounce_seconds: number;
+  sales_mode_enabled: boolean;
   custom_links: CustomLink[];
 };
 
@@ -98,6 +99,7 @@ export default function AiConfigPage() {
         followup_delay_minutes: config.followup_delay_minutes,
         followup_max_attempts: config.followup_max_attempts,
         reply_debounce_seconds: config.reply_debounce_seconds,
+        sales_mode_enabled: config.sales_mode_enabled,
         custom_links: (config.custom_links ?? []).filter(
           (link) => link.label.trim() && link.url.trim()
         ),
@@ -384,6 +386,26 @@ export default function AiConfigPage() {
             seguidas (ex.: 3 textos rápidos) são agrupadas em uma só resposta. Padrão: 8s.
           </span>
         </label>
+
+        <fieldset className="space-y-2 rounded-md border border-white/10 p-3">
+          <legend className="px-1 text-sm text-sand/60">Venda de planos</legend>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={config.sales_mode_enabled}
+              onChange={(e) => setConfig({ ...config, sales_mode_enabled: e.target.checked })}
+            />
+            <span className="text-sm text-sand/60">
+              Modo vendedor: explicar os planos conversando e conduzir o cliente até a matrícula
+            </span>
+          </label>
+          <span className="block text-xs text-sand/45">
+            Ligado: a IA apresenta os planos com as próprias palavras, recomenda um, responde
+            objeções e fecha com o link — sem legenda nem frases prontas; a arte vai só do plano
+            indicado. Desligado: envia a imagem e a descrição pronta de todos os planos da unidade.
+            Valores e links continuam vindo sempre de Unidades &amp; Planos.
+          </span>
+        </fieldset>
 
         <fieldset className="space-y-3 rounded-md border border-white/10 p-3">
           <legend className="px-1 text-sm text-sand/60">Follow-up de cliente inativo</legend>

@@ -17,6 +17,8 @@ from app.services.message_flow import (
     _filter_forbidden_proactive_reply,
     _is_forbidden_proactive_pitch,
     _normalize_text,
+    _sales_mode,
+    _text_has_plan_intent,
     _upsert_lead,
     compose_base_prompt,
     execute_tool,
@@ -100,6 +102,18 @@ async def _generate_followup_text(
         "Se não tiver certeza absoluta do que foi tratado, faça uma pergunta bem genérica "
         "(ex: 'ainda posso ajudar em algo?') em vez de arriscar inventar um assunto."
     )
+    if _sales_mode(config) and any(
+        _text_has_plan_intent(m.text) for m in history if m.actor == "customer" and m.text
+    ):
+        instruction += (
+            "\n\nMODO VENDEDOR: essa conversa era sobre planos/matrícula e o cliente ainda não "
+            "fechou. Retome como uma vendedora atenciosa, não como lembrete automático: se o "
+            "histórico mostrar qual plano fazia mais sentido pra ele, cite esse plano pelo nome "
+            "em uma frase (sem repetir preço nem lista de benefícios) e faça UMA pergunta leve "
+            "pra destravar a decisão — o que ficou pesando, se quer o link pra garantir, ou se "
+            "prefere conhecer a academia num tour antes. Sem pressão, sem urgência falsa e sem "
+            "inventar condição nova."
+        )
     if previous_followups:
         instruction += (
             "\n\nATENÇÃO: essa é a tentativa de follow-up número " + str(attempt_number) + " nessa "

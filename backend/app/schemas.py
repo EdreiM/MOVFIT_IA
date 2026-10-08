@@ -181,6 +181,7 @@ class AiConfigUpdate(BaseModel):
     followup_delay_minutes: int | None = None
     followup_max_attempts: int | None = None
     reply_debounce_seconds: float | None = Field(default=None, ge=1, le=60)
+    sales_mode_enabled: bool | None = None
     custom_links: list[CustomLink] | None = None
 
 
@@ -204,6 +205,7 @@ class AiConfigOut(BaseModel):
     followup_delay_minutes: int
     followup_max_attempts: int
     reply_debounce_seconds: float
+    sales_mode_enabled: bool = False
     custom_links: list[CustomLink] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}

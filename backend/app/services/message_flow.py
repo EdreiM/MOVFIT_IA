@@ -247,9 +247,14 @@ async def build_catalog_context(
     db: AsyncSession,
     company_id: UUID,
     include_on_demand: bool = False,
+    with_plan_count: bool = False,
 ) -> str:
     """Monta o catálogo de unidades e planos direto do banco (fonte oficial,
-    sempre atualizada) — substitui a consulta à RAG de planos."""
+    sempre atualizada) — substitui a consulta à RAG de planos.
+
+    `with_plan_count` (modo vendedor) põe no cabeçalho de cada unidade quantos
+    planos ela tem: em texto livre o modelo às vezes apresentava só um e
+    afirmava que era o único."""
     result = await db.execute(
         select(Unit)
         .options(selectinload(Unit.plans))
@@ -266,7 +271,11 @@ async def build_catalog_context(
         if not active_plans:
             continue
         type_suffix = f" — {unit.unit_type}" if unit.unit_type else ""
-        lines = [f"### {unit.name} ({unit.city}{type_suffix})"]
+        header = f"### {unit.name} ({unit.city}{type_suffix})"
+        if with_plan_count:
+            count = len(active_plans)
+            header += f" — {count} plano disponível" if count == 1 else f" — {count} planos disponíveis"
+        lines = [header]
         for p in active_plans:
             line = f"- {p.name}: {_format_price(p.monthly_price)}/mês"
             if p.fidelity_months:
@@ -2735,10 +2744,30 @@ def _plans_presented_in_history(history: list[Message]) -> bool:
     return False
 
 
+def _last_ai_turn_offers_tour(history: list[Message]) -> bool:
+    """A última resposta da IA (todas as bolhas dela antes da mensagem atual
+    do cliente) ofereceu tour?"""
+    seen_ai = False
+    for message in reversed(history):
+        if message.actor == "customer":
+            if seen_ai:
+                break
+            continue
+        seen_ai = True
+        if message.actor != "ai" or not message.text:
+            continue
+        # Em texto livre ela também chama o tour de "visita".
+        if _already_offers_tour(message.text) or "visita" in _normalize_text(message.text):
+            return True
+    return False
+
+
 def _plan_tour_transfer_active(
     user_text: str,
     history: list[Message],
     recent_customer_texts: list[str] | None = None,
+    *,
+    require_recent_offer: bool = False,
 ) -> bool:
     # Tour ≠ avaliação física: confirmação ou pedido explícito → transferir
     # direto, sem CPF, unidade ou consulta de horários.
@@ -2750,6 +2779,11 @@ def _plan_tour_transfer_active(
         return True
     if not _confirms_gym_tour(user_text):
         return False
+    if require_recent_offer:
+        # Modo vendedor: a IA faz outras perguntas de fechamento ("posso te
+        # mandar o link?") — um "sim" só confirma tour se foi ISSO que ela
+        # acabou de oferecer, não se o tour apareceu mensagens atrás.
+        return _last_ai_turn_offers_tour(history)
     return _tour_discussed_in_conversation(history, recent_customer_texts)
 
 
@@ -3465,6 +3499,7 @@ async def _present_plan_images_with_captions(
     images: list[dict],
     force_resend: bool,
     touched_units: set[str] | None = None,
+    with_captions: bool = True,
 ) -> dict:
     """Apresenta cada plano como imagem seguida da própria legenda/descrição,
     um de cada vez, esperando a imagem ser confirmada antes de mandar o
@@ -3475,7 +3510,10 @@ async def _present_plan_images_with_captions(
     `touched_units` (compartilhado entre chamadas da mesma resposta) evita
     mandar a introdução "Aqui estão os planos..." mais de uma vez quando a
     IA chama essa ferramenta várias vezes na mesma resposta (ex: uma vez por
-    plano) — já vimos isso acontecer de verdade em produção."""
+    plano) — já vimos isso acontecer de verdade em produção.
+
+    `with_captions=False` (modo vendedor) manda só a arte: sem introdução e
+    sem legenda — a explicação fica por conta do texto da própria IA."""
     if not images:
         return {"sucesso": True, "mensagem": "Nenhum plano encontrado pra essa unidade.", "dados": {}}
 
@@ -3492,7 +3530,7 @@ async def _present_plan_images_with_captions(
     already_announced = touched_units is not None and unit_name in touched_units
     if touched_units is not None:
         touched_units.add(unit_name)
-    if not already_announced:
+    if with_captions and not already_announced:
         intro = f"Aqui estão os planos da unidade {unit_name}:"
         await save_message(
             db,
@@ -3514,10 +3552,17 @@ async def _present_plan_images_with_captions(
             await send_outbound(db, company_id, conversation, intro)
 
     sent_count = 0
+    sent_plans: list[str] = []
     for image in to_send:
+        if not with_captions:
+            # Sem "legenda" no payload: o n8n não tem o que usar como caption.
+            image = {k: v for k, v in image.items() if k != "legenda"}
         if not await _send_single_plan_image(db, tool, image, conversation):
             continue
         sent_count += 1
+        sent_plans.append(image["plano"])
+        if not with_captions:
+            continue
         caption = image.get("legenda") or f"{image['plano']} — {image['unidade']}"
         await save_message(
             db,
@@ -3540,6 +3585,15 @@ async def _present_plan_images_with_captions(
 
     if sent_count == 0:
         return {"sucesso": False, "mensagem": "Falha ao enviar as imagens agora."}
+    if not with_captions:
+        return {
+            "sucesso": True,
+            "mensagem": (
+                f"Arte enviada ao cliente (só a imagem, sem texto): {', '.join(sent_plans)}. Explique e "
+                "recomende com as suas palavras na resposta de texto."
+            ),
+            "dados": {},
+        }
     return {
         "sucesso": True,
         "mensagem": (
@@ -3549,6 +3603,170 @@ async def _present_plan_images_with_captions(
         ),
         "dados": {},
     }
+
+
+async def _present_plan_art_sales_mode(
+    db: AsyncSession,
+    conversation: Conversation,
+    tool: Tool,
+    images: list[dict],
+    *,
+    explicit_request: bool,
+    touched_units: set[str],
+) -> dict:
+    """enviar_imagens_planos no modo vendedor: a arte é apoio da conversa,
+    não a apresentação em si — vai só a imagem (sem introdução nem legenda)
+    e só de UM plano por chamada. Trava no código, não só no prompt: se a IA
+    chamar sem dizer qual plano (o que resolveria pra todos os planos da
+    unidade), nada é enviado e ela é orientada a especificar — a exceção é o
+    cliente ter pedido as imagens explicitamente."""
+    if len(images) > 1 and not explicit_request:
+        return {
+            "sucesso": False,
+            "mensagem": (
+                "Nenhuma imagem enviada: no modo vendedor mande a arte de UM plano por vez — o "
+                "que você está recomendando. Chame de novo informando também o nome exato do "
+                "plano (se a ferramenta não tiver campo próprio pra isso, escreva o nome do "
+                "plano junto no campo da unidade), ou siga a conversa só em texto."
+            ),
+        }
+    return await _present_plan_images_with_captions(
+        db,
+        conversation,
+        conversation.company_id,
+        tool,
+        images,
+        force_resend=explicit_request,
+        touched_units=touched_units,
+        with_captions=False,
+    )
+
+
+_GENERIC_PLAN_NAME_TOKENS = {"plano", "planos"}
+
+
+def _single_plan_mentioned(reply_text: str, plans: list[Plan]) -> Plan | None:
+    """O plano que a resposta da IA está indicando, quando é inequívoco.
+
+    A IA raramente repete o nome cadastrado inteiro ("o anual" em vez de
+    "Plano Anual Parcelado"), então compara pelas palavras que identificam
+    cada plano. Só devolve algo quando UM plano se destaca: resposta que
+    compara dois planos, ou que não fala de plano/valor, devolve None. Pode
+    devolver um plano sem imagem (ex: avulso) — quem chama decide."""
+    reply_tokens = _normalize_tokens(reply_text)
+    if not (reply_tokens & _GENERIC_PLAN_NAME_TOKENS or "r$" in reply_text.lower()):
+        return None
+    # Planos com o mesmo nome a menos de "Plano" contam como um só; entre
+    # eles, prefere o que tem imagem.
+    by_identity: dict[frozenset[str], Plan] = {}
+    for plan in plans:
+        identity = frozenset(_normalize_tokens(plan.name) - _GENERIC_PLAN_NAME_TOKENS)
+        if not identity:
+            continue
+        current = by_identity.get(identity)
+        if current is None or (plan.image_url and not current.image_url):
+            by_identity[identity] = plan
+    scored = [(len(identity & reply_tokens), plan) for identity, plan in by_identity.items()]
+    scored = [(score, plan) for score, plan in scored if score]
+    if not scored:
+        return None
+    best = max(score for score, _ in scored)
+    top = [plan for score, plan in scored if score == best]
+    return top[0] if len(top) == 1 else None
+
+
+def _unit_named_in_text(units: list[Unit], text: str) -> Unit | None:
+    """A unidade citada pelo nome num texto da IA — só quando é uma só (um
+    texto que lista as unidades pra perguntar qual o cliente quer não
+    identifica nenhuma)."""
+    text_tokens = _normalize_tokens(text or "")
+    named = [u for u in units if (tokens := _normalize_tokens(u.name)) and tokens <= text_tokens]
+    return named[0] if len(named) == 1 else None
+
+
+async def _resolve_sales_art_unit(
+    db: AsyncSession,
+    company_id: UUID,
+    user_text: str,
+    assistant_text: str,
+    recent_customer_texts: list[str] | None,
+    recent_ai_texts: list[str],
+    touched_units: set[str],
+) -> Unit | None:
+    """De qual unidade é o plano que a IA está indicando. O cliente nem
+    sempre escreve a unidade de um jeito que o código reconhece ("24h" em
+    vez de "Santarém - 24 horas") — mas a IA entende e responde com o nome
+    cadastrado, então o texto dela é a pista mais confiável: a resposta
+    atual primeiro, depois o que o cliente escreveu, e por fim as respostas
+    anteriores dela (da mais recente pra mais antiga)."""
+    result = await db.execute(
+        select(Unit)
+        .options(selectinload(Unit.plans))
+        .where(Unit.company_id == company_id, Unit.is_active.is_(True))
+    )
+    units = list(result.scalars().unique().all())
+    unit = _unit_named_in_text(units, assistant_text)
+    if unit:
+        return unit
+    unit = await _resolve_plan_delivery_unit(
+        db, company_id, user_text, assistant_text, recent_customer_texts, touched_units
+    )
+    if unit:
+        return unit
+    for text in reversed(recent_ai_texts[-8:]):
+        unit = _unit_named_in_text(units, text)
+        if unit:
+            return unit
+    return None
+
+
+async def _auto_send_recommended_plan_art(
+    db: AsyncSession,
+    conversation: Conversation,
+    user_text: str,
+    assistant_text: str,
+    tools_by_key: dict[str, Tool],
+    touched_units: set[str],
+    recent_customer_texts: list[str] | None = None,
+    recent_ai_texts: list[str] | None = None,
+    lead: Lead | None = None,
+) -> None:
+    """Rede de segurança do modo vendedor (reforço no código, não só no
+    prompt): a arte do plano recomendado deve acompanhar a recomendação, mas
+    o modelo nem sempre chama a ferramenta. Se a resposta indica UM plano com
+    imagem da unidade em questão (ver _single_plan_mentioned), manda a arte
+    dele — uma vez por conversa (dedup por URL). Citou vários planos
+    (comparação) ou nenhum: não manda nada, pra não virar o despejo de
+    imagens do fluxo de catálogo."""
+    tool = tools_by_key.get(TOOL_KEY_SEND_PLAN_IMAGES)
+    if not tool or not tool.webhook_url or not assistant_text.strip():
+        return
+    if _should_block_plan_delivery(user_text, recent_customer_texts, lead=lead):
+        return
+    unit = await _resolve_sales_art_unit(
+        db,
+        conversation.company_id,
+        user_text,
+        assistant_text,
+        recent_customer_texts,
+        recent_ai_texts or [],
+        touched_units,
+    )
+    if not unit:
+        return
+    plan = _single_plan_mentioned(assistant_text, [p for p in unit.plans if p.is_active])
+    if not plan or not plan.image_url:
+        return
+    await _present_plan_images_with_captions(
+        db,
+        conversation,
+        conversation.company_id,
+        tool,
+        [_build_imagem_plano_entry(url=plan.image_url, unidade=unit.name, plano=plan.name)],
+        force_resend=False,
+        touched_units=touched_units,
+        with_captions=False,
+    )
 
 
 async def _resolve_plan_delivery_unit(
@@ -3771,8 +3989,37 @@ async def resolve_ai_config(db: AsyncSession, conversation: Conversation) -> AiC
     return config
 
 
-def _llm_whatsapp_and_tone_instructions() -> str:
-    """Formatação WhatsApp + tom humano (bloco único para economizar tokens)."""
+_PLAN_CAPTION_FORMAT_INSTRUCTION = (
+    "Ao "
+    "apresentar planos, não repita a descrição/slogan geral da academia em cada "
+    "plano — isso já foi dito (ou nem precisa ser dito) uma vez só. Cada plano "
+    "individual segue este modelo visual (adapte os dados de cada plano, mas "
+    "mantenha a estrutura, os emojis e as quebras de linha — pule qualquer linha "
+    "cujo dado não exista para aquele plano, tipo taxa de matrícula zerada):\n\n"
+    "🏋️ *NOME DO PLANO EM MAIÚSCULAS*\n\n"
+    "💰 *R$ 000,00 por mês*\n"
+    "💳 Pagamento em [forma de pagamento]\n"
+    "📅 Fidelidade de N meses\n\n"
+    "✅ *Você terá:*\n"
+    "• benefício 1\n"
+    "• benefício 2\n\n"
+    "👉 *Faça sua matrícula pelo link:*\n"
+    "https://...\n\n"
+)
+
+
+def _llm_whatsapp_and_tone_instructions(sales_mode: bool = False) -> str:
+    """Formatação WhatsApp + tom humano (bloco único para economizar tokens).
+
+    No modo vendedor o modelo visual fixo de plano (ficha com emojis) sai:
+    ali a IA explica os planos em conversa — ver _sales_plans_system_block."""
+    plan_format = (
+        "Ao falar de planos, escreva em texto de conversa, com as suas palavras — sem ficha "
+        "pronta, sem título em maiúsculas e sem uma linha de emoji por item (ver bloco "
+        "[Planos — modo vendedor]).\n\n"
+        if sales_mode
+        else _PLAN_CAPTION_FORMAT_INSTRUCTION
+    )
     return (
         "[Comunicação no WhatsApp]\n"
         "Formatação: isso vai pro WhatsApp, não markdown de verdade. Use *um "
@@ -3784,22 +4031,9 @@ def _llm_whatsapp_and_tone_instructions() -> str:
         "simples, sem numerar a menos que a ordem importe. Links: manda a URL pura "
         "(https://...) solta no texto — NUNCA no formato [texto](url) do markdown, "
         "porque o WhatsApp não interpreta isso, aparece literalmente com colchetes e "
-        "parênteses pro cliente; uma URL pura o WhatsApp já deixa clicável sozinho. Ao "
-        "apresentar planos, não repita a descrição/slogan geral da academia em cada "
-        "plano — isso já foi dito (ou nem precisa ser dito) uma vez só. Cada plano "
-        "individual segue este modelo visual (adapte os dados de cada plano, mas "
-        "mantenha a estrutura, os emojis e as quebras de linha — pule qualquer linha "
-        "cujo dado não exista para aquele plano, tipo taxa de matrícula zerada):\n\n"
-        "🏋️ *NOME DO PLANO EM MAIÚSCULAS*\n\n"
-        "💰 *R$ 000,00 por mês*\n"
-        "💳 Pagamento em [forma de pagamento]\n"
-        "📅 Fidelidade de N meses\n\n"
-        "✅ *Você terá:*\n"
-        "• benefício 1\n"
-        "• benefício 2\n\n"
-        "👉 *Faça sua matrícula pelo link:*\n"
-        "https://...\n\n"
-        "Tom — escreva como uma pessoa de verdade atendendo pelo WhatsApp, "
+        "parênteses pro cliente; uma URL pura o WhatsApp já deixa clicável sozinho. "
+        + plan_format
+        + "Tom — escreva como uma pessoa de verdade atendendo pelo WhatsApp, "
         "não como um bot decorado:\n"
         "1) NÃO termine toda resposta com \"Posso ajudar com mais alguma coisa?\", "
         "\"Estou à disposição!\" ou frases parecidas. Só use algo assim quando a conversa "
@@ -3840,6 +4074,118 @@ def _llm_operations_tools_and_transfer_instructions() -> str:
     )
 
 
+def _sales_mode(config: AiConfig | None) -> bool:
+    """Modo vendedor ligado nessa configuração (ver AiConfig.sales_mode_enabled)."""
+    return bool(getattr(config, "sales_mode_enabled", False))
+
+
+def _fix_whatsapp_bold(text: str) -> str:
+    """**negrito** de markdown vira *negrito* de WhatsApp — o prompt já pede
+    isso, mas com texto livre de planos o modelo escorrega e os asteriscos
+    duplos aparecem literalmente pro cliente."""
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+
+
+def _sales_plans_system_block(catalog_context: str, wants_no_fidelity: bool) -> str:
+    """Bloco [Planos] do modo vendedor — substitui o do fluxo de catálogo.
+    As travas de sempre continuam valendo (valor e link só do catálogo,
+    plano sem link = transferir, tour = transferir), mas a apresentação é
+    conversa de vendedora em vez de ficha pronta por plano."""
+    no_fidelity_note = (
+        "O cliente sinalizou que não quer fidelidade/compromisso longo — por isso o catálogo "
+        "abaixo inclui também o(s) plano(s) avulso(s)/sob demanda dessa unidade. Nesse caso o "
+        "avulso é a opção certa pra ele — não insista no recorrente/anual.\n"
+        if wants_no_fidelity
+        else ""
+    )
+    return (
+        "[Planos — modo vendedor]\n"
+        "Quando o cliente trouxer planos, preços, mensalidade ou matrícula, você atende como "
+        "uma consultora de vendas da Mov Fit conversando no WhatsApp — não como um catálogo. "
+        "Seu objetivo é ajudar o cliente a escolher e FECHAR um dos planos abaixo.\n"
+        "QUANDO: só entre nesse assunto se o cliente puxar (plano, preço, valor, mensalidade, "
+        "matrícula, assinar, contratar). Se ele perguntou outra coisa (horário, endereço, "
+        "estrutura), responda só isso — não empurre plano.\n"
+        "UNIDADE: se ainda não souber de qual unidade ele quer saber, pergunte a unidade de "
+        "interesse antes de falar de valores — não use CPF/verificar_unidade_por_cpf pra isso "
+        "(quem pergunta plano costuma ser lead novo).\n"
+        + no_fidelity_note
+        + "COMO APRESENTAR:\n"
+        "- Na primeira vez que falar dos planos de uma unidade, cite TODOS os planos listados "
+        "pra ela no catálogo (o cabeçalho da unidade diz quantos são), cada um com o valor. "
+        "Nunca omita um plano nem diga que só existe um se o catálogo listar mais.\n"
+        "- Explique os planos da unidade com as SUAS palavras, em texto corrido e curto, como "
+        "alguém digitando no WhatsApp: 2 a 4 parágrafos curtos separados por linha em branco. "
+        "PROIBIDO formato de ficha ou lista: nada de título em maiúsculas, linha de emoji por "
+        "item, nem linha começando com hífen, • ou número — escreva frases. Negrito só com *um "
+        "asterisco*, e no máximo no nome do plano ou no valor.\n"
+        "- Compare de verdade: diga a diferença em reais entre os planos. Se os benefícios são "
+        "os mesmos, diga isso em vez de repetir a lista em cada plano, e use como argumento o "
+        "que realmente muda (preço, forma de pagamento, fidelidade). Cite só os 2 ou 3 "
+        "benefícios que mais importam pra esse cliente — e SOMENTE benefícios listados naquele "
+        "plano no catálogo abaixo; nunca atribua a uma unidade algo de outra (ex: funcionamento "
+        "24 horas).\n"
+        "- Não presuma o gênero do cliente (evite \"pronta\"/\"interessado\"); prefira frases "
+        "neutras.\n"
+        "- Sempre diga o valor exato de cada plano que citar. Nunca esconda o preço nem enrole "
+        "pra responder quanto custa.\n"
+        "- Recomende UM plano e explique o porquê em uma frase, usando o que o cliente já contou "
+        "(objetivo, rotina, se quer compromisso longo ou não). Se ainda não sabe nada sobre ele, "
+        "apresente as opções em poucas linhas e faça UMA pergunta curta pra indicar o melhor "
+        "(ex: se pretende treinar o ano todo ou quer algo sem compromisso). No máximo uma "
+        "pergunta por resposta — nunca interrogatório.\n"
+        "- Quando o cliente contar objetivo ou rotina (emagrecer, ganhar massa, nunca treinou, "
+        "pouco tempo), acolha em uma frase, ligue isso ao plano que você recomenda e avance pro "
+        "fechamento. NÃO ofereça agendar avaliação física como próximo passo — avaliação/"
+        "bioimpedância acontece depois da matrícula; pode citar como benefício do plano.\n"
+        "- Varie o jeito de falar a cada conversa; não use frases de abertura ou fechamento "
+        "decoradas.\n"
+        "FECHAMENTO:\n"
+        "- Termine com UM próximo passo concreto rumo à matrícula (ex: perguntar qual das "
+        "opções faz mais sentido pra ele, ou se pode mandar o link pra ele garantir a vaga). "
+        "Nunca termine com \"posso ajudar em algo mais?\" nem ofereça duas coisas na mesma "
+        "pergunta (link OU tour, nunca os dois juntos).\n"
+        "- Quando o cliente escolher um plano que tem \"Link de cadastro\" abaixo, mande esse "
+        "link exatamente como está aqui e diga que é só completar o cadastro por lá — a "
+        "matrícula é feita pelo próprio cliente no link, você não coleta dados nem processa "
+        "matrícula pelo chat. Feche pedindo pra ele te avisar se travar em alguma etapa, em vez "
+        "de uma despedida genérica.\n"
+        "- Se o plano escolhido NÃO tiver \"Link de cadastro\" (ex: avulso/sob demanda), a "
+        "matrícula é manual: chame transferir_atendimento (motivo: matrícula manual do plano "
+        "[nome]) NESSA MESMA resposta e avise que um atendente continua o cadastro.\n"
+        "OBJEÇÕES (responda com empatia, sem pressionar):\n"
+        "- \"Tá caro\": mostre o valor do que está incluso e faça a conta por dia do plano MAIS "
+        "EM CONTA da unidade (ou do que você recomendou) — não do mais caro. NUNCA invente "
+        "desconto, brinde, prazo ou condição que não esteja no catálogo ou nas promoções "
+        "ativas.\n"
+        "- \"Vou pensar\"/\"depois eu vejo\": respeite, pergunte com leveza o que ficou pesando "
+        "na decisão e ofereça um *tour* pra conhecer a academia (visita, sem aula "
+        "experimental).\n"
+        "- Fidelidade: explique o que ela significa na prática; só ofereça plano sem fidelidade "
+        "se ele constar no catálogo abaixo.\n"
+        "- Regras de contrato (multa, cancelamento, carência, reajuste): só afirme o que estiver "
+        "na base de conhecimento; se não estiver lá, diga que confirma com um atendente em vez "
+        "de supor.\n"
+        "- Se o cliente confirmar que quer o tour, chame transferir_atendimento nessa mesma "
+        "resposta — NÃO peça CPF, unidade nem horários: o atendente agenda.\n"
+        "- Promoção ativa que se aplique ao cliente é argumento de venda: cite com as suas "
+        "palavras, sem mudar as condições.\n"
+        "IMAGEM (ferramenta enviar_imagens_planos): no modo vendedor ela manda SÓ a arte do "
+        "plano, sem nenhum texto — a explicação é sempre sua. Na primeira vez que recomendar um "
+        "plano (ou quando o cliente demonstrar interesse em um), chame a ferramenta UMA vez pra "
+        "mandar a arte DESSE plano: informe a unidade E o nome exato do plano. Não mande a arte "
+        "de todos os planos de uma vez, a não ser que o cliente peça as imagens/fotos dos "
+        "planos.\n"
+        "HONESTIDADE: nada de urgência falsa, vaga acabando ou promessa fora do catálogo. Se o "
+        "cliente perguntar se você é robô/IA, diga a verdade com naturalidade e siga ajudando. "
+        "NUNCA mencione grupo VIP, grupo do WhatsApp ou convite de campanha.\n\n"
+        "Catálogo oficial de unidades e planos, sempre atualizado — use isso, não invente "
+        "valores fora daqui. Isso vale MAIS que qualquer coisa dita antes nesta conversa "
+        "(inclusive por você mesma): se uma unidade, plano ou preço mencionado anteriormente "
+        "não aparecer aqui embaixo, ele não existe mais — não repita.\n" + catalog_context
+    )
+
+
 def compose_base_prompt(config: AiConfig) -> str:
     """Nome, tom de voz e uso de emoji são campos estruturados (editáveis sem
     mexer em prompt) — o prompt "de verdade" é montado a partir deles aqui."""
@@ -3850,11 +4196,19 @@ def compose_base_prompt(config: AiConfig) -> str:
         if config.use_emoji
         else "Não use emoji nas respostas."
     )
+    scope_rule = (
+        # No modo vendedor ela conduz a conversa de planos (ver
+        # _sales_plans_system_block) — "só responda o que foi perguntado"
+        # contradiria isso.
+        "fora do assunto planos/matrícula, só responda o que foi perguntado."
+        if _sales_mode(config)
+        else "só responda o que foi perguntado."
+    )
     return (
         f"Você é a {ai_name}, assistente virtual da Mov Fit. Seu tom de voz: {tone_text}. "
         f"{emoji_instruction} "
         "NUNCA convide o cliente para grupo VIP, grupo de WhatsApp ou campanha de marketing "
-        "— isso não faz parte do seu atendimento; só responda o que foi perguntado."
+        f"— isso não faz parte do seu atendimento; {scope_rule}"
     )
 
 
@@ -3879,6 +4233,7 @@ async def generate_ai_reply(
         return None, None, False
 
     api_key = decrypt_secret(config.llm_api_key_encrypted)
+    sales_mode = _sales_mode(config)
     custom_links = await _get_company_custom_links(db, conversation.company_id)
     rag_context = await fetch_rag_context(db, conversation.company_id, user_text)
 
@@ -3961,7 +4316,9 @@ async def generate_ai_reply(
         if pipeline_reply is not None:
             return pipeline_reply, None, False
 
-    if _plan_tour_transfer_active(user_text, history, recent_customer_texts):
+    if _plan_tour_transfer_active(
+        user_text, history, recent_customer_texts, require_recent_offer=sales_mode
+    ):
         tour_reply = await _run_plan_tour_transfer_pipeline(db, conversation, tools_by_key)
         if tour_reply is not None:
             return tour_reply, None, False
@@ -4031,7 +4388,7 @@ async def generate_ai_reply(
             ),
         }
     )
-    messages.append({"role": "system", "content": _llm_whatsapp_and_tone_instructions()})
+    messages.append({"role": "system", "content": _llm_whatsapp_and_tone_instructions(sales_mode)})
     messages.append({"role": "system", "content": _llm_operations_tools_and_transfer_instructions()})
     if is_first_contact:
         messages.append(
@@ -4232,9 +4589,13 @@ async def generate_ai_reply(
     if promotions_prompt and not cancellation_active:
         messages.append({"role": "system", "content": promotions_prompt})
     catalog_context = await build_catalog_context(
-        db, conversation.company_id, include_on_demand=wants_no_fidelity
+        db, conversation.company_id, include_on_demand=wants_no_fidelity, with_plan_count=sales_mode
     )
-    if catalog_context and not cancellation_active:
+    if catalog_context and not cancellation_active and sales_mode:
+        messages.append(
+            {"role": "system", "content": _sales_plans_system_block(catalog_context, wants_no_fidelity)}
+        )
+    elif catalog_context and not cancellation_active:
         messages.append(
             {
                 "role": "system",
@@ -4569,15 +4930,25 @@ async def generate_ai_reply(
                     result = {"sucesso": False, "mensagem": f"Ferramenta '{key}' não encontrada."}
                 else:
                     resolved_images = await _resolve_plan_images(db, conversation.company_id, arguments)
-                    result = await _present_plan_images_with_captions(
-                        db,
-                        conversation,
-                        conversation.company_id,
-                        tool,
-                        resolved_images,
-                        force_resend=_wants_image_explicitly(user_text),
-                        touched_units=touched_units,
-                    )
+                    if sales_mode:
+                        result = await _present_plan_art_sales_mode(
+                            db,
+                            conversation,
+                            tool,
+                            resolved_images,
+                            explicit_request=_wants_image_explicitly(user_text),
+                            touched_units=touched_units,
+                        )
+                    else:
+                        result = await _present_plan_images_with_captions(
+                            db,
+                            conversation,
+                            conversation.company_id,
+                            tool,
+                            resolved_images,
+                            force_resend=_wants_image_explicitly(user_text),
+                            touched_units=touched_units,
+                        )
                 messages.append(
                     {
                         "role": "tool",
@@ -4672,16 +5043,42 @@ async def generate_ai_reply(
             )
 
     final_text = assistant_message.get("content") or ""
-    plan_unit = await _auto_send_plan_images(
-        db,
-        conversation,
-        user_text,
-        final_text,
-        tools_by_key,
-        touched_units,
-        recent_customer_texts=recent_customer_texts,
-    )
-    if _wants_plan_info(user_text, recent_customer_texts):
+    if sales_mode:
+        # Modo vendedor: o texto da IA É a apresentação dos planos — as redes
+        # de segurança do fluxo de catálogo (mandar todas as imagens da
+        # unidade, cortar descrição de plano do texto, fechamento fixo de
+        # tour) não se aplicam. plan_unit só serve pra promoção por unidade.
+        final_text = _fix_whatsapp_bold(final_text)
+        if not touched_units and (plan_intent_active or not confirmed_student):
+            await _auto_send_recommended_plan_art(
+                db,
+                conversation,
+                user_text,
+                final_text,
+                tools_by_key,
+                touched_units,
+                recent_customer_texts=recent_customer_texts,
+                recent_ai_texts=[m.text for m in history if m.actor == "ai" and m.text],
+                lead=lead,
+            )
+        plan_unit = (
+            await _resolve_plan_delivery_unit(
+                db, conversation.company_id, user_text, final_text, recent_customer_texts, touched_units
+            )
+            if touched_units
+            else None
+        )
+    else:
+        plan_unit = await _auto_send_plan_images(
+            db,
+            conversation,
+            user_text,
+            final_text,
+            tools_by_key,
+            touched_units,
+            recent_customer_texts=recent_customer_texts,
+        )
+    if not sales_mode and _wants_plan_info(user_text, recent_customer_texts):
         final_text = _strip_plan_captions_from_text(final_text)
         if plan_unit and _promised_plans_already_sent(final_text):
             if not await _all_unit_plan_images_sent(db, conversation.id, plan_unit):
@@ -4704,10 +5101,11 @@ async def generate_ai_reply(
                         touched_units=touched_units,
                     )
             final_text = _strip_plan_captions_from_text(final_text)
-    final_text = _apply_post_plans_tour_closing(
-        final_text,
-        plans_delivered=bool(touched_units),
-    )
+    if not sales_mode:
+        final_text = _apply_post_plans_tour_closing(
+            final_text,
+            plans_delivered=bool(touched_units),
+        )
     delivered_via_tools = bool(touched_units)
 
     promo_unit_id = plan_unit.id if plan_unit else None
