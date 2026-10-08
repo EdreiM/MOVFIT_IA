@@ -76,10 +76,11 @@ async def leads_funnel_external(
 
 @router.get("/metrics/tools", response_model=list[ToolStats])
 async def tools_stats_external(
+    days: int | None = Query(None, ge=1, le=365),
     company_id: UUID = Depends(get_api_key_company),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _compute_tools_stats(db, company_id)
+    return await _compute_tools_stats(db, company_id, days=days)
 
 
 @router.get("/metrics/featured-tools", response_model=list[ToolStats])

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -18,6 +18,7 @@ from app.schemas import (
     ToolStats,
     TransfersSummary,
 )
+from app.services.message_flow import TOOL_KEY_CHECK_SESSION
 from app.services.metrics_narrative import compute_metrics_narrative
 from app.services.metrics_operations import compute_ai_operations_report, compute_transfers_summary
 from app.services.metrics_showcase import compute_metrics_showcase
@@ -160,11 +161,20 @@ async def _compute_leads_funnel(db: AsyncSession, company_id: UUID) -> list[Stag
     return [StageCount(stage=stage, count=count) for stage, count in result.all()]
 
 
-async def _compute_tools_stats(db: AsyncSession, company_id: UUID) -> list[ToolStats]:
+async def _compute_tools_stats(
+    db: AsyncSession, company_id: UUID, days: int | None = None
+) -> list[ToolStats]:
     """Uso por ferramenta (link de parcela, planos, transferência etc) —
     quantas vezes foi chamada, taxa de sucesso, e quantas conversas
     distintas usaram cada uma. Chat de teste não entra (ToolCallLog nunca
-    grava linha pra ele)."""
+    grava linha pra ele). `days` limita aos últimos N dias (None = tudo).
+
+    verificar_sessao_atendimento fica de fora: quem chama é a varredura de
+    follow-up por conta própria (a IA nem enxerga essa ferramenta), então
+    não é "uso" — e, por rodar a cada varredura, distorcia a tabela inteira."""
+    filters = [ToolCallLog.company_id == company_id, ToolCallLog.tool_key != TOOL_KEY_CHECK_SESSION]
+    if days is not None:
+        filters.append(ToolCallLog.created_at >= datetime.now(timezone.utc) - timedelta(days=days))
     result = await db.execute(
         select(
             ToolCallLog.tool_key,
@@ -172,14 +182,17 @@ async def _compute_tools_stats(db: AsyncSession, company_id: UUID) -> list[ToolS
             func.count().label("total"),
             func.sum(case((ToolCallLog.success.is_(True), 1), else_=0)).label("success"),
             func.count(func.distinct(ToolCallLog.conversation_id)).label("distinct_conv"),
+            func.count(
+                func.distinct(case((ToolCallLog.success.is_(True), ToolCallLog.conversation_id)))
+            ).label("success_conv"),
         )
-        .where(ToolCallLog.company_id == company_id)
+        .where(*filters)
         .group_by(ToolCallLog.tool_key)
         .order_by(func.count().desc())
     )
     rows = result.all()
     stats = []
-    for tool_key, tool_name, total, success, distinct_conv in rows:
+    for tool_key, tool_name, total, success, distinct_conv, success_conv in rows:
         success = success or 0
         stats.append(
             ToolStats(
@@ -189,6 +202,7 @@ async def _compute_tools_stats(db: AsyncSession, company_id: UUID) -> list[ToolS
                 success_calls=success,
                 failed_calls=total - success,
                 distinct_conversations=distinct_conv,
+                success_conversations=success_conv,
                 success_rate=(success / total) if total else None,
             )
         )
@@ -214,6 +228,9 @@ async def _compute_featured_tools_stats(db: AsyncSession, company_id: UUID) -> l
             func.count().label("total"),
             func.sum(case((ToolCallLog.success.is_(True), 1), else_=0)).label("success"),
             func.count(func.distinct(ToolCallLog.conversation_id)).label("distinct_conv"),
+            func.count(
+                func.distinct(case((ToolCallLog.success.is_(True), ToolCallLog.conversation_id)))
+            ).label("success_conv"),
         )
         .where(ToolCallLog.company_id == company_id, ToolCallLog.tool_id.in_(tool_ids))
         .group_by(ToolCallLog.tool_id)
@@ -226,6 +243,7 @@ async def _compute_featured_tools_stats(db: AsyncSession, company_id: UUID) -> l
         total = row.total if row else 0
         success = (row.success if row else 0) or 0
         distinct_conv = row.distinct_conv if row else 0
+        success_conv = row.success_conv if row else 0
         stats.append(
             ToolStats(
                 tool_key=tool.tool_key,
@@ -234,6 +252,7 @@ async def _compute_featured_tools_stats(db: AsyncSession, company_id: UUID) -> l
                 success_calls=success,
                 failed_calls=total - success,
                 distinct_conversations=distinct_conv,
+                success_conversations=success_conv,
                 success_rate=(success / total) if total else None,
             )
         )
@@ -279,11 +298,12 @@ async def leads_funnel(
 
 @router.get("/tools", response_model=list[ToolStats])
 async def tools_stats(
+    days: int | None = Query(None, ge=1, le=365),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     company_id = await resolve_company_id(current, db)
-    return await _compute_tools_stats(db, company_id)
+    return await _compute_tools_stats(db, company_id, days=days)
 
 
 @router.get("/featured-tools", response_model=list[ToolStats])

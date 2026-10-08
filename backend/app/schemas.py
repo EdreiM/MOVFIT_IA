@@ -527,6 +527,10 @@ class ToolStats(BaseModel):
     success_calls: int
     failed_calls: int
     distinct_conversations: int
+    # Conversas distintas com pelo menos uma chamada bem-sucedida — uma
+    # ferramenta pode ser chamada várias vezes na mesma conversa (ex: uma
+    # chamada por imagem de plano), então success_calls não serve pra isso.
+    success_conversations: int = 0
     success_rate: float | None
 
 

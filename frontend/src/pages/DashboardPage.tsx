@@ -3,6 +3,7 @@ import { api } from "../api";
 import AiOperationsReport, { type AiOperationsReportData } from "../components/AiOperationsReport";
 import MetricsShowcase, { type ShowcaseExample } from "../components/MetricsShowcase";
 import TransfersSummaryCard from "../components/TransfersSummaryCard";
+import { successRateClass } from "../toolStats";
 
 type Overview = {
   conversations_total: number;
@@ -170,6 +171,7 @@ export default function DashboardPage() {
   const [timeseries, setTimeseries] = useState<MetricsPoint[]>([]);
   const [funnel, setFunnel] = useState<StageCount[]>([]);
   const [toolStats, setToolStats] = useState<ToolStats[]>([]);
+  const [toolsDays, setToolsDays] = useState<number | "all">(30);
   const [featuredTools, setFeaturedTools] = useState<ToolStats[]>([]);
   const [narrative, setNarrative] = useState<NarrativeReport | null>(null);
   const [showcase, setShowcase] = useState<ShowcaseExample[]>([]);
@@ -189,23 +191,27 @@ export default function DashboardPage() {
       api<Health>("/admin/health"),
       api<MetricsPoint[]>("/metrics/timeseries"),
       api<StageCount[]>("/metrics/leads-funnel"),
-      api<ToolStats[]>("/metrics/tools"),
       api<ToolStats[]>("/metrics/featured-tools"),
       api<NarrativeReport>("/metrics/narrative-report"),
       api<ShowcaseExample[]>("/metrics/showcase-examples"),
     ])
-      .then(([o, h, ts, f, t, ft, narrativeReport, showcaseExamples]) => {
+      .then(([o, h, ts, f, ft, narrativeReport, showcaseExamples]) => {
         setOverview(o);
         setHealth(h);
         setTimeseries(ts);
         setFunnel(f);
-        setToolStats(t);
         setFeaturedTools(ft);
         setNarrative(narrativeReport);
         setShowcase(showcaseExamples);
       })
       .catch((e) => setError(e.message));
   }, []);
+
+  useEffect(() => {
+    api<ToolStats[]>(`/metrics/tools${toolsDays === "all" ? "" : `?days=${toolsDays}`}`)
+      .then(setToolStats)
+      .catch((e) => setError(e.message));
+  }, [toolsDays]);
 
   const cards = overview
     ? [
@@ -305,12 +311,30 @@ export default function DashboardPage() {
       </div>
 
       <div className="border border-white/10 bg-panel px-5 py-4">
-        <p className="text-xs uppercase tracking-wider text-muted">Uso por ferramenta</p>
-        <p className="mt-1 text-sm text-sand/50">
-          Quantas conversas usaram cada ferramenta e a taxa de sucesso — não conta Chat de teste.
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-wider text-muted">Uso por ferramenta</p>
+            <p className="mt-1 text-sm text-sand/50">
+              Quantas conversas usaram cada ferramenta e a taxa de sucesso — não conta Chat de teste.
+            </p>
+          </div>
+          <select
+            className="rounded-md border border-white/15 bg-ink px-2 py-1.5 text-sm"
+            value={toolsDays}
+            onChange={(e) => setToolsDays(e.target.value === "all" ? "all" : Number(e.target.value))}
+          >
+            <option value={7}>Últimos 7 dias</option>
+            <option value={30}>Últimos 30 dias</option>
+            <option value={90}>Últimos 90 dias</option>
+            <option value="all">Todo o período</option>
+          </select>
+        </div>
         {toolStats.length === 0 ? (
-          <p className="mt-4 text-sand/45">Nenhuma ferramenta foi chamada em conversas reais ainda.</p>
+          <p className="mt-4 text-sand/45">
+            {toolsDays === "all"
+              ? "Nenhuma ferramenta foi chamada em conversas reais ainda."
+              : "Nenhuma ferramenta foi chamada em conversas reais nesse período."}
+          </p>
         ) : (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full min-w-[560px] text-left text-sm">
@@ -332,10 +356,12 @@ export default function DashboardPage() {
                     </td>
                     <td className="py-2 pr-4">{t.distinct_conversations}</td>
                     <td className="py-2 pr-4">{t.total_calls}</td>
-                    <td className="py-2 pr-4 text-lime">
+                    <td className={`py-2 pr-4 ${successRateClass(t.success_rate)}`}>
                       {t.success_rate != null ? `${Math.round(t.success_rate * 100)}%` : "—"}
                     </td>
-                    <td className="py-2 text-ember">{t.failed_calls || "—"}</td>
+                    <td className={`py-2 ${t.failed_calls ? "text-ember" : "text-sand/40"}`}>
+                      {t.failed_calls || "—"}
+                    </td>
                   </tr>
                 ))}
               </tbody>

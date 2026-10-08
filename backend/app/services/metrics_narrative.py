@@ -39,6 +39,13 @@ def _tool_success(tool_stats: list[ToolStats], tool_key: str) -> int:
     return 0
 
 
+def _tool_success_conversations(tool_stats: list[ToolStats], tool_key: str) -> int:
+    for stat in tool_stats:
+        if stat.tool_key == tool_key:
+            return stat.success_conversations
+    return 0
+
+
 def _stage_count(funnel: list[StageCount], stage: str) -> int:
     for entry in funnel:
         if entry.stage == stage:
@@ -120,7 +127,8 @@ def build_metrics_narrative(ctx: NarrativeContext) -> list[str]:
     if o.students_total:
         label = "aluno" if o.students_total == 1 else "alunos"
         outcomes.append(f"identifiquei {o.students_total} {label} já matriculados")
-    plan_sends = _tool_success(ctx.tool_stats, _TOOL_KEY_SEND_PLANS)
+    # Uma chamada por imagem enviada — o texto fala em conversas, então conta conversas.
+    plan_sends = _tool_success_conversations(ctx.tool_stats, _TOOL_KEY_SEND_PLANS)
     if plan_sends:
         label = "conversa" if plan_sends == 1 else "conversas"
         outcomes.append(f"enviei material de planos em {plan_sends} {label}")

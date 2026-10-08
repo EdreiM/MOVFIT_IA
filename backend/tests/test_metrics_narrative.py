@@ -75,6 +75,7 @@ def test_narrative_with_real_activity():
                 success_calls=15,
                 failed_calls=0,
                 distinct_conversations=15,
+                success_conversations=15,
                 success_rate=1.0,
             ),
             ToolStats(

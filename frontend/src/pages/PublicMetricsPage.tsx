@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { apiExternal } from "../api";
 import AiOperationsReport, { type AiOperationsReportData } from "../components/AiOperationsReport";
 import MetricsShowcase, { type ShowcaseExample } from "../components/MetricsShowcase";
+import { successRateClass } from "../toolStats";
 
 type Overview = {
   conversations_total: number;
@@ -265,7 +266,7 @@ export default function PublicMetricsPage() {
                           <tr key={t.tool_key} className="border-t border-white/10">
                             <td className="py-2 pr-4">{t.tool_name}</td>
                             <td className="py-2 pr-4">{t.distinct_conversations}</td>
-                            <td className="py-2 text-lime">
+                            <td className={`py-2 ${successRateClass(t.success_rate)}`}>
                               {t.success_rate != null ? `${Math.round(t.success_rate * 100)}%` : "—"}
                             </td>
                           </tr>

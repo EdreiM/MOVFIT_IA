@@ -2,12 +2,12 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.adapters.base import NormalizedMessageEvent
 from app.config import get_settings
 from app.database import AsyncSessionLocal
-from app.models import Conversation, Message, Tool
+from app.models import Conversation, Message, Tool, ToolCallLog
 from app.security import decrypt_secret
 from app.services.llm import chat_completion
 from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 SWEEP_INTERVAL_SECONDS = 300  # varredura a cada 5 minutos — a precisão do
 # horário do follow-up não precisa ser fina, é medida em minutos/horas
+
+MAX_CLOSE_ATTEMPTS = 3  # ver _close_conversation_due_to_inactivity
 
 # Usadas quando a conversa ainda não teve nenhum assunto real discutido
 # (só cumprimento) — ver _process_conversation. Fixas de propósito, pra
@@ -142,19 +144,57 @@ async def _generate_followup_text(
     return (assistant_message.get("content") or "").strip() or None
 
 
+async def _failed_close_attempts(db, conversation: Conversation) -> int:
+    """Quantas vezes o webhook de encerrar já falhou nessa janela de silêncio
+    (desde a última mensagem do cliente)."""
+    filters = [
+        ToolCallLog.conversation_id == conversation.id,
+        ToolCallLog.tool_key == TOOL_KEY_END,
+        ToolCallLog.success.is_(False),
+    ]
+    if conversation.last_message_at:
+        filters.append(ToolCallLog.created_at > conversation.last_message_at)
+    return await db.scalar(select(func.count()).select_from(ToolCallLog).where(*filters)) or 0
+
+
 async def _close_conversation_due_to_inactivity(db, conversation: Conversation) -> None:
     """Mesmo destino de quando a própria IA chama encerrar_atendimento —
     chama o webhook configurado (se existir) pra manter o sistema externo
     ciente, ou só marca localmente se a empresa ainda não configurou essa
-    ferramenta."""
+    ferramenta.
+
+    Se o webhook falhar, a conversa continua aberta e a próxima varredura
+    tenta de novo — mas só até MAX_CLOSE_ATTEMPTS. Depois disso encerra só
+    localmente: sem esse limite, uma conversa presa repetia a chamada a cada
+    varredura pra sempre (visto em produção: n8n fora do ar por dois dias =
+    milhares de chamadas falhas no mesmo punhado de conversas)."""
     end_tool = await _find_tool(db, conversation, TOOL_KEY_END)
     if end_tool and end_tool.webhook_url:
-        await execute_tool(
+        result = await execute_tool(
             db,
             end_tool,
             {"motivo": "Cliente inativo após follow-up(s) sem resposta — atendimento encerrado automaticamente."},
             conversation,
         )
+        if not result.get("sucesso"):
+            failed_attempts = await _failed_close_attempts(db, conversation)
+            if failed_attempts < MAX_CLOSE_ATTEMPTS:
+                logger.warning(
+                    "Encerramento automático da conversa %s falhou (tentativa %s de %s) — tenta de novo na próxima varredura.",
+                    conversation.id,
+                    failed_attempts,
+                    MAX_CLOSE_ATTEMPTS,
+                )
+                return
+            conversation.status = "resolved"
+            await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
+            logger.error(
+                "Encerramento automático da conversa %s falhou %s vezes — encerrada só localmente; "
+                "a sessão pode ter ficado aberta no sistema externo.",
+                conversation.id,
+                failed_attempts,
+            )
+            return
     else:
         conversation.status = "resolved"
         await _upsert_lead(db, conversation.company_id, conversation.contact_phone, {"estagio": "resolvido"})
