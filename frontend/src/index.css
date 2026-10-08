@@ -51,6 +51,14 @@ body {
   animation: pulse-soft 3s ease-in-out infinite;
 }
 
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* Inputs / selects: contraste no tema escuro */
 input,
 select,

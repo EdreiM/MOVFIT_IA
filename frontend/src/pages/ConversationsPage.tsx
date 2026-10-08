@@ -132,8 +132,9 @@ export default function ConversationsPage() {
       </div>
       {error && <p className="text-ember">{error}</p>}
 
-      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <div className="space-y-2">
+      {/* No desktop a grade ocupa o que sobra da janela (cabeçalho + título ≈ 17.75rem); lista e mensagens rolam por dentro */}
+      <div className="grid gap-4 lg:h-[calc(100vh-17.75rem)] lg:min-h-[28rem] lg:grid-cols-[320px_1fr] lg:grid-rows-[minmax(0,1fr)]">
+        <div className="flex min-h-0 flex-col gap-2">
           <input
             className="w-full rounded-md border border-white/15 bg-ink px-3 py-2 text-sm"
             placeholder="Buscar nome, telefone ou texto…"
@@ -161,7 +162,7 @@ export default function ConversationsPage() {
               <option value="off">IA pausada</option>
             </select>
           </div>
-          <ul className="max-h-[70vh] overflow-auto border border-white/10">
+          <ul className="max-h-[70vh] overflow-auto border border-white/10 lg:max-h-none lg:min-h-0 lg:flex-1">
             {filtered.map((c) => (
               <li key={c.id}>
                 <button
@@ -197,11 +198,11 @@ export default function ConversationsPage() {
           </ul>
         </div>
 
-        <div className="border border-white/10 bg-ink/30">
+        <div className="flex min-h-0 flex-col border border-white/10 bg-ink/30">
           {!selected ? (
             <p className="p-8 text-sand/45">Selecione uma conversa.</p>
           ) : (
-            <div className="flex h-full min-h-[70vh] flex-col">
+            <div className="flex h-[70vh] flex-col lg:h-auto lg:min-h-0 lg:flex-1">
               <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
                 <div>
                   <p className="font-medium">{selected.contact_name || selected.contact_phone}</p>
@@ -236,7 +237,7 @@ export default function ConversationsPage() {
                   )}
                 </div>
               </div>
-              <div className="flex-1 space-y-3 overflow-auto p-4">
+              <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
                 {messages.map((m) => {
                   const images = m.content_type === "image" ? m.raw_payload?.images ?? [] : [];
                   return (
