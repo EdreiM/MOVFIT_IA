@@ -967,6 +967,51 @@ def _is_physical_eval_intent(text: str) -> bool:
     return False
 
 
+_NOT_STUDENT_PHRASES = (
+    "nao sou aluno", "nao sou aluna", "nao sou matriculad", "nao estou matriculad",
+    "ainda nao sou", "nao sao matriculad", "nao sao alunos", "nao e aluno", "nao e aluna",
+    "nao matriculad", "nao alunos", "nao aluno", "sem ser aluno", "sem ser aluna",
+    "sem matricula", "nao tenho matricula", "nao tenho plano", "nao sou cliente",
+)
+
+
+def _says_not_student(text: str | None) -> bool:
+    normalized = _normalize_text(text or "")
+    return any(phrase in normalized for phrase in _NOT_STUDENT_PHRASES)
+
+
+def _declared_not_student(user_text: str, recent_customer_texts: list[str] | None) -> bool:
+    """O cliente disse nesta conversa que não é aluno — vale a declaração mais
+    recente: se depois ele afirmar que é aluno ou mandar o CPF, deixa de valer
+    (quem confirma de verdade é a consulta do CPF no sistema)."""
+    texts = [user_text] + list(reversed((recent_customer_texts or [])[-8:]))
+    for text in texts:
+        if not text:
+            continue
+        if _says_not_student(text):
+            return True
+        tokens = _normalize_tokens(text)
+        says_student = bool(
+            tokens & {"aluno", "aluna", "matriculado", "matriculada"} and tokens & {"sou", "ja"}
+        )
+        if says_student or _extract_cpf_from_text(text):
+            return False
+    return False
+
+
+def _physical_eval_students_only_reply(*, ai_name: str, is_first_contact: bool) -> str:
+    """Avaliação física/bioimpedância não é agendada pra quem não é aluno —
+    resposta fixa de propósito: é regra do negócio, não pode depender do
+    modelo (já ofereceu "avaliação gratuita pra quem ainda não é aluno")."""
+    intro = f"Olá! Eu sou a {ai_name}, assistente virtual da Mov Fit. " if is_first_contact else ""
+    return (
+        f"{intro}A avaliação física e a bioimpedância são exclusivas pra quem já é aluno da "
+        "Mov Fit — fazem parte do acompanhamento de quem treina com a gente. 😊\n\n"
+        "Se você quiser começar, te mostro os planos e você já garante a sua. De qual unidade "
+        "você quer saber?"
+    )
+
+
 def _physical_eval_in_recent(recent_customer_texts: list[str] | None) -> bool:
     prior = [t for t in (recent_customer_texts or []) if t and t.strip()]
     return any(_is_physical_eval_intent(t) for t in prior[-8:])
@@ -2403,8 +2448,9 @@ async def _run_physical_eval_pipeline(
             unit = dados.get("unidade")
         if not unit:
             return (
-                "Não encontrei matrícula ativa com esse CPF. "
-                "Confere se digitou certinho ou quer falar com um atendente?"
+                "A avaliação física é exclusiva pra alunos matriculados, e não encontrei "
+                "matrícula ativa com esse CPF. Se digitou errado, me manda de novo; se ainda não "
+                "é aluno, posso te mostrar os planos. 😊"
             ), lead
 
     pref = _physical_eval_schedule_preference(
@@ -4130,6 +4176,9 @@ def _llm_operations_tools_and_transfer_instructions() -> str:
         "Loja interna: vestuário/acessórios na academia — você não consulta estoque; "
         "informe que pode ir à unidade conferir e chame transferir_atendimento pra "
         "verificar disponibilidade.\n"
+        "Avaliação física e bioimpedância são EXCLUSIVAS de alunos matriculados: nunca ofereça "
+        "agendar, nem diga que é gratuita ou disponível, pra quem ainda não é aluno — explique "
+        "que é um benefício de quem se matricula e ofereça mostrar os planos.\n"
         "Tour = visita pra conhecer o ambiente (sem aula experimental). Quando o cliente "
         "quiser ou confirmar tour, chame transferir_atendimento na hora — NUNCA peça CPF, "
         "verificar_unidade_por_cpf, horários ou consultar_agendamento_horarios pra tour. "
@@ -4446,6 +4495,21 @@ async def generate_ai_reply(
             or _physical_eval_awaiting_slot_choice(user_text, conversation)
         )
     )
+    # Avaliação física/bioimpedância é só pra aluno. Quem disse que não é
+    # aluno não entra no fluxo de agendamento (que pediria o CPF) — trava no
+    # código, além do lembrete que vai pro modelo mais abaixo.
+    not_student_declared = not confirmed_student and _declared_not_student(
+        user_text,
+        [m.text for m in history if m.actor == "customer" and m.text and _is_recent_message(m)],
+    )
+    if not_student_declared:
+        physical_eval_active = False
+        if physical_eval_intent and not plan_intent_active:
+            return (
+                _physical_eval_students_only_reply(ai_name=ai_name, is_first_contact=is_first_contact),
+                None,
+                False,
+            )
     if physical_eval_active:
         pipeline_reply, lead = await _run_physical_eval_pipeline(
             db,
@@ -4930,6 +4994,21 @@ async def generate_ai_reply(
         content = _history_text_for_llm(m)
         if content:
             messages.append({"role": role, "content": content})
+
+    if not_student_declared and _physical_eval_conversation_active(user_text, recent_customer_texts, history):
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "LEMBRETE DESTE TURNO: o cliente disse que NÃO é aluno. Avaliação física e "
+                    "bioimpedância são exclusivas de alunos matriculados: NÃO ofereça agendar, NÃO "
+                    "peça CPF pra isso e NÃO diga que é gratuita ou disponível pra quem não é "
+                    "aluno, nem informe valor avulso de avaliação. Explique que ele passa a ter "
+                    "acesso ao se matricular e conduza a conversa pros planos (pergunte a unidade "
+                    "de interesse se ainda não souber)."
+                ),
+            }
+        )
 
     if sales_mode and wants_no_fidelity and not cancellation_active:
         # Visto em produção: cliente perguntou se dava pra pagar por dia e a
