@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models import Conversation, Message, Tool, ToolCallLog
 from app.security import decrypt_secret
+from app.services.lead_insights import mark_lead_lost
 from app.services.llm import chat_completion
 from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
 from app.services.message_flow import (
@@ -312,6 +313,14 @@ async def _process_conversation(db, conversation: Conversation) -> None:
     )
     if followups_sent >= config.followup_max_attempts:
         await _close_conversation_due_to_inactivity(db, conversation)
+        if conversation.status == "resolved":
+            # Funil de vendas: lead que sumiu sem fechar vira "perdido". É
+            # só métrica — falha aqui não pode desfazer o encerramento.
+            try:
+                async with db.begin_nested():
+                    await mark_lead_lost(db, conversation)
+            except Exception:  # noqa: BLE001
+                logger.exception("Falha ao marcar lead como perdido (conversa %s)", conversation.id)
         return
 
     ai_turns = [m for m in history if m.actor in {"ai", "human_agent"}]

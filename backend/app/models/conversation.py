@@ -42,6 +42,10 @@ class Conversation(Base):
     # horários exibida — não a cada "e de tarde?"/"outro dia" que o cliente
     # pedir depois.
     physical_eval_recommendations_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Resumo montado no momento da transferência pra atendente (quem é, o que
+    # quer, objeções) — vai no webhook da ferramenta e aparece no painel, pra
+    # o atendente não recomeçar a conversa do zero.
+    handoff_summary: Mapped[str | None] = mapped_column(Text)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

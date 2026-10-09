@@ -10,6 +10,7 @@ from app.models.metrics import MetricsDaily
 from app.models.lead import Lead
 from app.models.tool_call_log import ToolCallLog
 from app.models.api_key import ApiKey
+from app.models.knowledge_gap import KnowledgeGap
 
 __all__ = [
     "Company",
@@ -30,4 +31,5 @@ __all__ = [
     "Lead",
     "ToolCallLog",
     "ApiKey",
+    "KnowledgeGap",
 ]

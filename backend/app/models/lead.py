@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,6 +53,17 @@ class Lead(Base):
     # Qualquer outro dado que apareça no futuro (ex: profissão, objetivo,
     # indicação) sem precisar criar coluna nova pra cada campo novo.
     custom_fields: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Etiquetas automáticas "categoria:valor" (ex: "assunto:planos",
+    # "objecao:preco", "unidade:Itaituba") — preenchidas pelo código a cada
+    # resposta, ver app/services/lead_insights.py.
+    tags: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    # Funil de VENDAS (interessado → qualificado → proposta → matriculado /
+    # perdido), separado de `stage`: `stage` é o status do atendimento e é
+    # sobrescrito por transferência/encerramento, o que apagaria o ponto do
+    # funil em que o lead estava. Vazio = nunca entrou no funil (ex: aluno
+    # tirando dúvida).
+    sales_stage: Mapped[str | None] = mapped_column(String(30), index=True)
+    lost_reason: Mapped[str | None] = mapped_column(String(60))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

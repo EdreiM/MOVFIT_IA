@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import AiOperationsReport, { type AiOperationsReportData } from "../components/AiOperationsReport";
 import MetricsShowcase, { type ShowcaseExample } from "../components/MetricsShowcase";
+import SalesInsightsCard from "../components/SalesInsightsCard";
 import TransfersSummaryCard from "../components/TransfersSummaryCard";
 import { successRateClass } from "../toolStats";
 
@@ -369,6 +370,8 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      <SalesInsightsCard />
 
       {health && (
         <div className="border border-white/10 bg-panel px-5 py-4">

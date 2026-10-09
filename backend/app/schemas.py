@@ -119,6 +119,7 @@ class ConversationOut(BaseModel):
     created_at: datetime
     last_message_preview: str | None = None
     last_message_actor: str | None = None
+    handoff_summary: str | None = None
     external_conversation_id: str | None = None
 
     model_config = {"from_attributes": True}
@@ -478,6 +479,9 @@ class LeadOut(BaseModel):
     last_physical_eval_date: str | None
     last_physical_eval_time: str | None
     custom_fields: dict
+    tags: list[str] = Field(default_factory=list)
+    sales_stage: str | None = None
+    lost_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -492,6 +496,9 @@ class LeadUpdate(BaseModel):
     unit: str | None = None
     stage: str | None = None
     custom_fields: dict | None = None
+    tags: list[str] | None = None
+    sales_stage: str | None = None
+    lost_reason: str | None = None
 
 
 # Metrics
@@ -534,6 +541,35 @@ class ToolStats(BaseModel):
     # chamada por imagem de plano), então success_calls não serve pra isso.
     success_conversations: int = 0
     success_rate: float | None
+
+
+class RankedValue(BaseModel):
+    value: str
+    label: str
+    count: int
+
+
+class SalesInsights(BaseModel):
+    stages: list[StageCount]
+    leads_in_funnel: int
+    students_identified: int
+    lost_reasons: list[RankedValue]
+    topics: list[RankedValue]
+    objections: list[RankedValue]
+    units: list[RankedValue]
+    plans: list[RankedValue]
+    promotions: list[RankedValue]
+
+
+class KnowledgeGapOut(BaseModel):
+    id: UUID
+    conversation_id: UUID
+    question: str
+    ai_reply: str
+    reason: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class MetricsNarrativeReport(BaseModel):

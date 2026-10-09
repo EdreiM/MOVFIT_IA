@@ -7,17 +7,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
-from app.models import Conversation, Lead, Message, MetricsDaily, Tool, ToolCallLog
+from app.models import Conversation, KnowledgeGap, Lead, Message, MetricsDaily, Tool, ToolCallLog
 from app.schemas import (
     AiOperationsReport,
+    KnowledgeGapOut,
     MetricsNarrativeReport,
     MetricsOverview,
     MetricsPoint,
+    SalesInsights,
     ShowcaseExample,
     StageCount,
     ToolStats,
     TransfersSummary,
 )
+from app.services.lead_insights import compute_sales_insights
 from app.services.message_flow import TOOL_KEY_CHECK_SESSION
 from app.services.metrics_narrative import compute_metrics_narrative
 from app.services.metrics_operations import compute_ai_operations_report, compute_transfers_summary
@@ -304,6 +307,39 @@ async def tools_stats(
 ):
     company_id = await resolve_company_id(current, db)
     return await _compute_tools_stats(db, company_id, days=days)
+
+
+@router.get("/sales-insights", response_model=SalesInsights)
+async def sales_insights(
+    days: int | None = Query(None, ge=1, le=365),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Funil de vendas da IA e o que as etiquetas dos clientes mostram
+    (assuntos, objeções, unidades e planos de interesse)."""
+    company_id = await resolve_company_id(current, db)
+    return await compute_sales_insights(db, company_id, days=days)
+
+
+@router.get("/knowledge-gaps", response_model=list[KnowledgeGapOut])
+async def knowledge_gaps(
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(50, ge=1, le=200),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Perguntas que a IA não soube responder — o que falta cadastrar."""
+    company_id = await resolve_company_id(current, db)
+    result = await db.execute(
+        select(KnowledgeGap)
+        .where(
+            KnowledgeGap.company_id == company_id,
+            KnowledgeGap.created_at >= datetime.now(timezone.utc) - timedelta(days=days),
+        )
+        .order_by(KnowledgeGap.created_at.desc())
+        .limit(limit)
+    )
+    return result.scalars().all()
 
 
 @router.get("/featured-tools", response_model=list[ToolStats])

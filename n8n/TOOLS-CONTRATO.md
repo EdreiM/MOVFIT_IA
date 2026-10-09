@@ -19,6 +19,7 @@ Quando a IA decide usar uma ferramenta durante a conversa, a Mônica chama o web
 - `ferramenta`: a chave (`tool_key`) cadastrada na página **Ferramentas** do painel — use pra decidir qual fluxo do n8n rodar.
 - `argumentos`: o que a IA extraiu da conversa, conforme os parâmetros cadastrados na ferramenta. **Não** cadastre telefone/número do cliente como parâmetro — ele já vem sempre em `contexto.telefone_cliente`, é mais confiável (não depende da IA "adivinhar" certo) e evita repetir a mesma informação de duas formas.
 - `contexto.telefone_cliente`: sempre só dígitos (sem `+`, espaço ou traço), não importa qual plataforma originou a conversa — normalizado pelo backend antes de chamar o webhook, então todo fluxo n8n pode confiar nesse formato único. Use esse número pra mandar mensagem/mídia direto pro cliente (Evolution API, Chatwoot, etc.) quando a ferramenta precisar enviar algo — a Mônica não envia mídia por conta própria, quem faz isso é o próprio workflow.
+- `contexto.resumo_atendimento` (só em `transferir_atendimento`): texto pronto pro atendente que vai assumir — quem é o cliente, se é aluno, assunto, unidade/plano/promoção de interesse, objeções, motivo da transferência e as últimas mensagens dele. Use como nota interna ou primeira mensagem pro atendente na plataforma de destino. O campo é opcional: se o resumo não puder ser montado, a transferência acontece do mesmo jeito, sem ele.
 
 ## Resposta esperada
 

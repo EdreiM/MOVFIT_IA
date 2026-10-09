@@ -15,6 +15,8 @@ router = APIRouter(prefix="/leads", tags=["leads"])
 @router.get("", response_model=list[LeadOut])
 async def list_leads(
     q: str | None = None,
+    sales_stage: str | None = None,
+    tag: str | None = None,
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -23,6 +25,11 @@ async def list_leads(
     if q:
         like = f"%{q}%"
         stmt = stmt.where(or_(Lead.name.ilike(like), Lead.phone.ilike(like), Lead.cpf.ilike(like), Lead.email.ilike(like)))
+    if sales_stage:
+        stmt = stmt.where(Lead.sales_stage == sales_stage)
+    if tag:
+        # Etiqueta exata ("objecao:preco") — JSONB contém o elemento.
+        stmt = stmt.where(Lead.tags.contains([tag]))
     stmt = stmt.order_by(Lead.updated_at.desc())
     result = await db.execute(stmt)
     return result.scalars().all()

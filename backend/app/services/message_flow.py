@@ -34,6 +34,7 @@ from app.models import (
 )
 from app.security import decrypt_secret
 from app.services.debounce import schedule_ai_reply
+from app.services.lead_insights import build_handoff_summary, mark_sales_handoff, update_lead_insights
 from app.services.llm import chat_completion
 from app.services.text_normalize import normalize_text as _normalize_text
 from app.services.text_normalize import normalize_tokens as _normalize_tokens
@@ -3410,6 +3411,19 @@ async def execute_tool(
         "argumentos": arguments,
         "contexto": contexto,
     }
+    handoff_summary: str | None = None
+    if tool.tool_key == TOOL_KEY_TRANSFER:
+        # Resumo pro atendente (quem é, o que quer, objeções) — vai junto no
+        # webhook e fica gravado na conversa. É só apoio: se falhar, a
+        # transferência segue sem ele.
+        try:
+            async with db.begin_nested():
+                handoff_summary = await build_handoff_summary(
+                    db, conversation, str(arguments.get("motivo") or "") or None
+                )
+            contexto["resumo_atendimento"] = handoff_summary
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao montar resumo de transferência (conversa %s)", conversation.id)
     is_test = conversation.channel == "test_console"
     if is_test:
         # Chat de teste não deve disparar nada de verdade fora do MovFit IA
@@ -3437,6 +3451,13 @@ async def execute_tool(
         if tool.tool_key == TOOL_KEY_TRANSFER:
             conversation.ai_enabled = False
             conversation.status = "with_human"
+            if handoff_summary:
+                conversation.handoff_summary = handoff_summary
+            try:
+                async with db.begin_nested():
+                    await mark_sales_handoff(db, conversation)
+            except Exception:  # noqa: BLE001
+                logger.exception("Falha ao atualizar funil na transferência (conversa %s)", conversation.id)
             # "was_transferred" é permanente pra métrica ("quantos foram
             # transferidos no total"), mesmo que o stage mude depois de novo
             # (ex: cliente volta a falar com a IA e é resolvido). Detecta
@@ -5945,6 +5966,22 @@ async def reply_to_pending_messages(
         # reabrir uma sessão nova em plataformas tipo WTS/GYMBOT.
         end_tool, end_arguments = deferred_end_call
         await execute_tool(db, end_tool, end_arguments, conversation)
+
+    # Etiquetas, funil de vendas e perguntas sem resposta: leitura do que
+    # acabou de acontecer, depois de tudo já enviado. Savepoint + try: uma
+    # falha aqui desfaz só isso e nunca derruba a resposta ao cliente.
+    try:
+        async with db.begin_nested():
+            await update_lead_insights(
+                db,
+                conversation,
+                combined_text,
+                reply,
+                recent_customer_texts=[m.text for m in history if m.actor == "customer" and m.text],
+                recent_ai_texts=[m.text for m in history if m.actor == "ai" and m.text],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao atualizar etiquetas/funil da conversa %s", conversation_id)
 
     return reply
 

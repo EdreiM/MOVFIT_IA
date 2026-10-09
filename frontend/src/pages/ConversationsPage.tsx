@@ -12,6 +12,7 @@ type Conversation = {
   last_message_preview?: string | null;
   last_message_actor?: string | null;
   external_conversation_id?: string | null;
+  handoff_summary?: string | null;
 };
 
 type Message = {
@@ -238,6 +239,14 @@ export default function ConversationsPage() {
                 )}
               </div>
             </div>
+            {selected.handoff_summary && (
+              <details className="border-b border-white/10 bg-leaf/5 px-4 py-2 text-xs text-sand/70">
+                <summary className="cursor-pointer text-sm text-sand/85">
+                  Resumo da transferência pro atendente
+                </summary>
+                <p className="mt-2 whitespace-pre-line">{selected.handoff_summary}</p>
+              </details>
+            )}
             <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
               {messages.map((m) => {
                 const images = m.content_type === "image" ? m.raw_payload?.images ?? [] : [];

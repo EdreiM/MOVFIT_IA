@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
+import { LOST_REASON_LABELS, SALES_STAGE_LABELS, tagClass, tagLabel } from "../leadTags";
 
 type Lead = {
   id: string;
@@ -15,6 +16,9 @@ type Lead = {
   last_physical_eval_date: string | null;
   last_physical_eval_time: string | null;
   custom_fields: Record<string, unknown>;
+  tags: string[];
+  sales_stage: string | null;
+  lost_reason: string | null;
   updated_at: string;
 };
 
@@ -29,20 +33,33 @@ export default function LeadsPage() {
   const [items, setItems] = useState<Lead[]>([]);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Lead | null>(null);
-  const [form, setForm] = useState({ name: "", cpf: "", email: "", birthdate: "", unit: "", stage: "" });
+  const [form, setForm] = useState({
+    name: "",
+    cpf: "",
+    email: "",
+    birthdate: "",
+    unit: "",
+    stage: "",
+    sales_stage: "",
+  });
+  const [salesStageFilter, setSalesStageFilter] = useState("");
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
 
   const load = (q?: string) => {
     const query = q !== undefined ? q : search;
-    api<Lead[]>(`/leads${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ""}`)
+    const params = new URLSearchParams();
+    if (query.trim()) params.set("q", query.trim());
+    if (salesStageFilter) params.set("sales_stage", salesStageFilter);
+    const qs = params.toString();
+    api<Lead[]>(`/leads${qs ? `?${qs}` : ""}`)
       .then(setItems)
       .catch((e) => setError(e.message));
   };
 
   useEffect(() => {
-    load("");
-  }, []);
+    load();
+  }, [salesStageFilter]);
 
   const onSearch = (e: FormEvent) => {
     e.preventDefault();
@@ -59,6 +76,7 @@ export default function LeadsPage() {
       birthdate: lead.birthdate ?? "",
       unit: lead.unit ?? "",
       stage: lead.stage,
+      sales_stage: lead.sales_stage ?? "",
     });
   };
 
@@ -77,6 +95,7 @@ export default function LeadsPage() {
           birthdate: form.birthdate || null,
           unit: form.unit || null,
           stage: form.stage || null,
+          sales_stage: form.sales_stage || null,
         }),
       });
       setSelected(updated);
@@ -125,6 +144,18 @@ export default function LeadsPage() {
               Buscar
             </button>
           </form>
+          <select
+            className="w-full rounded-md border border-white/15 bg-ink px-2 py-2 text-sm"
+            value={salesStageFilter}
+            onChange={(e) => setSalesStageFilter(e.target.value)}
+          >
+            <option value="">Funil de vendas: todos</option>
+            {Object.entries(SALES_STAGE_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
           <ul className="max-h-[70vh] overflow-auto border border-white/10">
             {items.map((l) => (
               <li key={l.id}>
@@ -137,6 +168,7 @@ export default function LeadsPage() {
                   <p className="font-medium">{l.name || l.phone}</p>
                   <p className="text-xs text-sand/50">
                     {l.phone} · {l.stage}
+                    {l.sales_stage && ` · funil: ${SALES_STAGE_LABELS[l.sales_stage] || l.sales_stage}`}
                   </p>
                 </button>
               </li>
@@ -172,6 +204,21 @@ export default function LeadsPage() {
                     {formatEvalDate(selected.last_physical_eval_date)}
                     {selected.last_physical_eval_time ? ` às ${selected.last_physical_eval_time}` : ""}
                   </span>
+                </div>
+              )}
+
+              {selected.tags.length > 0 && (
+                <div>
+                  <p className="text-sm text-sand/60">
+                    Etiquetas <span className="text-sand/40">(preenchidas pela IA a cada atendimento)</span>
+                  </p>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {selected.tags.map((tag) => (
+                      <span key={tag} className={`rounded border px-2 py-0.5 text-xs ${tagClass(tag)}`}>
+                        {tagLabel(tag)}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -228,6 +275,28 @@ export default function LeadsPage() {
                     value={form.stage}
                     onChange={(e) => setForm({ ...form, stage: e.target.value })}
                   />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-sm text-sand/60">
+                    Funil de vendas <span className="text-sand/40">(a IA avança sozinha; matriculado é manual)</span>
+                  </span>
+                  <select
+                    className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+                    value={form.sales_stage}
+                    onChange={(e) => setForm({ ...form, sales_stage: e.target.value })}
+                  >
+                    <option value="">Fora do funil</option>
+                    {Object.entries(SALES_STAGE_LABELS).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  {selected.sales_stage === "perdido" && selected.lost_reason && (
+                    <span className="block text-xs text-sand/45">
+                      Motivo: {LOST_REASON_LABELS[selected.lost_reason] || selected.lost_reason}
+                    </span>
+                  )}
                 </label>
               </div>
 
