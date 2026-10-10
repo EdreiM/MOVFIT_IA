@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     ai_bubble_max_chars: int = 320
     # Pausa entre bolhas ao enviar uma resposta dividida, simulando digitação natural.
     ai_bubble_delay_seconds: float = 1.2
+    # Webhook (ex: um fluxo do n8n que manda WhatsApp/e-mail) que recebe os
+    # alertas de saúde e o relatório diário — vazio = só aparecem no painel.
+    alert_webhook_url: str = ""
+    # Hora (Brasília) a partir da qual o relatório do dia anterior é gerado.
+    daily_report_hour: int = 7
+    # Hora (Brasília) a partir da qual o lembrete da véspera da avaliação
+    # física sai (e até 21h59, depois disso não manda mais).
+    eval_reminder_hour: int = 18
 
     @property
     def cors_origins_list(self) -> list[str]:

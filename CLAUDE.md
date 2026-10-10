@@ -10,6 +10,8 @@ O projeto **assume um único worker/processo do backend rodando por vez** (confi
 - `app/services/followup.py` — varredura periódica (a cada 5min) de conversas inativas.
 - `app/services/pacto.py` — atualização diária dos dados da Pacto (movimento por unidade), já com `advisory_lock` (namespace 3).
 
+Dentro da varredura do follow-up (e portanto já sob o lock do namespace 1, sem namespace próprio) também rodam `retry_pending_transfers` (followup.py), `health_monitor.run_health_checks` (alertas de saúde + relatório diário, tela "Alertas") e `eval_reminders.run_eval_reminders` (lembrete da véspera da avaliação física). Cada um tem a própria trava de duplicidade no banco (chave do `SystemEvent`, `Lead.physical_eval_reminder_for`) — quem for adicionar mais um job aqui deve fazer o mesmo, porque a varredura roda a cada 5min.
+
 **Toda tarefa em background nova que executa trabalho (não só lê dados) deve usar `app/services/locks.py` (`advisory_lock`)** antes de agir, mesmo que hoje só exista um worker — é barato (uma trava consultiva do Postgres, `pg_advisory_lock`) e evita duplicar efeito colateral (mensagem repetida pro cliente, ferramenta chamada duas vezes) no dia em que o backend escalar pra múltiplas cópias. Padrão:
 
 ```python

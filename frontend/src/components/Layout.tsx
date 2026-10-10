@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
+import { api } from "../api";
 import { useAuth } from "../auth";
 
 const navGroups: { label: string; links: { to: string; label: string }[] }[] = [
@@ -14,6 +16,7 @@ const navGroups: { label: string; links: { to: string; label: string }[] }[] = [
     label: "Operação",
     links: [
       { to: "/integrations", label: "Integrações" },
+      { to: "/alerts", label: "Alertas" },
       { to: "/webhook-logs", label: "Logs de Webhook" },
       { to: "/test-chat", label: "Chat de teste" },
     ],
@@ -32,6 +35,23 @@ const navGroups: { label: string; links: { to: string; label: string }[] }[] = [
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, companies, companyId, selectCompany, logout } = useAuth();
+  const [activeAlerts, setActiveAlerts] = useState(0);
+
+  // Bolinha no menu "Alertas" — o painel avisa sem precisar abrir a tela.
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    const poll = () =>
+      api<{ count: number }>("/admin/events/active-count")
+        .then((r) => !cancelled && setActiveAlerts(r.count))
+        .catch(() => undefined);
+    poll();
+    const timer = setInterval(poll, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [companyId]);
 
   return (
     <div className="min-h-screen bg-mesh text-sand">
@@ -109,6 +129,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                     }
                   >
                     {l.label}
+                    {l.to === "/alerts" && activeAlerts > 0 && (
+                      <span className="ml-1.5 rounded-full bg-ember px-1.5 py-0.5 text-[10px] font-bold text-white">
+                        {activeAlerts}
+                      </span>
+                    )}
                   </NavLink>
                 ))}
               </div>

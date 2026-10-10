@@ -186,6 +186,10 @@ class AiConfigUpdate(BaseModel):
     followup_max_attempts: int | None = None
     reply_debounce_seconds: float | None = Field(default=None, ge=1, le=60)
     sales_mode_enabled: bool | None = None
+    human_hours_enabled: bool | None = None
+    human_hours_start: str | None = None
+    human_hours_end: str | None = None
+    human_hours_days: str | None = None
     usd_brl_rate: float | None = Field(default=None, gt=0, le=100)
     usd_brl_rate_auto: bool | None = None
     custom_links: list[CustomLink] | None = None
@@ -212,6 +216,10 @@ class AiConfigOut(BaseModel):
     followup_max_attempts: int
     reply_debounce_seconds: float
     sales_mode_enabled: bool = False
+    human_hours_enabled: bool = False
+    human_hours_start: str = "07:00"
+    human_hours_end: str = "22:00"
+    human_hours_days: str = "0,1,2,3,4,5"
     usd_brl_rate: float = 5.0
     usd_brl_rate_auto: bool = True
     custom_links: list[CustomLink] = Field(default_factory=list)

@@ -447,6 +447,11 @@ TOOL_KEY_CHECK_SCHEDULE = "consultar_agendamento_horarios"
 # tool_key não pode ser editado depois de criado — não corrigir aqui sem
 # recriar a ferramenta no painel também.
 TOOL_KEY_BOOK_PHYSICAL_EVAL = "insere_agenda_avalicao"
+# Opcional — cancela a avaliação já agendada (n8n/Pacto). Com ela ativa, o
+# cliente remarca/cancela sozinho pelo chat; sem ela, a IA transfere pra
+# recepção como sempre. Só o pipeline (_run_physical_eval_change_pipeline)
+# chama — nunca a IA livremente, mesmo motivo da ferramenta de reserva.
+TOOL_KEY_CANCEL_PHYSICAL_EVAL = "cancela_agenda_avaliacao"
 # Opcional — só existe pra empresas cuja plataforma (ex: WTS/GYMBOT) permite
 # consultar se a sessão do cliente ainda está pendente. Usada só
 # internamente pelo follow-up (app/services/followup.py) antes de mandar
@@ -3171,6 +3176,158 @@ async def _run_internal_store_transfer_pipeline(
     return f"{reply} Um atendente continua com você em instantes! 😊"
 
 
+_PAYMENT_PROOF_MARKER = "comprovante de pagamento"
+
+
+def _payment_proof_description(text: str) -> str | None:
+    """Descrição da imagem quando o cliente mandou um comprovante de
+    pagamento (a visão marca com "COMPROVANTE DE PAGAMENTO:" — ver
+    describe_image). None se a mensagem não for isso."""
+    for line in (text or "").splitlines():
+        normalized = _normalize_text(line)
+        if "imagem enviada pelo cliente" in normalized and _PAYMENT_PROOF_MARKER in normalized:
+            return line.split("]", 1)[-1].strip()
+    return None
+
+
+async def _run_payment_proof_pipeline(
+    db: AsyncSession,
+    conversation: Conversation,
+    tools_by_key: dict[str, Tool],
+    description: str,
+) -> str:
+    """Comprovante de pagamento: a IA não confere pagamento — passa pro
+    atendente já com o que a imagem mostra, em vez de pedir esclarecimento."""
+    transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+    if not transfer_tool or not transfer_tool.webhook_url:
+        return (
+            "Recebi seu comprovante! 😊 Pra eu não te deixar sem retorno: a confirmação do "
+            "pagamento é feita pela equipe — fale com a recepção da unidade que eles conferem."
+        )
+    if conversation.status != "with_human":
+        await execute_tool(
+            db,
+            transfer_tool,
+            {
+                "motivo": (
+                    "Cliente enviou comprovante de pagamento — conferir e confirmar. "
+                    f"O que a imagem mostra: {description[:300]}"
+                )
+            },
+            conversation,
+        )
+    return (
+        "Recebi seu comprovante! 😊 Já deixei com um atendente confirmar o pagamento — "
+        "assim que ele conferir, te responde por aqui."
+    )
+
+
+_PHYSICAL_EVAL_CHANGE_TOKENS = {
+    "remarcar", "remarca", "remarcacao", "reagendar", "reagendamento",
+}
+
+
+def _upcoming_physical_eval(lead: Lead | None, brazil_now: datetime) -> tuple[str, str] | None:
+    """(data yyyyMMdd, horário HH:MM) da avaliação que a IA agendou pro
+    cliente, se ela ainda não passou."""
+    if not lead or not lead.physical_eval_scheduled:
+        return None
+    eval_date = lead.last_physical_eval_date
+    eval_time = lead.last_physical_eval_time
+    if not eval_date or not eval_time:
+        return None
+    if eval_date < brazil_now.strftime("%Y%m%d"):
+        return None
+    return eval_date, eval_time
+
+
+def _wants_physical_eval_change(user_text: str, history: list[Message]) -> bool:
+    """Cliente quer remarcar/cancelar a avaliação JÁ agendada. Só vale pra
+    mensagem atual (não pro que ele disse nas últimas — senão "remarcar"
+    ficaria ativo por várias mensagens). Frase vaga ("não vou conseguir ir")
+    só conta como resposta ao lembrete da véspera, pra não cancelar
+    avaliação por causa de uma frase sobre outra coisa."""
+    if not _physical_eval_reschedule_intent(user_text):
+        return False
+    if _normalize_tokens(user_text) & _PHYSICAL_EVAL_CHANGE_TOKENS:
+        return True
+    if "cancelar a avaliacao" in _normalize_text(user_text) or "cancelar avaliacao" in _normalize_text(user_text):
+        return True
+    last_ai = next((m for m in reversed(history) if m.actor == "ai"), None)
+    return bool(
+        last_ai
+        and isinstance(last_ai.raw_payload, dict)
+        and last_ai.raw_payload.get("is_eval_reminder")
+        and _is_recent_message(last_ai)
+    )
+
+
+async def _run_physical_eval_change_pipeline(
+    db: AsyncSession,
+    conversation: Conversation,
+    tools_by_key: dict[str, Tool],
+    lead: Lead,
+    upcoming: tuple[str, str],
+) -> str:
+    """Remarcar/cancelar avaliação física. Com a ferramenta de cancelamento
+    ativa, cancela e já abre a escolha de novo dia (o fluxo normal de
+    agendamento continua na mensagem seguinte); sem ela, transfere pra
+    recepção como sempre foi."""
+    eval_date, eval_time = upcoming
+    data_br = _format_schedule_date_br(eval_date)
+    cancel_tool = tools_by_key.get(TOOL_KEY_CANCEL_PHYSICAL_EVAL)
+
+    if cancel_tool and cancel_tool.webhook_url and lead.cpf and lead.unit:
+        result = await execute_tool(
+            db,
+            cancel_tool,
+            {"cpf": lead.cpf, "unidade": lead.unit, "data": eval_date, "horario": eval_time},
+            conversation,
+        )
+        if result.get("sucesso"):
+            lead.last_physical_eval_date = None
+            lead.last_physical_eval_time = None
+            lead.physical_eval_reminder_for = None
+            # Lista antiga de horários não vale mais — a próxima consulta
+            # mostra os horários do dia que o cliente escolher agora.
+            conversation.physical_eval_offered_slots = None
+            db.add_all([lead, conversation])
+            await db.flush()
+            return (
+                f"Pronto, cancelei sua avaliação física de {data_br} às {eval_time}. 😊 "
+                "Quer remarcar? Me diz o dia (e se prefere manhã, tarde ou noite) que eu "
+                "vejo os horários disponíveis."
+            )
+        if not _is_technical_tool_failure(result):
+            message = _format_tool_result_as_reply(result)
+            if message:
+                return message
+        return await _transfer_and_notify_tool_failure(
+            db, conversation, tools_by_key, f"ferramenta {TOOL_KEY_CANCEL_PHYSICAL_EVAL} falhou"
+        )
+
+    transfer_tool = tools_by_key.get(TOOL_KEY_TRANSFER)
+    reply = (
+        f"Sem problema! Sua avaliação física está marcada pra {data_br} às {eval_time}. "
+        "Vou te encaminhar pra recepção remarcar com você."
+    )
+    if not transfer_tool or not transfer_tool.webhook_url:
+        return f"{reply} Se preferir, fale direto com a recepção da unidade. 😊"
+    if conversation.status != "with_human":
+        await execute_tool(
+            db,
+            transfer_tool,
+            {
+                "motivo": (
+                    f"Cliente quer remarcar/cancelar a avaliação física de {data_br} às {eval_time} "
+                    "(agendada pela IA)."
+                )
+            },
+            conversation,
+        )
+    return f"{reply} Um atendente continua com você em instantes! 😊"
+
+
 def _run_end_conversation_pipeline(
     tools_by_key: dict[str, Tool],
 ) -> tuple[str, tuple[Tool, dict] | None]:
@@ -3474,6 +3631,62 @@ async def _log_tool_call(
     await db.flush()
 
 
+_WEEKDAY_NAMES_PT = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+
+
+def _parse_hhmm(value: str | None) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value or "")
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return hour, minute
+
+
+def _outside_human_hours_notice(config: AiConfig | None, now_brazil: datetime) -> str | None:
+    """Aviso pro cliente quando a transferência aconteceu fora do expediente
+    do atendimento humano — evita prometer retorno imediato às 23h. None =
+    dentro do horário, recurso desligado ou configuração inválida."""
+    if not config or not getattr(config, "human_hours_enabled", False):
+        return None
+    start = _parse_hhmm(config.human_hours_start)
+    end = _parse_hhmm(config.human_hours_end)
+    if not start or not end:
+        return None
+    try:
+        days = {int(d) for d in (config.human_hours_days or "").split(",") if d.strip() != ""}
+    except ValueError:
+        return None
+    if not days:
+        return None
+
+    now_minutes = now_brazil.hour * 60 + now_brazil.minute
+    start_minutes = start[0] * 60 + start[1]
+    end_minutes = end[0] * 60 + end[1]
+    open_today = now_brazil.weekday() in days and start_minutes <= now_minutes < end_minutes
+    if open_today:
+        return None
+
+    def _fmt(hhmm: tuple[int, int]) -> str:
+        return f"{hhmm[0]:02d}h" if hhmm[1] == 0 else f"{hhmm[0]:02d}h{hhmm[1]:02d}"
+
+    schedule = f"das {_fmt(start)} às {_fmt(end)}"
+    if len(days) < 7:
+        ordered = sorted(days)
+        if ordered == list(range(ordered[0], ordered[-1] + 1)) and len(ordered) > 1:
+            schedule = (
+                f"de {_WEEKDAY_NAMES_PT[ordered[0]]} a {_WEEKDAY_NAMES_PT[ordered[-1]]}, {schedule}"
+            )
+        else:
+            schedule = f"{', '.join(_WEEKDAY_NAMES_PT[d] for d in ordered)}, {schedule}"
+    return (
+        f"Só um aviso: agora estamos fora do horário do atendimento humano ({schedule}). "
+        "Seu pedido já está com a equipe e um atendente te responde assim que o "
+        "expediente começar. 😊"
+    )
+
+
 def _mark_transfer_pending(conversation: Conversation, arguments: dict) -> None:
     """A transferência não chegou a ninguém: guarda pra retentar em segundo
     plano e sinaliza (atributo só em memória) pro turno atual não afirmar
@@ -3572,6 +3785,7 @@ async def execute_tool(
             conversation.status = "with_human"
             conversation.transfer_pending_at = None
             conversation.transfer_pending_reason = None
+            conversation._transfer_succeeded_this_turn = True  # type: ignore[attr-defined]
             if handoff_summary:
                 conversation.handoff_summary = handoff_summary
             try:
@@ -4624,7 +4838,21 @@ async def generate_ai_reply(
         if app_reply is not None:
             return app_reply, None, False
 
-    guest_who_followup = _is_guest_who_followup(user_text, recent_customer_texts, lead)
+    proof_description = _payment_proof_description(user_text)
+    if proof_description:
+        proof_reply = await _run_payment_proof_pipeline(
+            db, conversation, tools_by_key, proof_description
+        )
+        return proof_reply, None, False
+
+    upcoming_eval = _upcoming_physical_eval(lead, datetime.now(timezone(timedelta(hours=-3))))
+    if upcoming_eval and lead and _wants_physical_eval_change(user_text, history):
+        change_reply = await _run_physical_eval_change_pipeline(
+            db, conversation, tools_by_key, lead, upcoming_eval
+        )
+        return change_reply, None, False
+
+    guest_who_followup =_is_guest_who_followup(user_text, recent_customer_texts, lead)
     physical_eval_intent = _is_physical_eval_intent(user_text)
     has_schedule_tool = _has_schedule_tool(tools_by_key)
     physical_eval_active = (
@@ -5235,7 +5463,8 @@ async def generate_ai_reply(
     offered_tools = [
         t
         for t in active_tools
-        if t.tool_key not in (TOOL_KEY_CHECK_SESSION, TOOL_KEY_BOOK_PHYSICAL_EVAL)
+        if t.tool_key
+        not in (TOOL_KEY_CHECK_SESSION, TOOL_KEY_BOOK_PHYSICAL_EVAL, TOOL_KEY_CANCEL_PHYSICAL_EVAL)
         # Modo vendedor: as artes saem logo depois da bolha que fala de cada
         # plano (ver SalesMediaContext). Se a IA pudesse chamar a ferramenta,
         # a imagem chegaria antes do texto, fora de ordem.
@@ -5989,6 +6218,7 @@ async def reply_to_pending_messages(
     if not conversation or not conversation.ai_enabled:
         return None
     conversation._transfer_failed_this_turn = False  # type: ignore[attr-defined]
+    conversation._transfer_succeeded_this_turn = False  # type: ignore[attr-defined]
 
     history_result = await db.execute(
         select(Message)
@@ -6056,6 +6286,20 @@ async def reply_to_pending_messages(
         conversation._transfer_failed_this_turn = False  # type: ignore[attr-defined]
         reply = _CUSTOMER_TRANSFER_FAILED
         deferred_end_call = None
+    elif getattr(conversation, "_transfer_succeeded_this_turn", False) and reply:
+        # Transferiu de verdade — se for fora do expediente do atendimento
+        # humano, diz isso em vez de deixar o cliente achar que vem resposta
+        # imediata (texto fixo, não depende do modelo lembrar).
+        try:
+            hours_config = await resolve_ai_config(db, conversation)
+            notice = _outside_human_hours_notice(
+                hours_config, datetime.now(timezone(timedelta(hours=-3)))
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao checar horário do atendimento humano (conversa %s)", conversation.id)
+            notice = None
+        if notice:
+            reply = f"{reply}\n\n{notice}"
 
     if not reply:
         if deferred_end_call:
@@ -6212,7 +6456,11 @@ async def describe_image(config: AiConfig, media_url: str) -> str | None:
                                 "contexto de uma conversa de WhatsApp de uma academia, sem ver "
                                 "a imagem de verdade — então inclua qualquer texto legível e "
                                 "qualquer coisa relevante pra atendimento (comprovante, print de "
-                                "erro, foto de produto, documento, etc)."
+                                "erro, foto de produto, documento, etc). Se a imagem for um "
+                                "COMPROVANTE de pagamento (Pix, transferência, boleto pago, "
+                                "recibo de cartão), comece a descrição exatamente com "
+                                "'COMPROVANTE DE PAGAMENTO:' e inclua valor, data e nome do "
+                                "pagador/recebedor quando estiverem legíveis."
                             ),
                         },
                         {"type": "image_url", "image_url": {"url": media_url}},

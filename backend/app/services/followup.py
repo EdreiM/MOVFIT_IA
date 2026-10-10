@@ -10,6 +10,8 @@ from app.database import AsyncSessionLocal
 from app.models import Conversation, Message, Tool, ToolCallLog
 from app.security import decrypt_secret
 from app.services.lead_insights import mark_lead_lost
+from app.services.eval_reminders import run_eval_reminders
+from app.services.health_monitor import run_health_checks
 from app.services.llm_usage import collect_llm_usage, record_llm_usage
 from app.services.llm import chat_completion
 from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
@@ -445,6 +447,16 @@ async def run_followup_sweep() -> None:
                     await retry_pending_transfers(db)
                 except Exception:  # noqa: BLE001
                     logger.exception("Falha ao retentar transferências pendentes")
+                    await db.rollback()
+                try:
+                    await run_health_checks(db)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Falha no monitoramento de saúde")
+                    await db.rollback()
+                try:
+                    await run_eval_reminders(db)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Falha nos lembretes de avaliação física")
                     await db.rollback()
                 result = await db.execute(
                     select(Conversation).where(

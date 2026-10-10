@@ -50,6 +50,11 @@ class Lead(Base):
     physical_eval_scheduled: Mapped[bool] = mapped_column(Boolean, default=False)
     last_physical_eval_date: Mapped[str | None] = mapped_column(String(8))  # yyyyMMdd
     last_physical_eval_time: Mapped[str | None] = mapped_column(String(5))  # HH:MM
+    # Data (yyyyMMdd) da avaliação pra qual o lembrete da véspera JÁ foi
+    # mandado — remarcar muda last_physical_eval_date, então o lembrete da
+    # nova data sai de novo sem precisar zerar nada (ver
+    # app/services/eval_reminders.py).
+    physical_eval_reminder_for: Mapped[str | None] = mapped_column(String(8))
     # Qualquer outro dado que apareça no futuro (ex: profissão, objetivo,
     # indicação) sem precisar criar coluna nova pra cada campo novo.
     custom_fields: Mapped[dict] = mapped_column(JSONB, default=dict)

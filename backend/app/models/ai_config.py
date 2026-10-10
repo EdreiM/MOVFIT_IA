@@ -78,6 +78,18 @@ class AiConfig(Base):
     # Quando a cotação automática foi buscada pela última vez (vazio = nunca,
     # ou valor digitado à mão).
     usd_brl_rate_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Expediente do atendimento HUMANO: fora dele, depois de transferir, a IA
+    # avisa que um atendente responde quando o expediente começar (em vez de
+    # prometer retorno imediato às 23h). Desligado = não avisa nada.
+    human_hours_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
+    human_hours_start: Mapped[str] = mapped_column(String(5), default="07:00", server_default="07:00")
+    human_hours_end: Mapped[str] = mapped_column(String(5), default="22:00", server_default="22:00")
+    # Dias da semana com atendimento, 0=segunda … 6=domingo, separados por vírgula.
+    human_hours_days: Mapped[str] = mapped_column(
+        String(20), default="0,1,2,3,4,5", server_default="0,1,2,3,4,5"
+    )
     # Links úteis que a IA pode enviar quando o assunto combinar (vagas,
     # formulários etc.) — lista de {label, url, when}.
     custom_links: Mapped[list] = mapped_column(JSONB, default=list)

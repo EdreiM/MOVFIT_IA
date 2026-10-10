@@ -13,6 +13,7 @@ from app.models.api_key import ApiKey
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.llm_usage import LlmUsage
 from app.models.pacto import PactoConnection, PactoUnit
+from app.models.system_event import SystemEvent
 
 __all__ = [
     "Company",
@@ -37,4 +38,5 @@ __all__ = [
     "LlmUsage",
     "PactoConnection",
     "PactoUnit",
+    "SystemEvent",
 ]

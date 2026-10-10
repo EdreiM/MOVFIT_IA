@@ -16,6 +16,7 @@ import AccountPage from "./pages/AccountPage";
 import ApiKeysPage from "./pages/ApiKeysPage";
 import PublicMetricsPage from "./pages/PublicMetricsPage";
 import WebhookLogsPage from "./pages/WebhookLogsPage";
+import AlertsPage from "./pages/AlertsPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -55,6 +56,7 @@ export default function App() {
                 <Route path="/integrations" element={<IntegrationsPage />} />
                 <Route path="/pacto/callback" element={<PactoCallbackPage />} />
                 <Route path="/webhook-logs" element={<WebhookLogsPage />} />
+                <Route path="/alerts" element={<AlertsPage />} />
                 <Route path="/api-keys" element={<ApiKeysPage />} />
                 <Route path="/account" element={<AccountPage />} />
               </Routes>

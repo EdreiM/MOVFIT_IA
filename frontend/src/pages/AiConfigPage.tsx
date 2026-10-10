@@ -29,6 +29,10 @@ type AiConfig = {
   followup_max_attempts: number;
   reply_debounce_seconds: number;
   sales_mode_enabled: boolean;
+  human_hours_enabled: boolean;
+  human_hours_start: string;
+  human_hours_end: string;
+  human_hours_days: string;
   custom_links: CustomLink[];
 };
 
@@ -100,6 +104,10 @@ export default function AiConfigPage() {
         followup_max_attempts: config.followup_max_attempts,
         reply_debounce_seconds: config.reply_debounce_seconds,
         sales_mode_enabled: config.sales_mode_enabled,
+        human_hours_enabled: config.human_hours_enabled,
+        human_hours_start: config.human_hours_start,
+        human_hours_end: config.human_hours_end,
+        human_hours_days: config.human_hours_days,
         custom_links: (config.custom_links ?? []).filter(
           (link) => link.label.trim() && link.url.trim()
         ),
@@ -404,6 +412,76 @@ export default function AiConfigPage() {
             objeções e fecha com o link — sem legenda nem frases prontas; a arte vai só do plano
             indicado. Desligado: envia a imagem e a descrição pronta de todos os planos da unidade.
             Valores e links continuam vindo sempre de Unidades &amp; Planos.
+          </span>
+        </fieldset>
+
+        <fieldset className="space-y-3 rounded-md border border-white/10 p-3">
+          <legend className="px-1 text-sm text-sand/60">Horário do atendimento humano</legend>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={config.human_hours_enabled}
+              onChange={(e) => setConfig({ ...config, human_hours_enabled: e.target.checked })}
+            />
+            <span className="text-sm text-sand/60">
+              Avisar o cliente quando a transferência acontecer fora do expediente
+            </span>
+          </label>
+          {config.human_hours_enabled && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-3 text-sm text-sand/60">
+                <label className="flex items-center gap-2">
+                  Das
+                  <input
+                    type="time"
+                    className="rounded-md border border-white/15 bg-ink px-2 py-1"
+                    value={config.human_hours_start}
+                    onChange={(e) => setConfig({ ...config, human_hours_start: e.target.value })}
+                  />
+                </label>
+                <label className="flex items-center gap-2">
+                  às
+                  <input
+                    type="time"
+                    className="rounded-md border border-white/15 bg-ink px-2 py-1"
+                    value={config.human_hours_end}
+                    onChange={(e) => setConfig({ ...config, human_hours_end: e.target.value })}
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-3 text-sm text-sand/60">
+                {["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"].map((label, index) => {
+                  const days = (config.human_hours_days || "")
+                    .split(",")
+                    .filter((d) => d !== "")
+                    .map(Number);
+                  const checked = days.includes(index);
+                  return (
+                    <label key={label} className="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? [...days, index]
+                            : days.filter((d) => d !== index);
+                          setConfig({
+                            ...config,
+                            human_hours_days: Array.from(new Set(next)).sort().join(","),
+                          });
+                        }}
+                      />
+                      {label}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <span className="block text-xs text-sand/45">
+            Horário de Brasília. Fora desse horário, depois de transferir, a IA acrescenta que um
+            atendente responde assim que o expediente começar — em vez de parecer que o retorno é
+            imediato. Desligado: não avisa nada.
           </span>
         </fieldset>
 

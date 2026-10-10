@@ -37,7 +37,7 @@ Quando a IA decide usar uma ferramenta durante a conversa, a Mônica chama o web
 
 ## Ferramentas com efeito interno no painel
 
-Quatro chaves são especiais — além de chamar o webhook, o backend da Mônica também faz algo a mais:
+Algumas chaves são especiais — além de chamar o webhook, o backend da Mônica também faz algo a mais:
 
 - `transferir_atendimento`: quando `sucesso: true`, desliga a IA da conversa e marca como "com atendente humano".
 - `encerrar_atendimento`: quando `sucesso: true`, marca a conversa como resolvida.
@@ -62,6 +62,12 @@ Quatro chaves são especiais — além de chamar o webhook, o backend da Mônica
   Se a unidade tiver mais de um plano com imagem (ex: mensal e anual), cadastre também um parâmetro de **nome do plano** — quando a IA mandar um valor que bate com o nome de um plano daquela unidade, só a imagem desse plano entra na lista; se nenhum parâmetro bater com nome de plano, vêm todas as imagens ativas da unidade (comportamento anterior, mantido pra ferramentas sem esse parâmetro).
 
   Se vier vazia, é porque a unidade não bateu com nenhuma cadastrada ou nenhum plano dela (ou do plano pedido) tem imagem ainda.
+
+- `cancela_agenda_avaliacao` (**opcional**): cancela a avaliação física que a IA agendou. Se existir e estiver ativa, o cliente que responde "remarcar" (ou "cancelar a avaliação") — por exemplo ao lembrete da véspera — tem a avaliação cancelada na hora e a IA já abre a escolha de um novo dia, sem passar pela recepção. Se NÃO existir, o comportamento continua sendo transferir pra recepção remarcar. Como `insere_agenda_avalicao`, **não é oferecida pra IA decidir**: só o fluxo de avaliação física chama (nenhum parâmetro precisa ser cadastrado). O backend envia sempre estes argumentos, tirados do cadastro do cliente e do último agendamento feito pela IA:
+  ```json
+  { "cpf": "12345678900", "unidade": "Itaituba", "data": "20261011", "horario": "09:30" }
+  ```
+  `data` em `yyyyMMdd`, `horario` em `HH:MM`. Resposta esperada: `sucesso: true` quando o agendamento foi cancelado na Pacto. `sucesso: false` com `mensagem` legível (ex: "Agendamento não encontrado") é mostrada ao cliente; falha técnica (HTTP 5xx, `mensagem` vazia) transfere pra um atendente.
 
 Qualquer outra `tool_key` (consultar aluno, ou o que for cadastrado) é tratada de forma genérica: o webhook faz o trabalho de verdade, a Mônica só repassa o resultado.
 
