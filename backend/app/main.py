@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import get_settings
 from app.services.debounce import wait_for_pending_replies
 from app.services.followup import periodic_followup_loop
+from app.services.pacto import periodic_pacto_sync_loop
 
 # Sem isso, todo logger.info(...) do app (ex: diagnóstico de execução de
 # ferramentas) é descartado silenciosamente — o nível padrão do root logger
@@ -28,6 +29,7 @@ from app.routers import (
     leads,
     metrics,
     numbers,
+    pacto,
     public_api,
 )
 
@@ -41,8 +43,12 @@ async def lifespan(_app: FastAPI):
     # já é o caso hoje (ver Dockerfile/docker-compose); com múltiplos
     # workers/réplicas isso duplicaria as varreduras.
     followup_task = asyncio.create_task(periodic_followup_loop())
+    # Atualização diária dos dados da Pacto (movimento por unidade) — mesma
+    # premissa de worker único; protegida por advisory_lock.
+    pacto_task = asyncio.create_task(periodic_pacto_sync_loop())
     yield
     followup_task.cancel()
+    pacto_task.cancel()
     # Sem isso, um deploy/restart no meio do debounce (o cliente mandou
     # mensagem, a IA ainda não respondeu) perde a resposta agendada em
     # silêncio -- o timer só existe na memória deste processo. Ver
@@ -85,6 +91,7 @@ app.include_router(metrics.router)
 app.include_router(admin.router)
 app.include_router(api_keys.router)
 app.include_router(public_api.router)
+app.include_router(pacto.router)
 
 
 @app.get("/health")

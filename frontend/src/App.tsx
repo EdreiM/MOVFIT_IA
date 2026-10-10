@@ -7,6 +7,7 @@ import AiConfigPage from "./pages/AiConfigPage";
 import ConversationsPage from "./pages/ConversationsPage";
 import LeadsPage from "./pages/LeadsPage";
 import IntegrationsPage from "./pages/IntegrationsPage";
+import PactoCallbackPage from "./pages/PactoCallbackPage";
 import TestChatPage from "./pages/TestChatPage";
 import ToolsPage from "./pages/ToolsPage";
 import CatalogPage from "./pages/CatalogPage";
@@ -52,6 +53,7 @@ export default function App() {
                 <Route path="/conversations" element={<ConversationsPage />} />
                 <Route path="/leads" element={<LeadsPage />} />
                 <Route path="/integrations" element={<IntegrationsPage />} />
+                <Route path="/pacto/callback" element={<PactoCallbackPage />} />
                 <Route path="/webhook-logs" element={<WebhookLogsPage />} />
                 <Route path="/api-keys" element={<ApiKeysPage />} />
                 <Route path="/account" element={<AccountPage />} />

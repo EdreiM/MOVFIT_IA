@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, API_URL } from "../api";
+import PactoCard from "../components/PactoCard";
 
 type Integration = {
   id: string;
@@ -180,6 +181,8 @@ export default function IntegrationsPage() {
           Webhooks inbound/outbound e adaptadores (Mov Fit Hub, genérico).
         </p>
       </div>
+
+      <PactoCard />
 
       <form
         onSubmit={onSubmit}

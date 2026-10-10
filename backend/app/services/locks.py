@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 # lock ganha o próximo número — ver CLAUDE.md, seção "Jobs em background".
 LOCK_NAMESPACE_FOLLOWUP_SWEEP = 1
 LOCK_NAMESPACE_CONVERSATION_REPLY = 2
+LOCK_NAMESPACE_PACTO_SYNC = 3
 
 
 @asynccontextmanager

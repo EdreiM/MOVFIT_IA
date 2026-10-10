@@ -12,6 +12,7 @@ from app.models.tool_call_log import ToolCallLog
 from app.models.api_key import ApiKey
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.llm_usage import LlmUsage
+from app.models.pacto import PactoConnection, PactoUnit
 
 __all__ = [
     "Company",
@@ -34,4 +35,6 @@ __all__ = [
     "ApiKey",
     "KnowledgeGap",
     "LlmUsage",
+    "PactoConnection",
+    "PactoUnit",
 ]

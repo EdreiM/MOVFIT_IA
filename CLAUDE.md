@@ -4,10 +4,11 @@ Backend FastAPI + SQLAlchemy 2 (async) + Alembic, frontend React + Vite + Tailwi
 
 ## Jobs em background
 
-O projeto **assume um único worker/processo do backend rodando por vez** (confirmado no `docker-compose.yml`/`docker-compose.prod.yml` — sem múltiplas réplicas, sem Celery/Redis/APScheduler). Duas tarefas em background já existem sob essa premissa:
+O projeto **assume um único worker/processo do backend rodando por vez** (confirmado no `docker-compose.yml`/`docker-compose.prod.yml` — sem múltiplas réplicas, sem Celery/Redis/APScheduler). Três tarefas em background já existem sob essa premissa:
 
 - `app/services/debounce.py` — timer em memória por conversa (agrupa rajadas de mensagem antes de responder).
 - `app/services/followup.py` — varredura periódica (a cada 5min) de conversas inativas.
+- `app/services/pacto.py` — atualização diária dos dados da Pacto (movimento por unidade), já com `advisory_lock` (namespace 3).
 
 **Toda tarefa em background nova que executa trabalho (não só lê dados) deve usar `app/services/locks.py` (`advisory_lock`)** antes de agir, mesmo que hoje só exista um worker — é barato (uma trava consultiva do Postgres, `pg_advisory_lock`) e evita duplicar efeito colateral (mensagem repetida pro cliente, ferramenta chamada duas vezes) no dia em que o backend escalar pra múltiplas cópias. Padrão:
 

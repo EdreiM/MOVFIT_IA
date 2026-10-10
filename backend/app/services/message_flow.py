@@ -37,6 +37,9 @@ from app.services.debounce import schedule_ai_reply
 from app.services.lead_insights import build_handoff_summary, mark_sales_handoff, update_lead_insights
 from app.services.llm import chat_completion
 from app.services.llm_usage import collect_llm_usage, record_llm_usage
+from app.services.pacto import asks_live_occupancy
+from app.services.pacto import build_movement_prompt_block as pacto_movement_block
+from app.services.pacto import live_occupancy_note as pacto_live_occupancy_note
 from app.services.text_normalize import normalize_text as _normalize_text
 from app.services.text_normalize import normalize_tokens as _normalize_tokens
 from app.services.conversation_context import (
@@ -4912,6 +4915,30 @@ async def generate_ai_reply(
                 ),
             }
         )
+    # Dados automáticos da Pacto (movimento por unidade e, se o cliente
+    # perguntou, lotação neste momento). É só apoio: qualquer falha aqui é
+    # ignorada e a IA responde sem esses dados.
+    try:
+        movement_block = await pacto_movement_block(db, conversation.company_id)
+        if movement_block:
+            messages.append({"role": "system", "content": movement_block})
+            if asks_live_occupancy(user_text):
+                live_unit = await _resolve_plan_delivery_unit(
+                    db, conversation.company_id, user_text, "", recent_customer_texts, set()
+                )
+                if live_unit is None and lead and lead.unit:
+                    live_unit = await db.scalar(
+                        select(Unit).where(
+                            Unit.company_id == conversation.company_id, Unit.name == lead.unit
+                        )
+                    )
+                if live_unit is not None:
+                    live_note = await pacto_live_occupancy_note(db, conversation.company_id, live_unit)
+                    if live_note:
+                        messages.append({"role": "system", "content": live_note})
+    except Exception:  # noqa: BLE001
+        logger.exception("Pacto: falha ao montar dados de movimento (conversa %s)", conversation.id)
+
     known_fields = []
     if lead:
         if lead.name:
