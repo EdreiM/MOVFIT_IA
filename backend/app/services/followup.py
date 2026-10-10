@@ -16,6 +16,7 @@ from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
 from app.services.message_flow import (
     TOOL_KEY_CHECK_SESSION,
     TOOL_KEY_END,
+    TOOL_KEY_TRANSFER,
     _filter_forbidden_proactive_reply,
     _is_forbidden_proactive_pitch,
     _normalize_text,
@@ -393,6 +394,43 @@ async def _process_conversation(db, conversation: Conversation) -> None:
     logger.info("Follow-up #%s enviado pra conversa %s", followups_sent + 1, conversation.id)
 
 
+MAX_TRANSFER_RETRY_CALLS = 6  # cada chamada já tenta 3x; ~30min de varreduras
+
+
+async def retry_pending_transfers(db) -> int:
+    """Retenta, em segundo plano, as transferências que falharam (n8n fora
+    do ar/erro): o cliente foi avisado que o pedido ficou registrado e um
+    humano precisa mesmo ser acionado. Retorna quantas deram certo."""
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.transfer_pending_at.is_not(None),
+            Conversation.status != "with_human",
+            Conversation.channel != "test_console",
+            Conversation.transfer_attempts < MAX_TRANSFER_RETRY_CALLS,
+        )
+    )
+    succeeded = 0
+    for conversation in result.scalars().all():
+        tool = await _find_tool(db, conversation, TOOL_KEY_TRANSFER)
+        if not tool:
+            continue
+        try:
+            outcome = await execute_tool(
+                db,
+                tool,
+                {"motivo": conversation.transfer_pending_reason or "Transferência pendente (nova tentativa)"},
+                conversation,
+            )
+            await db.commit()
+            if outcome.get("sucesso"):
+                succeeded += 1
+                logger.info("Transferência pendente concluída (conversa %s)", conversation.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao retentar transferência da conversa %s", conversation.id)
+            await db.rollback()
+    return succeeded
+
+
 async def run_followup_sweep() -> None:
     # Sessão dedicada só pra segurar o lock — se hoje só existe um worker
     # rodando, isso é um no-op; se um dia escalar pra múltiplas cópias do
@@ -403,6 +441,11 @@ async def run_followup_sweep() -> None:
             if not acquired:
                 return
             async with AsyncSessionLocal() as db:
+                try:
+                    await retry_pending_transfers(db)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Falha ao retentar transferências pendentes")
+                    await db.rollback()
                 result = await db.execute(
                     select(Conversation).where(
                         Conversation.status == "open",

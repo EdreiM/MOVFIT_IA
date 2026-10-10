@@ -92,6 +92,11 @@ def build_export_text(
         )
         if conv.handoff_summary:
             lines.append(f"resumo da transferência: {clean(conv.handoff_summary)}")
+        if conv.transfer_pending_at:
+            lines.append(
+                f"⚠ TRANSFERÊNCIA PENDENTE desde {_fmt_dt(conv.transfer_pending_at)} "
+                f"({conv.transfer_attempts or 0} tentativa(s)): {clean(conv.transfer_pending_reason)}"
+            )
         lines.append("-" * 78)
 
         events: list[tuple[datetime, str]] = []

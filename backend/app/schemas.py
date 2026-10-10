@@ -121,6 +121,9 @@ class ConversationOut(BaseModel):
     last_message_actor: str | None = None
     handoff_summary: str | None = None
     external_conversation_id: str | None = None
+    # Preenchido quando a transferência pra atendente falhou e ainda não
+    # foi concluída — o cliente está esperando um humano que não foi avisado.
+    transfer_pending_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 

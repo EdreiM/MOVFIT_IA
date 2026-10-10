@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -46,6 +46,14 @@ class Conversation(Base):
     # quer, objeções) — vai no webhook da ferramenta e aparece no painel, pra
     # o atendente não recomeçar a conversa do zero.
     handoff_summary: Mapped[str | None] = mapped_column(Text)
+    # Transferência pra atendente que FALHOU (n8n devolveu erro mesmo depois
+    # das retentativas): o cliente não chegou a ninguém. Fica marcado pra
+    # ser retentado em segundo plano (ver retry_pending_transfers em
+    # followup.py) e aparecer no painel — sem isso a IA dizia "já
+    # encaminhei" e o cliente ficava esperando um humano que nunca soube.
+    transfer_pending_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    transfer_pending_reason: Mapped[str | None] = mapped_column(Text)
+    transfer_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

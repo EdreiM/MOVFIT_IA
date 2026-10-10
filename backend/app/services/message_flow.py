@@ -1652,6 +1652,22 @@ _CUSTOMER_TRANSFER_ON_TOOL_FAILURE = (
     "Vou te encaminhar para um atendente que pode te ajudar melhor com isso. 😊"
 )
 
+# Quando a PRÓPRIA transferência falha (n8n devolveu erro), nenhum humano foi
+# avisado — dizer "já encaminhei" era falso e o cliente ficava esperando. Texto
+# fixo de propósito (não passa pelo modelo, que insistia em afirmar sucesso) e
+# sem as frases de _TRANSFER_PROMISE_PHRASES pra não disparar a rede de
+# segurança de transferência de novo. O pedido fica marcado em
+# Conversation.transfer_pending_at e é retentado em segundo plano.
+_CUSTOMER_TRANSFER_FAILED = (
+    "Tive um problema pra acionar um atendente agora, mas seu pedido ficou registrado "
+    "e vou tentar de novo em alguns minutos. 😊 Se preferir, também pode falar direto "
+    "com a recepção da unidade."
+)
+
+# Falha de rede/5xx na ferramenta de transferência costuma ser passageira —
+# tenta mais duas vezes antes de desistir (e marcar como pendente).
+_TRANSFER_RETRY_DELAYS_SECONDS = (1.5, 3.0)
+
 _INTERNAL_TOOL_FAILURE_PHRASES = (
     "falha ao executar",
     "ferramenta sem webhook",
@@ -1673,6 +1689,18 @@ def _is_technical_tool_failure(result: dict) -> bool:
 
 def _tool_result_for_llm(result: dict, tool: Tool | None = None) -> dict:
     """Prepara o retorno da ferramenta pro loop da IA — fatos, não relatório de sistema."""
+    if not result.get("sucesso") and tool and tool.tool_key == TOOL_KEY_TRANSFER:
+        # A falha É da transferência: mandar "transfira de novo e diga que já
+        # encaminhou" (abaixo) fazia o modelo afirmar um sucesso que não houve.
+        return {
+            "sucesso": False,
+            "mensagem": (
+                "A transferência pro atendente NÃO foi concluída agora. NÃO diga que "
+                "transferiu nem que encaminhou — diga só que teve um problema pra "
+                "acionar um atendente e que o pedido ficou registrado."
+            ),
+            "dados": {},
+        }
     if not result.get("sucesso") and _is_technical_tool_failure(result):
         return {
             "sucesso": False,
@@ -3446,6 +3474,19 @@ async def _log_tool_call(
     await db.flush()
 
 
+def _mark_transfer_pending(conversation: Conversation, arguments: dict) -> None:
+    """A transferência não chegou a ninguém: guarda pra retentar em segundo
+    plano e sinaliza (atributo só em memória) pro turno atual não afirmar
+    ao cliente que foi encaminhado — ver reply_to_pending_messages."""
+    if conversation.transfer_pending_at is None:
+        conversation.transfer_pending_at = datetime.now(timezone.utc)
+    reason = str(arguments.get("motivo") or "").strip()
+    if reason:
+        conversation.transfer_pending_reason = reason[:1000]
+    conversation.transfer_attempts = (conversation.transfer_attempts or 0) + 1
+    conversation._transfer_failed_this_turn = True  # type: ignore[attr-defined]
+
+
 async def execute_tool(
     db: AsyncSession,
     tool: Tool,
@@ -3493,23 +3534,44 @@ async def execute_tool(
         data: dict = {"sucesso": True, "mensagem": "Simulado no chat de teste — nada foi enviado de verdade.", "dados": {}}
         logger.info("Ferramenta %s (%s) simulada no chat de teste: argumentos=%r", tool.name, tool.tool_key, arguments)
     else:
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.post(tool.webhook_url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Ferramenta %s (%s) falhou: %s", tool.name, tool.tool_key, exc)
-            await _log_tool_call(db, tool, conversation, arguments, False, str(exc)[:500])
+        delays = _TRANSFER_RETRY_DELAYS_SECONDS if tool.tool_key == TOOL_KEY_TRANSFER else ()
+        data_or_none: dict | None = None
+        last_error: Exception | None = None
+        for attempt in range(len(delays) + 1):
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.post(tool.webhook_url, json=payload)
+                    resp.raise_for_status()
+                    data_or_none = resp.json()
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt < len(delays):
+                    logger.warning(
+                        "Ferramenta %s falhou (tentativa %s/%s), tentando de novo: %s",
+                        tool.tool_key, attempt + 1, len(delays) + 1, exc,
+                    )
+                    await asyncio.sleep(delays[attempt])
+        if data_or_none is None:
+            logger.warning("Ferramenta %s (%s) falhou: %s", tool.name, tool.tool_key, last_error)
+            await _log_tool_call(db, tool, conversation, arguments, False, str(last_error)[:500])
+            if tool.tool_key == TOOL_KEY_TRANSFER:
+                _mark_transfer_pending(conversation, arguments)
             return {"sucesso": False, "mensagem": "Falha ao executar a ferramenta agora."}
+        data = data_or_none
 
         tool.last_executed_at = datetime.now(timezone.utc)
         logger.info("Ferramenta %s (%s) respondeu: %r", tool.name, tool.tool_key, data)
+
+    if tool.tool_key == TOOL_KEY_TRANSFER and not data.get("sucesso"):
+        _mark_transfer_pending(conversation, arguments)
 
     if data.get("sucesso"):
         if tool.tool_key == TOOL_KEY_TRANSFER:
             conversation.ai_enabled = False
             conversation.status = "with_human"
+            conversation.transfer_pending_at = None
+            conversation.transfer_pending_reason = None
             if handoff_summary:
                 conversation.handoff_summary = handoff_summary
             try:
@@ -5926,6 +5988,7 @@ async def reply_to_pending_messages(
     conversation = await db.get(Conversation, conversation_id)
     if not conversation or not conversation.ai_enabled:
         return None
+    conversation._transfer_failed_this_turn = False  # type: ignore[attr-defined]
 
     history_result = await db.execute(
         select(Message)
@@ -5984,6 +6047,15 @@ async def reply_to_pending_messages(
     outbound_after = await _count_ai_messages(db, conversation.id)
     if outbound_after > outbound_before:
         delivered_via_tools = True
+
+    if getattr(conversation, "_transfer_failed_this_turn", False):
+        # A transferência falhou de verdade (qualquer caminho: loop da IA,
+        # rede de segurança, pipelines) — nenhum atendente foi avisado, então
+        # nunca deixa sair um texto dizendo que foi encaminhado. Também não
+        # encerra o atendimento junto: o cliente ainda precisa de um humano.
+        conversation._transfer_failed_this_turn = False  # type: ignore[attr-defined]
+        reply = _CUSTOMER_TRANSFER_FAILED
+        deferred_end_call = None
 
     if not reply:
         if deferred_end_call:

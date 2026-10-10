@@ -13,6 +13,7 @@ type Conversation = {
   last_message_actor?: string | null;
   external_conversation_id?: string | null;
   handoff_summary?: string | null;
+  transfer_pending_at?: string | null;
 };
 
 type Message = {
@@ -232,6 +233,11 @@ export default function ConversationsPage() {
                 }`}
               >
                 <p className="font-medium">{c.contact_name || c.contact_phone}</p>
+                {c.transfer_pending_at && (
+                  <p className="mt-1 text-xs font-semibold text-ember">
+                    ⚠ Transferência pendente — nenhum atendente foi avisado
+                  </p>
+                )}
                 {c.last_message_preview && (
                   <p className="mt-1 line-clamp-2 text-xs text-sand/60">
                     {actorLabel(c.last_message_actor)}: {c.last_message_preview}
