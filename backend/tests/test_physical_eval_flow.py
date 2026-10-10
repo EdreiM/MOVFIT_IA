@@ -242,7 +242,8 @@ async def test_reply_from_schedule_persists_offered_slots():
     assert conv.physical_eval_offered_slots == {
         "date": "20260917",
         "period": "tarde",
-        "slots": ["12:00", "14:00", "16:00"],
+        # a lista de noite mostrada junto também é opção válida de escolha
+        "slots": ["12:00", "14:00", "16:00", "21:00"],
     }
 
 
@@ -813,7 +814,7 @@ async def test_reply_from_schedule_filters_past_slots_today():
     assert "14:00" not in reply
     assert "15:00 às 15:30" not in reply
     assert "16:00 às 16:30" in reply
-    assert conv.physical_eval_offered_slots["slots"] == ["16:00"]
+    assert conv.physical_eval_offered_slots["slots"] == ["16:00", "21:00"]
 
 
 @pytest.mark.asyncio
@@ -1066,3 +1067,60 @@ def test_old_physical_eval_request_does_not_keep_flow_open():
         _history_message("ai", "Para agendar sua avaliação física, preciso do seu CPF.", hours_ago=1),
     ]
     assert _physical_eval_followup("52998224725", [m.text for m in fresh if m.actor == "customer"], None, fresh) is True
+
+
+def test_extract_time_reads_interval_start_not_end():
+    # "das 21 às 21:30": o horário que importa é o COMEÇO (21:00), não o fim.
+    assert _extract_schedule_time_from_text("Horário da noite, das 21 às 21:30") == "21:00"
+    assert _extract_schedule_time_from_text("21:00 às 21:30") == "21:00"
+    assert _extract_schedule_time_from_text("das 14h às 14h30") == "14:00"
+    # data com traço não vira intervalo
+    assert _extract_schedule_time_from_text("17-09-2026") is None
+
+
+@pytest.mark.asyncio
+async def test_night_slots_shown_with_afternoon_are_offered_and_numbered_continuously():
+    from app.models import Conversation
+
+    ref = datetime(2026, 9, 17, 11, 30, tzinfo=timezone(timedelta(hours=-3)))
+    raw = {
+        "sucesso": True,
+        "dados": {
+            "unidade": "Santarém - 24 horas",
+            "data": "20260917",
+            "data_formatada": "17/09/2026",
+            "horarios_disponiveis": ["12:00", "14:00", "16:00", "20:00", "21:00"],
+        },
+    }
+    conv = Conversation(
+        company_id=__import__("uuid").uuid4(),
+        contact_phone="559999",
+        channel="whatsapp",
+        status="open",
+    )
+    reply = await _reply_from_schedule_tool_result(
+        "Tem para hoje de tarde?",
+        raw,
+        None,
+        recent_customer_texts=["Consigo marcar minha bioimpedancia?"],
+        brazil_now=ref,
+        tool_arguments={"data": "20260917", "unidade": "Santarém - 24 horas"},
+        conversation=conv,
+    )
+    # numeração da noite continua a da tarde (4, 5) — "2" não fica ambíguo
+    assert "4 - 20:00 às 20:30" in reply
+    assert "5 - 21:00 às 21:30" in reply
+    assert conv.physical_eval_offered_slots["slots"] == [
+        "12:00", "14:00", "16:00", "20:00", "21:00",
+    ]
+
+    pref = {"date": "20260917", "period": "tarde", "preferred_time": None}
+    # caso real: cliente escolheu pelo intervalo da lista de noite
+    assert (
+        _resolve_physical_eval_chosen_time(
+            "Horário da noite, das 21 às 21:30", conv, "20260917", pref
+        )
+        == "21:00"
+    )
+    # e pelo número da lista contínua
+    assert _resolve_physical_eval_chosen_time("5", conv, "20260917", pref) == "21:00"

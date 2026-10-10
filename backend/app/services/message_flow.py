@@ -1381,10 +1381,10 @@ def _normalize_schedule_slot_starts(horarios: list[str]) -> list[str]:
     return [h for h in norms if h.endswith(":00")]
 
 
-def _format_schedule_slots_numbered(horarios: list[str]) -> list[str]:
+def _format_schedule_slots_numbered(horarios: list[str], start: int = 1) -> list[str]:
     starts = _normalize_schedule_slot_starts(horarios)
     return [
-        f"{idx + 1} - {_format_schedule_slot_interval(h)}"
+        f"{idx + start} - {_format_schedule_slot_interval(h)}"
         for idx, h in enumerate(starts)
     ]
 
@@ -1421,10 +1421,32 @@ def _schedule_horario_to_minutes(horario: str) -> int | None:
     return int(hora) * 60 + int(minuto)
 
 
+_SCHEDULE_INTERVAL_RE = re.compile(
+    r"(?:^|\D)(\d{1,2})(?:\s*(?:h|:)\s*(\d{1,2})?)?\s+(?:as|a|ate)\s+"
+    r"(\d{1,2})(?:\s*(?:h|:)\s*(\d{1,2})?)?(?:\D|$)"
+)
+
+
+def _extract_schedule_interval_start(raw_normalized: str) -> str | None:
+    """Cliente respondendo com o INTERVALO inteiro da lista ("das 21 às
+    21:30", "21:00 às 21:30") — o horário que importa é o COMEÇO. Sem isso o
+    "21:30" do fim era lido como o horário escolhido e não batia com nenhum
+    slot (que sempre começam em hora cheia), então o agendamento nunca
+    acontecia (bug real em produção, lista de noite)."""
+    match = _SCHEDULE_INTERVAL_RE.search(raw_normalized or "")
+    if not match:
+        return None
+    start_hour, start_minute = match.group(1), match.group(2) or "00"
+    return _normalize_schedule_horario(f"{start_hour}:{start_minute}")
+
+
 def _extract_schedule_time_from_text(text: str) -> str | None:
     if not text:
         return None
     raw = _normalize_text(text)
+    interval_start = _extract_schedule_interval_start(raw)
+    if interval_start:
+        return interval_start
     match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", raw)
     if match:
         return _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
@@ -1522,6 +1544,7 @@ def _filter_horarios_by_preference(
     if period == "tarde":
         noite_slots = _filter_slots_by_period(slot_starts, "noite")
         if noite_slots:
+            meta["horarios_noite"] = noite_slots
             meta["horarios_noite_intervalos"] = _format_schedule_slots_numbered(noite_slots)
 
     if period and not filtered:
@@ -1976,12 +1999,37 @@ async def _reply_from_schedule_tool_result(
             pref["period"],
             lead,
         )
+
+    # A lista de noite que aparece junto da de tarde também é opção válida:
+    # continua a numeração da lista principal (senão "2" era ambíguo entre
+    # tarde e noite) e entra nos horários persistidos — sem isso, escolher
+    # um horário da noite nunca resolvia e a IA "confirmava" no texto sem
+    # chamar insere_agenda_avalicao (bug real em produção).
+    noite_offered: list[str] = []
+    if dados.get("horarios_noite") and pref.get("period") == "tarde":
+        noite_offered = [str(h) for h in dados["horarios_noite"] if h]
+        if schedule_date:
+            noite_offered = _filter_past_schedule_slots(
+                noite_offered, str(schedule_date), brazil_now
+            )
+        noite_offered = _normalize_schedule_slot_starts(noite_offered)
+    if noite_offered:
+        offset = len(_normalize_schedule_slot_starts(horarios))
+        dados["horarios_noite"] = noite_offered
+        dados["horarios_noite_intervalos"] = _format_schedule_slots_numbered(
+            noite_offered, start=offset + 1
+        )
+    else:
+        dados.pop("horarios_noite", None)
+        dados.pop("horarios_noite_intervalos", None)
+    enriched = {**enriched, "dados": dados}
+
     if conversation is not None and schedule_date:
         _persist_physical_eval_offered_slots(
             conversation,
             schedule_date=str(schedule_date),
             period=pref.get("period"),
-            horarios=horarios,
+            horarios=_normalize_schedule_slot_starts(horarios) + noite_offered,
         )
     return _format_schedule_reply_from_dados(enriched.get("dados") or {}, lead)
 
@@ -2349,14 +2397,15 @@ def _resolve_physical_eval_chosen_time(
     last_line = (user_text or "").strip().splitlines()[-1] if user_text and user_text.strip() else ""
     raw = _normalize_text(last_line)
 
-    explicit: str | None = None
-    match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", raw)
-    if match:
-        explicit = _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
-    else:
-        match = re.search(r"(?:^|\D)(\d{1,2})\s*h(?:\D|$)", raw)
+    explicit: str | None = _extract_schedule_interval_start(raw)
+    if not explicit:
+        match = re.search(r"(?:^|\D)(\d{1,2})\s*(?:h|:)\s*(\d{1,2})(?:\D|$)", raw)
         if match:
-            explicit = _normalize_schedule_horario(match.group(1))
+            explicit = _normalize_schedule_horario(f"{match.group(1)}:{match.group(2)}")
+        else:
+            match = re.search(r"(?:^|\D)(\d{1,2})\s*h(?:\D|$)", raw)
+            if match:
+                explicit = _normalize_schedule_horario(match.group(1))
 
     if explicit:
         if explicit in filtered:
@@ -2479,6 +2528,12 @@ async def _run_physical_eval_pipeline(
     # esse pipeline determinístico intercepta toda mensagem de follow-up de
     # avaliação física antes do loop normal de function-calling rodar.
     book_tool = tools_by_key.get(TOOL_KEY_BOOK_PHYSICAL_EVAL)
+    if not book_tool:
+        logger.warning(
+            "[avaliacao-fisica] ferramenta %s não está ativa/disponível nessa conversa "
+            "(conversa=%s, integracao=%s) — nenhum agendamento pode ser confirmado",
+            TOOL_KEY_BOOK_PHYSICAL_EVAL, conversation.id, conversation.integration_id,
+        )
     chosen_time = None
     if book_tool:
         chosen_time = _resolve_physical_eval_chosen_time(
@@ -5488,27 +5543,36 @@ async def generate_ai_reply(
 
     if (
         conversation.physical_eval_offered_slots
-        and TOOL_KEY_BOOK_PHYSICAL_EVAL in tools_by_key
         and _promised_physical_eval_booking_without_acting(final_text)
     ):
         logger.warning(
-            "IA prometeu agendamento de avaliação física sem chamar %s — reexecutando pipeline (conversa=%s)",
+            "IA prometeu agendamento de avaliação física sem chamar %s — reexecutando pipeline (conversa=%s, book_tool_disponivel=%s)",
             TOOL_KEY_BOOK_PHYSICAL_EVAL,
             conversation.id,
+            TOOL_KEY_BOOK_PHYSICAL_EVAL in tools_by_key,
         )
-        pipeline_reply, lead = await _run_physical_eval_pipeline(
-            db,
-            conversation,
-            user_text,
-            tools_by_key,
-            lead,
-            config=config,
-            is_first_contact=is_first_contact,
-            ai_name=ai_name,
-            recent_customer_texts=recent_customer_texts,
-        )
+        pipeline_reply = None
+        if TOOL_KEY_BOOK_PHYSICAL_EVAL in tools_by_key:
+            pipeline_reply, lead = await _run_physical_eval_pipeline(
+                db,
+                conversation,
+                user_text,
+                tools_by_key,
+                lead,
+                config=config,
+                is_first_contact=is_first_contact,
+                ai_name=ai_name,
+                recent_customer_texts=recent_customer_texts,
+            )
         if pipeline_reply is not None:
             return pipeline_reply, deferred_end_call, delivered_via_tools
+        # Sem como reservar de verdade (ferramenta indisponível ou pipeline
+        # sem resposta): nunca deixa a confirmação inventada chegar no
+        # cliente — ele iria no horário achando que está marcado.
+        return (
+            "Ainda não consegui confirmar esse horário no sistema. Pode me dizer de novo "
+            "qual horário da lista você prefere (o número ou o horário)? 😊"
+        ), deferred_end_call, delivered_via_tools
 
     final_text = _ensure_custom_links_in_reply(
         final_text, user_text, recent_customer_texts, custom_links
