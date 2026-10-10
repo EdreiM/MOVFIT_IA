@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ from app.schemas import (
     MessageOut,
 )
 from app.services.conversation_context import message_preview_text
+from app.services.conversation_export import export_conversations_zip
 from app.services.message_flow import save_message, send_outbound
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -82,6 +83,35 @@ async def list_conversations(
     return [
         _conversation_out_with_preview(c, last_by_conv.get(c.id)) for c in conversations
     ]
+
+
+@router.get("/export")
+async def export_conversations(
+    days: int = Query(30, ge=1, le=365),
+    status: str | None = None,
+    ai_enabled: bool | None = None,
+    mask: bool = True,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Baixa as conversas do período num .zip (texto legível, com as
+    chamadas de ferramenta) — pra revisar onde a IA está errando. CPF,
+    e-mail e telefone saem mascarados, a menos que `mask=false`.
+    Declarada antes de /{conversation_id} pra não ser lida como um UUID."""
+    company_id = await resolve_company_id(current, db)
+    content, total = await export_conversations_zip(
+        db, company_id, days=days, status=status, ai_enabled=ai_enabled, mask=mask
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="conversas-{stamp}.zip"',
+            "X-Total-Conversations": str(total),
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Total-Conversations",
+        },
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationOut)

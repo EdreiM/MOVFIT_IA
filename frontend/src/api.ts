@@ -100,4 +100,38 @@ export async function apiUpload<T>(path: string, file: File): Promise<T> {
   return res.json();
 }
 
+// Baixa um arquivo gerado pela API (precisa do header de autenticação, então
+// não dá pra ser só um <a href>). Retorna o total informado pelo servidor.
+export async function apiDownload(path: string, fallbackName: string): Promise<number | null> {
+  const headers = new Headers();
+  const token = getStored("access_token");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const companyId = getCompanyId();
+  if (companyId) headers.set("X-Company-Id", companyId);
+
+  const res = await fetch(`${API_URL}${path}`, { headers });
+  if (!res.ok) {
+    let detail = "Erro ao baixar o arquivo";
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const name = /filename="?([^";]+)"?/.exec(disposition)?.[1] || fallbackName;
+  const total = res.headers.get("X-Total-Conversations");
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  return total === null ? null : Number(total);
+}
+
 export { API_URL };

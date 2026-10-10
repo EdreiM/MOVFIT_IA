@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api";
+import { api, apiDownload } from "../api";
 import { useAuth } from "../auth";
 
 type Conversation = {
@@ -49,6 +49,28 @@ export default function ConversationsPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [aiFilter, setAiFilter] = useState<"" | "on" | "off">("");
+  const [exportDays, setExportDays] = useState(7);
+  const [exportMask, setExportMask] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [exportInfo, setExportInfo] = useState("");
+
+  const exportConversations = async () => {
+    setError("");
+    setExportInfo("");
+    setExporting(true);
+    try {
+      const params = new URLSearchParams({ days: String(exportDays), mask: String(exportMask) });
+      if (statusFilter) params.set("status", statusFilter);
+      if (aiFilter === "on") params.set("ai_enabled", "true");
+      if (aiFilter === "off") params.set("ai_enabled", "false");
+      const total = await apiDownload(`/conversations/export?${params}`, "conversas.zip");
+      setExportInfo(total === null ? "Arquivo baixado." : `${total} conversa(s) exportada(s).`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao exportar conversas");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const load = useCallback(() => {
     const params = new URLSearchParams();
@@ -162,6 +184,44 @@ export default function ConversationsPage() {
             <option value="off">IA pausada</option>
           </select>
         </div>
+        <details className="rounded-md border border-white/10 px-3 py-2 text-sm">
+          <summary className="cursor-pointer text-sand/70">Exportar conversas (.zip)</summary>
+          <div className="mt-2 space-y-2">
+            <p className="text-xs text-sand/50">
+              Baixa as conversas do período (respeitando os filtros acima) em texto, com as chamadas
+              de ferramenta — pra revisar onde a IA errou.
+            </p>
+            <div className="flex items-center gap-2">
+              <select
+                className="flex-1 rounded-md border border-white/15 bg-ink px-2 py-1.5 text-sm"
+                value={exportDays}
+                onChange={(e) => setExportDays(Number(e.target.value))}
+              >
+                <option value={1}>Último dia</option>
+                <option value={7}>Últimos 7 dias</option>
+                <option value={30}>Últimos 30 dias</option>
+                <option value={90}>Últimos 90 dias</option>
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-sand/70">
+              <input
+                type="checkbox"
+                checked={exportMask}
+                onChange={(e) => setExportMask(e.target.checked)}
+              />
+              Ocultar CPF, telefone e e-mail
+            </label>
+            <button
+              type="button"
+              onClick={exportConversations}
+              disabled={exporting}
+              className="w-full rounded-md bg-leaf px-3 py-2 text-sm font-semibold text-white hover:bg-lime disabled:opacity-50"
+            >
+              {exporting ? "Gerando…" : "Baixar .zip"}
+            </button>
+            {exportInfo && <p className="text-xs text-lime">{exportInfo}</p>}
+          </div>
+        </details>
         <ul className="max-h-[70vh] overflow-auto border border-white/10 lg:max-h-none lg:min-h-0 lg:flex-1">
           {filtered.map((c) => (
             <li key={c.id}>
