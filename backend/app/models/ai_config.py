@@ -68,6 +68,16 @@ class AiConfig(Base):
     # próprias palavras (sem legenda/frases prontas) e conduz pro fechamento;
     # a arte do plano vira só apoio. Desligado = fluxo de catálogo de sempre.
     sales_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    # Cotação usada pra mostrar o custo da IA em reais no painel (o provedor
+    # cobra em dólar). Vale a da configuração padrão da empresa. No modo
+    # automático (padrão) é a PTAX de venda do Banco Central, atualizada
+    # quando o painel é aberto (ver app/services/exchange_rate.py); no manual,
+    # o valor digitado no cartão de custo — pra incluir IOF/spread do cartão.
+    usd_brl_rate: Mapped[float] = mapped_column(Float, default=5.0, server_default=text("5.0"))
+    usd_brl_rate_auto: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    # Quando a cotação automática foi buscada pela última vez (vazio = nunca,
+    # ou valor digitado à mão).
+    usd_brl_rate_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Links úteis que a IA pode enviar quando o assunto combinar (vagas,
     # formulários etc.) — lista de {label, url, when}.
     custom_links: Mapped[list] = mapped_column(JSONB, default=list)

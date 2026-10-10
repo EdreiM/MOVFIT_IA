@@ -10,6 +10,7 @@ from app.database import AsyncSessionLocal
 from app.models import Conversation, Message, Tool, ToolCallLog
 from app.security import decrypt_secret
 from app.services.lead_insights import mark_lead_lost
+from app.services.llm_usage import collect_llm_usage, record_llm_usage
 from app.services.llm import chat_completion
 from app.services.locks import LOCK_NAMESPACE_FOLLOWUP_SWEEP, advisory_lock
 from app.services.message_flow import (
@@ -333,7 +334,9 @@ async def _process_conversation(db, conversation: Conversation) -> None:
         # arriscar, e varia entre tentativas pelo mesmo motivo de sempre.
         text = _GENERIC_NUDGES[followups_sent % len(_GENERIC_NUDGES)]
     else:
-        text = await _generate_followup_text(config, history, followups_sent + 1, config.followup_max_attempts)
+        with collect_llm_usage() as llm_usage:
+            text = await _generate_followup_text(config, history, followups_sent + 1, config.followup_max_attempts)
+        await record_llm_usage(db, conversation, llm_usage, "followup")
     if not text:
         return
 

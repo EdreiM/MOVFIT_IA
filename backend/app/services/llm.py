@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from app.services.llm_usage import note_llm_usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,4 +53,5 @@ async def _openai_chat(
             logger.error("OpenAI error %s: %s", resp.status_code, resp.text)
             resp.raise_for_status()
         data = resp.json()
+        note_llm_usage(data.get("model") or model, data.get("usage"))
         return data["choices"][0]["message"]

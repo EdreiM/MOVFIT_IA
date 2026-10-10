@@ -183,6 +183,8 @@ class AiConfigUpdate(BaseModel):
     followup_max_attempts: int | None = None
     reply_debounce_seconds: float | None = Field(default=None, ge=1, le=60)
     sales_mode_enabled: bool | None = None
+    usd_brl_rate: float | None = Field(default=None, gt=0, le=100)
+    usd_brl_rate_auto: bool | None = None
     custom_links: list[CustomLink] | None = None
 
 
@@ -207,6 +209,8 @@ class AiConfigOut(BaseModel):
     followup_max_attempts: int
     reply_debounce_seconds: float
     sales_mode_enabled: bool = False
+    usd_brl_rate: float = 5.0
+    usd_brl_rate_auto: bool = True
     custom_links: list[CustomLink] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
@@ -541,6 +545,46 @@ class ToolStats(BaseModel):
     # chamada por imagem de plano), então success_calls não serve pra isso.
     success_conversations: int = 0
     success_rate: float | None
+
+
+class Money(BaseModel):
+    usd: float
+    brl: float
+
+
+class AiCostMonth(Money):
+    month: str
+    calls: int
+
+
+class AiCostModel(Money):
+    model: str
+    calls: int
+
+
+class AiCostCustomer(Money):
+    phone: str | None
+    name: str | None
+    calls: int
+    last_at: datetime | None
+
+
+class AiCost(BaseModel):
+    month: str | None
+    usd_brl_rate: float
+    usd_brl_rate_auto: bool = True
+    usd_brl_rate_updated_at: datetime | None = None
+    total: Money
+    test_chat: Money
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    calls_without_price: int
+    customers_count: int
+    average_per_customer: Money
+    by_month: list[AiCostMonth]
+    by_model: list[AiCostModel]
+    customers: list[AiCostCustomer]
 
 
 class RankedValue(BaseModel):

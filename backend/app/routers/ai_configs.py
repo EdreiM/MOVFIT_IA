@@ -78,6 +78,8 @@ def _to_out(config: AiConfig, *, custom_links: list[CustomLink] | None = None) -
         followup_max_attempts=config.followup_max_attempts,
         reply_debounce_seconds=config.reply_debounce_seconds,
         sales_mode_enabled=config.sales_mode_enabled,
+        usd_brl_rate=config.usd_brl_rate,
+        usd_brl_rate_auto=config.usd_brl_rate_auto,
         custom_links=custom_links if custom_links is not None else _serialize_custom_links(config),
     )
 
@@ -112,6 +114,8 @@ async def _get_or_create_integration_config(
             followup_max_attempts=default_config.followup_max_attempts,
             reply_debounce_seconds=default_config.reply_debounce_seconds,
             sales_mode_enabled=default_config.sales_mode_enabled,
+            usd_brl_rate=default_config.usd_brl_rate,
+            usd_brl_rate_auto=default_config.usd_brl_rate_auto,
         )
         db.add(config)
         await db.flush()
@@ -179,6 +183,10 @@ async def update_ai_config(
         default_config.custom_links = custom_links
     for k, v in data.items():
         setattr(config, k, v)
+    if "usd_brl_rate" in data or "usd_brl_rate_auto" in data:
+        # Cotação digitada à mão ou troca de modo: a próxima abertura do
+        # custo no painel busca a PTAX de novo se o automático estiver ligado.
+        config.usd_brl_rate_updated_at = None
     if api_key:
         config.llm_api_key_encrypted = encrypt_secret(api_key)
     if transcription_key:

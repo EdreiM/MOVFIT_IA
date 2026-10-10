@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import CurrentUser, get_current_user, resolve_company_id
-from app.models import Conversation, KnowledgeGap, Lead, Message, MetricsDaily, Tool, ToolCallLog
+from app.models import AiConfig, Conversation, KnowledgeGap, Lead, Message, MetricsDaily, Tool, ToolCallLog
 from app.schemas import (
+    AiCost,
     AiOperationsReport,
     KnowledgeGapOut,
     MetricsNarrativeReport,
@@ -20,7 +21,9 @@ from app.schemas import (
     ToolStats,
     TransfersSummary,
 )
+from app.services.exchange_rate import refresh_usd_brl_rate
 from app.services.lead_insights import compute_sales_insights
+from app.services.llm_usage import compute_ai_cost
 from app.services.message_flow import TOOL_KEY_CHECK_SESSION
 from app.services.metrics_narrative import compute_metrics_narrative
 from app.services.metrics_operations import compute_ai_operations_report, compute_transfers_summary
@@ -307,6 +310,28 @@ async def tools_stats(
 ):
     company_id = await resolve_company_id(current, db)
     return await _compute_tools_stats(db, company_id, days=days)
+
+
+@router.get("/ai-cost", response_model=AiCost)
+async def ai_cost(
+    month: str | None = Query(None, pattern="^[0-9]{4}-[0-9]{2}$"),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Custo da IA (tokens cobrados pelo provedor), total e por cliente.
+    `month` = "AAAA-MM"; sem ele, soma tudo. Em reais pela cotação da
+    configuração padrão da empresa."""
+    company_id = await resolve_company_id(current, db)
+    config = await db.scalar(
+        select(AiConfig).where(AiConfig.company_id == company_id, AiConfig.integration_id.is_(None))
+    )
+    if config is None:
+        return await compute_ai_cost(db, company_id, month=month, usd_brl_rate=5.0)
+    await refresh_usd_brl_rate(db, config)
+    cost = await compute_ai_cost(db, company_id, month=month, usd_brl_rate=config.usd_brl_rate)
+    cost["usd_brl_rate_auto"] = config.usd_brl_rate_auto
+    cost["usd_brl_rate_updated_at"] = config.usd_brl_rate_updated_at
+    return cost
 
 
 @router.get("/sales-insights", response_model=SalesInsights)

@@ -36,6 +36,7 @@ from app.security import decrypt_secret
 from app.services.debounce import schedule_ai_reply
 from app.services.lead_insights import build_handoff_summary, mark_sales_handoff, update_lead_insights
 from app.services.llm import chat_completion
+from app.services.llm_usage import collect_llm_usage, record_llm_usage
 from app.services.text_normalize import normalize_text as _normalize_text
 from app.services.text_normalize import normalize_tokens as _normalize_tokens
 from app.services.conversation_context import (
@@ -5857,11 +5858,13 @@ async def reply_to_pending_messages(
     outbound_before = await _count_ai_messages(db, conversation.id)
     deferred_end_call: tuple[Tool, dict] | None = None
     delivered_via_tools = False
+    llm_usage: list[dict] = []
     try:
-        reply, deferred_end_call, delivered_via_tools = await asyncio.wait_for(
-            generate_ai_reply(db, conversation, combined_text),
-            timeout=90.0,
-        )
+        with collect_llm_usage() as llm_usage:
+            reply, deferred_end_call, delivered_via_tools = await asyncio.wait_for(
+                generate_ai_reply(db, conversation, combined_text),
+                timeout=90.0,
+            )
     except asyncio.TimeoutError:
         logger.error(
             "Timeout (90s) ao gerar resposta da conversa %s (pendente: %r)",
@@ -5878,6 +5881,14 @@ async def reply_to_pending_messages(
             combined_text[:300],
         )
         reply = None
+
+    # Custo da IA desse turno (tokens de todas as chamadas ao modelo), gravado
+    # mesmo se a resposta deu timeout/erro — o provedor cobra do mesmo jeito.
+    try:
+        async with db.begin_nested():
+            await record_llm_usage(db, conversation, llm_usage, "resposta")
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao gravar custo da IA da conversa %s", conversation_id)
 
     outbound_after = await _count_ai_messages(db, conversation.id)
     if outbound_after > outbound_before:
@@ -6173,7 +6184,9 @@ async def process_normalized_event(
     ):
         config = await resolve_ai_config(db, conversation)
         if config and config.llm_api_key_encrypted:
-            description = await describe_image(config, event.media_url)
+            with collect_llm_usage() as image_usage:
+                description = await describe_image(config, event.media_url)
+            await record_llm_usage(db, conversation, image_usage, "imagem")
             if description:
                 event.text = f"[Imagem enviada pelo cliente] {description}"
                 logger.info("Imagem descrita pra conversa %s", conversation.id)
