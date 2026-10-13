@@ -86,8 +86,8 @@ function draw(canvas: HTMLCanvasElement, p: Props) {
   const rowsBottom = rowsTop + Math.max(rows.length, 1) * (rowH + gap) - gap;
   const boxTop = rowsBottom + (rest.length ? 109 : 56);
   const boxH = 119;
-  const footBase = boxTop + boxH + 50;
-  const H = footBase + 40;
+  const footBase = boxTop + boxH + 46;
+  const H = footBase + 35; // 5 linhas + "6º…" + total = 1080×1540, igual ao card da supervisora
 
   canvas.width = W;
   canvas.height = H;
