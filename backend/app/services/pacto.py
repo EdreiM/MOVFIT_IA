@@ -414,6 +414,8 @@ async def discover_units(db: AsyncSession, connection: PactoConnection) -> list[
         else:
             unit.pacto_name = name
         result.append(unit)
+    if connection.status == "connected":
+        connection.last_error = None  # leu as unidades: some o aviso de pendência
     await db.flush()
     return result
 
@@ -598,8 +600,13 @@ async def run_pacto_sync() -> None:
                 await db.execute(select(PactoConnection).where(PactoConnection.status == "connected"))
             ).scalars().all()
             for connection in connections:
+                # last_error preenchido numa conexão "connected" = a última
+                # tentativa falhou (ex.: servidor da Pacto fora do ar na hora
+                # de ler as unidades) — tenta de novo a cada rodada em vez de
+                # esperar as 24h normais.
                 stale = (
                     connection.last_sync_at is None
+                    or connection.last_error is not None
                     or datetime.now(timezone.utc) - connection.last_sync_at > _SYNC_MAX_AGE
                 )
                 if not stale:

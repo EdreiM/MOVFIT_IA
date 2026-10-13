@@ -158,6 +158,27 @@ async def test_authorization_survives_the_pacto_server_being_down_for_unit_disco
 
 
 @pytest.mark.asyncio
+async def test_pending_warning_is_retried_next_round_and_cleared_on_success(db_session, company, novo_progresso):
+    connection = await _connected(
+        db_session, company, last_sync_at=datetime.now(timezone.utc),  # "fresca": só 1 minuto atrás
+        last_error="Conectada, mas não consegui ler as unidades agora: fora do ar",
+    )
+    calls = []
+
+    class _Recovered(_FakeSession):
+        async def call_tool(self, name, arguments=None):
+            calls.append(name)
+            return await super().call_tool(name, arguments)
+
+    with patch("app.services.pacto.PactoSession", _Recovered):
+        await pacto.run_pacto_sync()
+
+    assert "listar_empresas_usuario" in calls  # tentou de novo mesmo com last_sync_at recente
+    await db_session.refresh(connection)
+    assert connection.last_error is None
+
+
+@pytest.mark.asyncio
 async def test_callback_endpoint_keeps_the_connection_when_the_first_sync_fails(client, db_session, company, user):
     connection = PactoConnection(
         company_id=company.id, client_id="cliente-123", redirect_uri=REDIRECT,
