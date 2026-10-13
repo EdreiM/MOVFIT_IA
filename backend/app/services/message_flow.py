@@ -160,7 +160,20 @@ async def get_or_create_conversation(
     else:
         if event.contact_name and not conv.contact_name:
             conv.contact_name = event.contact_name
-        if event.external_conversation_id and not conv.external_conversation_id:
+        if event.external_conversation_id and conv.external_conversation_id != event.external_conversation_id:
+            # A plataforma abriu OUTRA sessão pro mesmo cliente (a anterior foi
+            # encerrada e ele voltou a escrever): a conversa passa a apontar
+            # pra sessão ATUAL. Com o id velho, transferir/consultar falha com
+            # "Não é possível transferir uma sessão encerrada" (WTS) e o
+            # cliente fica sem atendente. Visto em produção: sessão
+            # encerrada em 05/10, cliente voltou em 13/10.
+            if conv.external_conversation_id:
+                logger.info(
+                    "Conversa %s mudou de sessão externa: %s → %s",
+                    conv.id,
+                    conv.external_conversation_id,
+                    event.external_conversation_id,
+                )
             conv.external_conversation_id = event.external_conversation_id
         if integration_id and not conv.integration_id:
             conv.integration_id = integration_id
