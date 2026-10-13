@@ -132,6 +132,58 @@ async def test_callback_rejects_wrong_state_and_stores_tokens_encrypted(db_sessi
     assert decrypt_secret(connection.refresh_token_encrypted) == "renova-1"
 
 
+@pytest.mark.asyncio
+async def test_authorization_survives_the_pacto_server_being_down_for_unit_discovery(db_session, company):
+    """Servidor de relatórios da Pacto fora do ar logo depois de autorizar:
+    a conexão tem que ficar salva (com aviso), não ser descartada."""
+    connection = PactoConnection(
+        company_id=company.id, client_id="cliente-123", redirect_uri=REDIRECT,
+        pending_state="estado-certo", pending_code_verifier="verificador",
+    )
+    db_session.add(connection)
+    await db_session.commit()
+
+    tokens = {"access_token": "acesso-1", "refresh_token": "renova-1", "expires_in": 3600}
+    boom = pacto.PactoError("Falha ao consultar auth-server")
+    with patch("app.services.pacto._token_request", new_callable=AsyncMock, return_value=tokens), patch(
+        "app.services.pacto.discover_units", new_callable=AsyncMock, side_effect=boom
+    ):
+        result = await pacto.finish_authorization(db_session, company.id, "codigo", "estado-certo")
+
+    assert result.status == "connected"
+    assert decrypt_secret(result.access_token_encrypted) == "acesso-1"
+    assert "não consegui ler as unidades" in result.last_error
+    assert "auth-server" in result.last_error
+    assert result.pending_state is None
+
+
+@pytest.mark.asyncio
+async def test_callback_endpoint_keeps_the_connection_when_the_first_sync_fails(client, db_session, company, user):
+    connection = PactoConnection(
+        company_id=company.id, client_id="cliente-123", redirect_uri=REDIRECT,
+        pending_state="estado-certo", pending_code_verifier="verificador",
+    )
+    db_session.add(connection)
+    await db_session.commit()
+    login = await client.post("/auth/login", json={"email": "teste@movfit.com", "password": "senha-teste-123"})
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    tokens = {"access_token": "acesso-1", "refresh_token": "renova-1", "expires_in": 3600}
+    with patch("app.services.pacto._token_request", new_callable=AsyncMock, return_value=tokens), patch(
+        "app.services.pacto.discover_units", new_callable=AsyncMock, side_effect=pacto.PactoError("fora do ar")
+    ), patch(
+        "app.services.pacto.sync_movement", new_callable=AsyncMock, side_effect=pacto.PactoError("fora do ar")
+    ):
+        resp = await client.post("/pacto/callback", headers=headers, json={"code": "c", "state": "estado-certo"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "connected"
+    assert "fora do ar" in resp.json()["last_error"]
+    # persistido de verdade (não houve rollback)
+    await db_session.refresh(connection)
+    assert connection.status == "connected" and connection.access_token_encrypted
+
+
 async def _connected(db_session, company, *, expires_in_seconds: int = 3600, **fields) -> PactoConnection:
     connection = PactoConnection(
         company_id=company.id, client_id="cliente-123", redirect_uri=REDIRECT, status="connected",

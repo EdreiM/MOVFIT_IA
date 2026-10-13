@@ -107,6 +107,13 @@ export default function PactoCard() {
         </p>
       )}
 
+      {connected && status.last_error && (
+        <p className="text-sm text-yellow-300">
+          {status.last_error} Isso costuma ser instabilidade do servidor da Pacto — a conexão fica salva e o
+          painel tenta de novo sozinho; ou clique em "Atualizar agora".
+        </p>
+      )}
+
       {!connected ? (
         <button
           onClick={connect}

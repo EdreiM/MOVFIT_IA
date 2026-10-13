@@ -178,7 +178,18 @@ async def finish_authorization(db: AsyncSession, company_id: UUID, code: str, st
     connection.pending_code_verifier = None
     connection.connected_at = datetime.now(timezone.utc)
     await db.flush()
-    await discover_units(db, connection)
+    try:
+        await discover_units(db, connection)
+    except PactoError as exc:
+        # A autorização deu certo — só a leitura das unidades falhou agora
+        # (ex.: o servidor de relatórios da Pacto fora do ar). Descartar a
+        # conexão por isso obrigaria a autorizar tudo de novo; em vez disso
+        # ela fica conectada, com o aviso, e a rotina (ou o "Atualizar agora")
+        # busca as unidades quando o servidor voltar.
+        logger.warning("Pacto: conectada, mas a descoberta de unidades falhou: %s", exc)
+        if connection.status == "connected":
+            connection.last_error = f"Conectada, mas não consegui ler as unidades agora: {str(exc)[:300]}"
+        await db.flush()
     return connection
 
 

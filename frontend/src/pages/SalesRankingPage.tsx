@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 
 type Person = {
   posicao: number;
@@ -23,6 +25,7 @@ type RankingResponse = {
   dias_pendentes: number;
   atualizado_em: string | null;
   conexao: string;
+  conexao_erro: string | null;
   atualizando: boolean;
 };
 
@@ -51,6 +54,9 @@ function shortcuts() {
 const medal = ["border-yellow-400/60 text-yellow-300", "border-slate-300/50 text-slate-200", "border-orange-400/50 text-orange-300"];
 
 export default function SalesRankingPage() {
+  const { user, companies, companyId } = useAuth();
+  const canFixConnection = user?.role !== "vendas";
+  const companyName = companies.find((c) => c.id === companyId)?.name;
   const presets = useMemo(shortcuts, []);
   const [unit, setUnit] = useState("all");
   const [from, setFrom] = useState(presets[3].from);
@@ -112,9 +118,28 @@ export default function SalesRankingPage() {
 
       {error && <p className="text-ember">{error}</p>}
       {data && data.conexao !== "connected" && (
-        <p className="rounded-md border border-ember/40 px-4 py-3 text-ember">
-          A Pacto não está conectada neste painel — peça a quem administra para reconectar em Integrações.
-        </p>
+        <div className="space-y-1 rounded-md border border-ember/40 px-4 py-3">
+          <p className="font-medium text-ember">
+            {data.conexao === "error"
+              ? "O acesso à Pacto caiu — por isso os números não estão atualizando."
+              : `A Pacto não está conectada${companyName ? ` na empresa "${companyName}"` : " neste painel"}.`}
+          </p>
+          {data.conexao_erro && <p className="text-sm text-sand/60">{data.conexao_erro}</p>}
+          <p className="text-sm text-sand/70">
+            {canFixConnection ? (
+              <>
+                Abra{" "}
+                <Link to="/integrations" className="underline">
+                  Integrações
+                </Link>{" "}
+                e clique em <strong>{data.conexao === "error" ? "Reconectar Pacto" : "Conectar Pacto"}</strong>.
+                Se já conectou, confira se está na empresa certa (seletor no topo).
+              </>
+            ) : (
+              "Peça a quem administra o painel para reconectar a Pacto."
+            )}
+          </p>
+        </div>
       )}
 
       <div className="space-y-4">
@@ -256,7 +281,7 @@ export default function SalesRankingPage() {
               <button
                 type="button"
                 onClick={refreshNow}
-                disabled={refreshing || data.atualizando}
+                disabled={refreshing || data.atualizando || data.conexao !== "connected"}
                 className="rounded-md border border-white/15 px-4 py-2 text-sand/80 hover:bg-white/5 disabled:opacity-50"
               >
                 {refreshing || data.atualizando ? "Atualizando…" : "Atualizar agora"}

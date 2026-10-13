@@ -110,9 +110,16 @@ async def pacto_callback(
     company_id = await resolve_company_id(current, db)
     try:
         connection = await pacto.finish_authorization(db, company_id, payload.code, payload.state)
-        await pacto.sync_movement(db, connection)
     except pacto.PactoError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        await pacto.sync_movement(db, connection)
+    except pacto.PactoError as exc:
+        # Não levanta erro: levantar desfaria a conexão (get_db dá rollback),
+        # e a autorização já tinha dado certo. O aviso vai em last_error.
+        if connection.status == "connected":
+            connection.last_error = f"Conectada, mas a primeira atualização falhou: {str(exc)[:300]}"
+        await db.flush()
     return await _status(db, company_id)
 
 

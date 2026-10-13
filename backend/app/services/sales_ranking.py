@@ -346,11 +346,14 @@ async def sync_company(db: AsyncSession, connection: PactoConnection, max_calls:
     """Uma rodada de coleta. Devolve True se ainda há histórico a carregar."""
     company_id = connection.company_id
     token = await pacto._valid_access_token(db, connection)
-    units = (
-        (await db.execute(select(PactoUnit).where(PactoUnit.company_id == company_id).order_by(PactoUnit.pacto_name)))
-        .scalars()
-        .all()
-    )
+    units_query = select(PactoUnit).where(PactoUnit.company_id == company_id).order_by(PactoUnit.pacto_name)
+    units = (await db.execute(units_query)).scalars().all()
+    if not units:
+        # Conectou, mas a descoberta de unidades não tinha dado certo (servidor
+        # da Pacto fora do ar na hora): tenta agora, em vez de ficar parado.
+        await pacto.discover_units(db, connection)
+        await db.commit()
+        units = (await db.execute(units_query)).scalars().all()
     today = datetime.now(_TZ).date()
     horizon = get_settings().sales_backfill_days
     synced = {u.id: await _synced_days(db, company_id, u, today - timedelta(days=horizon)) for u in units}

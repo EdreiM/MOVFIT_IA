@@ -400,3 +400,22 @@ async def test_admin_can_use_the_ranking_too(client, db_session, company, user):
     resp = await client.get("/sales/ranking", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["ranking"] == []
+    assert resp.json()["conexao"] == "disconnected"
+    assert resp.json()["conexao_erro"] is None
+
+
+@pytest.mark.asyncio
+async def test_ranking_exposes_why_the_connection_is_down(client, db_session, company, user):
+    db_session.add(
+        PactoConnection(company_id=company.id, status="error", last_error="O acesso à Pacto expirou — reconecte.")
+    )
+    await db_session.commit()
+    headers = await _login(client, "teste@movfit.com", "senha-teste-123")
+
+    body = (await client.get("/sales/ranking", headers=headers)).json()
+    assert body["conexao"] == "error"
+    assert "expirou" in body["conexao_erro"]
+
+    # sem conexão "connected" a atualização manual é recusada com mensagem clara
+    sync = await client.post("/sales/sync", headers=headers)
+    assert sync.status_code == 400

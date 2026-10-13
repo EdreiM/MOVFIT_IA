@@ -33,6 +33,7 @@ async def ranking(
     data = await sales_ranking.build_ranking(db, company_id, unit, date_from, date_to)
     connection = await pacto.get_connection(db, company_id)
     data["conexao"] = connection.status if connection else "disconnected"
+    data["conexao_erro"] = connection.last_error if connection else None
     data["atualizando"] = sales_ranking.is_syncing(company_id)
     return data
 
