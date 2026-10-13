@@ -10,6 +10,8 @@ O projeto **assume um único worker/processo do backend rodando por vez** (confi
 - `app/services/followup.py` — varredura periódica (a cada 5min) de conversas inativas.
 - `app/services/pacto.py` — atualização diária dos dados da Pacto (movimento por unidade), já com `advisory_lock` (namespace 3).
 
+- `app/services/sales_ranking.py` — coleta do ranking de vendas (vendas por dia/unidade/responsável, vindas do servidor de relatórios da Pacto; a conexão OAuth é a mesma de `pacto.py`). Com `advisory_lock` próprio (namespace 4), a cada 20min (3min enquanto carrega histórico), com teto de chamadas por rodada.
+
 Dentro da varredura do follow-up (e portanto já sob o lock do namespace 1, sem namespace próprio) também rodam `retry_pending_transfers` (followup.py), `health_monitor.run_health_checks` (alertas de saúde + relatório diário, tela "Alertas") e `eval_reminders.run_eval_reminders` (lembrete da véspera da avaliação física). Cada um tem a própria trava de duplicidade no banco (chave do `SystemEvent`, `Lead.physical_eval_reminder_for`) — quem for adicionar mais um job aqui deve fazer o mesmo, porque a varredura roda a cada 5min.
 
 **Toda tarefa em background nova que executa trabalho (não só lê dados) deve usar `app/services/locks.py` (`advisory_lock`)** antes de agir, mesmo que hoje só exista um worker — é barato (uma trava consultiva do Postgres, `pg_advisory_lock`) e evita duplicar efeito colateral (mensagem repetida pro cliente, ferramenta chamada duas vezes) no dia em que o backend escalar pra múltiplas cópias. Padrão:
@@ -38,6 +40,14 @@ Cuidado também com `_is_schedule_tool`/`_is_guest_tool` (e heurísticas parecid
 ## Contrato de webhook (ferramentas e RAG via n8n)
 
 Toda ferramenta/RAG customizada em n8n deve responder no formato `{"sucesso": bool, "mensagem": str, "dados": {...}}` (booleanos JSON literais, não string). Ver `n8n/TOOLS-CONTRATO.md` e `n8n/RAG-CONTRATO.md`. Campos `nome`/`cpf`/`email`/`data_nascimento` dentro de `dados` (ou na raiz) são capturados automaticamente pro cadastro do cliente — não precisa de nenhuma configuração extra pra isso funcionar.
+
+## Papéis de usuário
+
+`super_admin` e `admin` veem o painel todo. `atendente` não entra no painel. **`vendas`** (supervisora comercial) só acessa o ranking de vendas: a restrição é na API (`RESTRICTED_ROLE_PATHS` em `app/deps.py`, 403 fora de `/sales` e `/auth`), a tela só esconde o menu. Criar a conta: `python -m app.create_user --email … --name "…" --role vendas --company movfit` (a senha é pedida no terminal). Papel novo restrito = nova entrada em `RESTRICTED_ROLE_PATHS`, nunca só esconder na tela.
+
+## Ranking de vendas — regras de negócio
+
+Responsável = quem **lançou** o contrato (não o "consultor": o Pablo dá 18 como consultor e 12 como responsável, que é o que a supervisora usa). Conta só **MATRÍCULA** nova, e só de plano **anual** (duração ≥ 12 no nome do plano). "Site" = responsáveis em `SALES_SITE_NAMES`. O cruzamento matrícula × plano anual só é exato no nível do dia, por isso a coleta é diária (`sales_daily`) e a tela soma qualquer período.
 
 ## Testando mudanças no backend
 

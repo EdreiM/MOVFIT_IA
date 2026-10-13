@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from sqlalchemy import select
@@ -13,6 +13,13 @@ from app.models import ApiKey, Company, User, UserCompany
 from app.security import decode_token, hash_api_key
 
 security = HTTPBearer(auto_error=False)
+
+# Papéis que enxergam só uma parte do painel: a API recusa (403) qualquer
+# caminho fora dessa lista — não depende de a tela esconder o menu. "vendas" é
+# a conta da supervisora comercial: só o ranking de vendas (e o login/perfil).
+RESTRICTED_ROLE_PATHS: dict[str, tuple[str, ...]] = {
+    "vendas": ("/sales", "/auth"),
+}
 
 
 class CurrentUser:
@@ -34,6 +41,7 @@ class CurrentUser:
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
     x_company_id: str | None = Header(default=None, alias="X-Company-Id"),
@@ -56,6 +64,9 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Usuário inativo ou inexistente")
     if user.role == "atendente":
         raise HTTPException(status_code=403, detail="Acesso ao painel não permitido para atendentes")
+    allowed_prefixes = RESTRICTED_ROLE_PATHS.get(user.role)
+    if allowed_prefixes and not request.url.path.startswith(allowed_prefixes):
+        raise HTTPException(status_code=403, detail="Seu acesso é somente ao ranking de vendas.")
 
     company_id: UUID | None = None
     if x_company_id:

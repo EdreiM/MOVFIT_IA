@@ -63,6 +63,45 @@ async def update_company(
     return company
 
 
+# Papéis que um admin pode atribuir. "super_admin" só quem já é super_admin.
+ASSIGNABLE_ROLES = {"admin", "vendas", "atendente"}
+USER_STATUSES = {"active", "inactive"}
+MIN_PASSWORD_LENGTH = 8
+
+
+def _check_role(role: str, current: CurrentUser) -> None:
+    if role == "super_admin":
+        if not current.is_super_admin:
+            raise HTTPException(status_code=403, detail="Só super_admin atribui o papel super_admin")
+        return
+    if role not in ASSIGNABLE_ROLES:
+        raise HTTPException(status_code=400, detail="Papel inválido")
+
+
+def _check_password(password: str) -> None:
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400, detail=f"A senha precisa ter pelo menos {MIN_PASSWORD_LENGTH} caracteres"
+        )
+
+
+async def _managed_user(db: AsyncSession, current: CurrentUser, user_id: UUID) -> User:
+    """Usuário que o admin atual pode gerir: da mesma empresa (super_admin
+    gere qualquer um). Fora disso devolve 404, sem confirmar que existe."""
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    if current.is_super_admin:
+        return user
+    company_id = await resolve_company_id(current, db)
+    link = await db.scalar(
+        select(UserCompany).where(UserCompany.user_id == user.id, UserCompany.company_id == company_id)
+    )
+    if link is None or user.role == "super_admin":
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    return user
+
+
 @router.get("/users", response_model=list[UserOut])
 async def list_users(
     current: CurrentUser = Depends(require_roles("super_admin", "admin")),
@@ -90,8 +129,14 @@ async def create_user(
     exists = await db.execute(select(User).where(User.email == payload.email))
     if exists.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="E-mail já cadastrado")
-    if payload.role == "super_admin" and not current.is_super_admin:
-        raise HTTPException(status_code=403, detail="Só super_admin cria super_admin")
+    _check_role(payload.role, current)
+    _check_password(payload.password)
+
+    # Admin comum só cria usuário na PRÓPRIA empresa, mesmo que mande outros ids.
+    if current.is_super_admin and payload.company_ids:
+        company_ids = payload.company_ids
+    else:
+        company_ids = [await resolve_company_id(current, db)]
 
     user = User(
         email=payload.email,
@@ -101,10 +146,6 @@ async def create_user(
     )
     db.add(user)
     await db.flush()
-
-    company_ids = payload.company_ids
-    if not company_ids:
-        company_ids = [await resolve_company_id(current, db)]
     for cid in company_ids:
         db.add(UserCompany(user_id=user.id, company_id=cid))
     await db.flush()
@@ -119,14 +160,23 @@ async def update_user(
     current: CurrentUser = Depends(require_roles("super_admin", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    user = await _managed_user(db, current, user_id)
+    is_self = user.id == current.id
     data = payload.model_dump(exclude_unset=True)
     if "password" in data and data["password"]:
+        _check_password(data["password"])
         user.hashed_password = hash_password(data.pop("password"))
     else:
         data.pop("password", None)
+    if "role" in data:
+        if is_self and data["role"] != user.role:
+            raise HTTPException(status_code=400, detail="Não é possível mudar o próprio papel")
+        _check_role(data["role"], current)
+    if "status" in data:
+        if data["status"] not in USER_STATUSES:
+            raise HTTPException(status_code=400, detail="Status inválido")
+        if is_self and data["status"] != "active":
+            raise HTTPException(status_code=400, detail="Não é possível desativar a si mesmo")
     for k, v in data.items():
         setattr(user, k, v)
     await db.flush()
@@ -140,9 +190,7 @@ async def delete_user(
     current: CurrentUser = Depends(require_roles("super_admin", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    user = await _managed_user(db, current, user_id)
     if user.id == current.id:
         raise HTTPException(status_code=400, detail="Não é possível excluir a si mesmo")
     await db.delete(user)

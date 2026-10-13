@@ -15,7 +15,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(50), default="admin")  # super_admin | admin | atendente
+    # super_admin | admin | atendente | vendas (só o ranking de vendas — ver
+    # RESTRICTED_ROLE_PATHS em app/deps.py)
+    role: Mapped[str] = mapped_column(String(50), default="admin")
     status: Mapped[str] = mapped_column(String(50), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

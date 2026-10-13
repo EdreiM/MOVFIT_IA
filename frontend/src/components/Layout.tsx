@@ -10,6 +10,7 @@ const navGroups: { label: string; links: { to: string; label: string }[] }[] = [
       { to: "/", label: "Métricas" },
       { to: "/conversations", label: "Conversas" },
       { to: "/leads", label: "Clientes" },
+      { to: "/sales-ranking", label: "Ranking de vendas" },
     ],
   },
   {
@@ -29,6 +30,7 @@ const navGroups: { label: string; links: { to: string; label: string }[] }[] = [
       { to: "/promotions", label: "Promoções" },
       { to: "/tools", label: "Ferramentas" },
       { to: "/api-keys", label: "API externa" },
+      { to: "/users", label: "Usuários" },
     ],
   },
 ];
@@ -36,10 +38,15 @@ const navGroups: { label: string; links: { to: string; label: string }[] }[] = [
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, companies, companyId, selectCompany, logout } = useAuth();
   const [activeAlerts, setActiveAlerts] = useState(0);
+  // Conta "vendas": só o ranking de vendas (a API recusa o resto).
+  const salesOnly = user?.role === "vendas";
+  const visibleGroups = salesOnly
+    ? [{ label: "Vendas", links: [{ to: "/sales-ranking", label: "Ranking de vendas" }] }]
+    : navGroups;
 
   // Bolinha no menu "Alertas" — o painel avisa sem precisar abrir a tela.
   useEffect(() => {
-    if (!companyId) return;
+    if (!companyId || salesOnly) return;
     let cancelled = false;
     const poll = () =>
       api<{ count: number }>("/admin/events/active-count")
@@ -51,7 +58,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [companyId]);
+  }, [companyId, salesOnly]);
 
   return (
     <div className="min-h-screen bg-mesh text-sand">
@@ -86,14 +93,18 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   ))}
                 </select>
               )}
-              <NavLink
-                to="/account"
-                className={({ isActive }) =>
-                  `hidden text-sand/60 hover:text-sand sm:inline ${isActive ? "text-lime" : ""}`
-                }
-              >
-                {user?.full_name}
-              </NavLink>
+              {salesOnly ? (
+                <span className="hidden text-sand/60 sm:inline">{user?.full_name}</span>
+              ) : (
+                <NavLink
+                  to="/account"
+                  className={({ isActive }) =>
+                    `hidden text-sand/60 hover:text-sand sm:inline ${isActive ? "text-lime" : ""}`
+                  }
+                >
+                  {user?.full_name}
+                </NavLink>
+              )}
               <button
                 onClick={logout}
                 className="rounded-md border border-white/15 px-3 py-1.5 text-sand/80 hover:border-ember/50 hover:text-ember"
@@ -105,7 +116,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
           {/* Uma linha só: abaixo de xl não cabe tudo, então rola na horizontal em vez de quebrar */}
           <nav className="no-scrollbar -mx-2 mt-2 flex items-center overflow-x-auto px-2 py-3 xl:overflow-visible">
-            {navGroups.map((group, i) => (
+            {visibleGroups.map((group, i) => (
               <div
                 key={group.label}
                 role="group"

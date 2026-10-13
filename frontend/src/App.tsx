@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./auth";
 import Layout from "./components/Layout";
 import LoginPage from "./pages/LoginPage";
@@ -17,6 +17,8 @@ import ApiKeysPage from "./pages/ApiKeysPage";
 import PublicMetricsPage from "./pages/PublicMetricsPage";
 import WebhookLogsPage from "./pages/WebhookLogsPage";
 import AlertsPage from "./pages/AlertsPage";
+import SalesRankingPage from "./pages/SalesRankingPage";
+import UsersPage from "./pages/UsersPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -31,6 +33,18 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// Conta "vendas" (supervisora comercial): só enxerga o ranking de vendas. A API
+// já recusa o resto (RESTRICTED_ROLE_PATHS em app/deps.py) — isto só evita
+// que ela caia numa tela cheia de erro 403.
+function RoleGate({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  const location = useLocation();
+  if (user?.role === "vendas" && location.pathname !== "/sales-ranking") {
+    return <Navigate to="/sales-ranking" replace />;
+  }
+  return <>{children}</>;
+}
+
 export default function App() {
   return (
     <Routes>
@@ -42,6 +56,7 @@ export default function App() {
         path="/*"
         element={
           <PrivateRoute>
+            <RoleGate>
             <Layout>
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
@@ -57,10 +72,13 @@ export default function App() {
                 <Route path="/pacto/callback" element={<PactoCallbackPage />} />
                 <Route path="/webhook-logs" element={<WebhookLogsPage />} />
                 <Route path="/alerts" element={<AlertsPage />} />
+                <Route path="/sales-ranking" element={<SalesRankingPage />} />
+                <Route path="/users" element={<UsersPage />} />
                 <Route path="/api-keys" element={<ApiKeysPage />} />
                 <Route path="/account" element={<AccountPage />} />
               </Routes>
             </Layout>
+            </RoleGate>
           </PrivateRoute>
         }
       />

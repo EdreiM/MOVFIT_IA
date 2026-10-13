@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Hora (Brasília) a partir da qual o lembrete da véspera da avaliação
     # física sai (e até 21h59, depois disso não manda mais).
     eval_reminder_hour: int = 18
+    # Ranking de vendas: responsáveis pelo lançamento cujas vendas contam como
+    # "site" (separado da equipe), nomes separados por vírgula.
+    sales_site_names: str = "SITE MOVFITBRASIL"
+    # Quantos dias pra trás o ranking mantém (histórico carregado aos poucos).
+    sales_backfill_days: int = 62
 
     @property
     def cors_origins_list(self) -> list[str]:
