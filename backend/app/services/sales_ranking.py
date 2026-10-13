@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import AsyncSessionLocal
-from app.models import PactoConnection, PactoUnit, SalesDaily, SalesSyncDay
+from app.models import PactoConnection, PactoUnit, SalesDaily, SalesSyncDay, Unit
 from app.services import pacto
 from app.services.locks import LOCK_NAMESPACE_SALES_SYNC, advisory_lock
 
@@ -468,6 +468,28 @@ def display_name(name: str) -> str:
     return " ".join(w if (i > 0 and w in _NAME_PARTICLES) else w.capitalize() for i, w in enumerate(words))
 
 
+def short_name(name: str) -> str:
+    """Nome como aparece no card da supervisora: duas primeiras palavras
+    ("PABLO SILVA BRITO" → "Pablo Silva"). Se a segunda for partícula
+    ("ANA DE SOUZA"), leva a terceira junto."""
+    words = display_name(name).split()
+    if len(words) <= 2:
+        return " ".join(words)
+    take = 3 if words[1].lower() in _NAME_PARTICLES else 2
+    return " ".join(words[:take])
+
+
+_UNIT_NOISE = re.compile(r"\b(movfit|acad\.?|ct|unid\.?|pa)\b|\|\s*\d+|\b\d{4}\b$", re.IGNORECASE)
+
+
+def unit_display_name(pacto_name: str, catalog_name: str | None = None) -> str:
+    """Nome da unidade pro card: o do catálogo quando a unidade está vinculada
+    ("Santarém - 24 horas" → "Santarém 24 Horas"); senão limpa o da Pacto
+    ("MOVFIT SANTAREM - PA | 0003" → "Santarem")."""
+    base = catalog_name or _UNIT_NOISE.sub(" ", pacto_name or "")
+    return " ".join(base.replace(" - ", " ").replace("-", " ").replace("/", " ").split()).title()
+
+
 def unit_key(unit: PactoUnit) -> str:
     return f"{unit.chave_empresa}:{unit.empresa_id}"
 
@@ -552,13 +574,30 @@ async def build_ranking(
         (p for p in people.values() if p["novas_anuais"] > 0),
         key=lambda p: (-p["novas_anuais"], p["nome"]),
     )
+    # Nome curto do card; se duas pessoas ficarem iguais ("Maria Silva"), usa o completo.
+    short_counts: dict[str, int] = {}
+    for person in ranking:
+        person["nome_curto"] = short_name(person["nome"])
+        short_counts[person["nome_curto"]] = short_counts.get(person["nome_curto"], 0) + 1
     for position, person in enumerate(ranking, start=1):
         person["posicao"] = position
+        if short_counts[person["nome_curto"]] > 1:
+            person["nome_curto"] = person["nome"]
+
+    catalog_ids = [u.unit_id for u in units if u.unit_id]
+    catalog_names: dict = {}
+    if catalog_ids:
+        catalog_names = dict(
+            (await db.execute(select(Unit.id, Unit.name).where(Unit.id.in_(catalog_ids)))).all()
+        )
+    display = {unit_key(u): unit_display_name(u.pacto_name, catalog_names.get(u.unit_id)) for u in units}
+    selected_name = display[unit_key(selected[0])] if len(selected) == 1 else None
 
     return {
         "periodo": {"de": date_from.isoformat(), "ate": date_to.isoformat()},
         "unidade": unit if unit in by_key else "all",
-        "unidades": [{"key": unit_key(u), "nome": u.pacto_name} for u in units],
+        "unidade_nome": selected_name,
+        "unidades": [{"key": unit_key(u), "nome": u.pacto_name, "nome_exibicao": display[unit_key(u)]} for u in units],
         "total_novas_anuais": team_total + site_total + unassigned,
         "equipe": team_total,
         "site": site_total,

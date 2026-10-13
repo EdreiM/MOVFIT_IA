@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
+import SalesCard from "../components/SalesCard";
 
 type Person = {
   posicao: number;
   nome: string;
+  nome_curto: string;
   novas_anuais: number;
   matriculas: number;
   estimated: boolean;
@@ -14,7 +16,8 @@ type Person = {
 type RankingResponse = {
   periodo: { de: string; ate: string };
   unidade: string;
-  unidades: { key: string; nome: string }[];
+  unidade_nome: string | null;
+  unidades: { key: string; nome: string; nome_exibicao: string }[];
   total_novas_anuais: number;
   equipe: number;
   site: number;
@@ -104,7 +107,7 @@ export default function SalesRankingPage() {
   };
 
   const max = data?.ranking[0]?.novas_anuais ?? 0;
-  const unitName = data?.unidades.find((u) => u.key === unit)?.nome;
+  const unitName = data?.unidade_nome ?? data?.unidades.find((u) => u.key === unit)?.nome_exibicao;
 
   return (
     <div className="space-y-8">
@@ -152,7 +155,7 @@ export default function SalesRankingPage() {
             <option value="all">Todas as unidades</option>
             {data?.unidades.map((u) => (
               <option key={u.key} value={u.key}>
-                {u.nome}
+                {u.nome_exibicao}
               </option>
             ))}
           </select>
@@ -254,6 +257,25 @@ export default function SalesRankingPage() {
                 </li>
               )}
             </ul>
+
+            {data.ranking.length > 0 && (
+              <section className="space-y-3 border-t border-white/10 pt-6">
+                <h3 className="font-display text-xl font-semibold">Card para enviar</h3>
+                <p className="text-sm text-sand/50">
+                  O mesmo formato que a supervisão monta à mão. Baixe a imagem e envie no grupo.
+                </p>
+                <SalesCard
+                  people={data.ranking}
+                  total={data.total_novas_anuais}
+                  equipe={data.equipe}
+                  site={data.site}
+                  unitLabel={data.unidade_nome ?? "Todas as unidades"}
+                  scopeAll={data.unidade_nome === null}
+                  from={data.periodo.de}
+                  to={data.periodo.ate}
+                />
+              </section>
+            )}
 
             {data.nao_identificado > 0 && (
               <p className="text-sm text-sand/50">

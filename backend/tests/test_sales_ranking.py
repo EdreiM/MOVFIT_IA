@@ -102,6 +102,22 @@ def test_display_name_keeps_particles_lowercase():
     assert sales_ranking.display_name("DA SILVA") == "Da Silva"
 
 
+def test_short_name_matches_the_supervisors_card():
+    sn = sales_ranking.short_name
+    assert sn("PABLO SILVA BRITO") == "Pablo Silva"
+    assert sn("ALOHANNA RIBEIRO SANTOS") == "Alohanna Ribeiro"
+    assert sn("CELLINE VITORIA DA SILVA XAVIER") == "Celline Vitoria"
+    assert sn("LUANA CAMILY MOTA GODINHO") == "Luana Camily"
+    assert sn("ANA DE SOUZA LIMA") == "Ana de Souza"
+    assert sn("MAILSON") == "Mailson"
+
+
+def test_unit_display_name_prefers_the_catalog_and_cleans_the_pacto_one():
+    assert sales_ranking.unit_display_name("MOVFIT SANTAREM - PA | 0003", "Santarém - 24 horas") == "Santarém 24 Horas"
+    assert sales_ranking.unit_display_name("MOVFIT ITAITUBA - PA | 0002") == "Itaituba"
+    assert sales_ranking.unit_display_name("MOVFIT N. PROGRESSO - PA | 0006") == "N. Progresso"
+
+
 def test_parse_report_separates_sale_types_and_plans():
     report = {
         "por_tipo_produto": [
