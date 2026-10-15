@@ -695,63 +695,6 @@
       ],
       "id": "e7227150-690e-4afd-8543-aeb9d38ef9c5",
       "name": "Enviar ao painel Novo Progresso"
-    },
-    {
-      "parameters": {
-        "httpMethod": "GET",
-        "path": "vendas-contratos",
-        "responseMode": "responseNode",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2,
-      "position": [
-        0,
-        1260
-      ],
-      "id": "772541ea-4121-43d5-8b9c-7eb391064ee3",
-      "name": "Webhook vendas contratos",
-      "webhookId": "c721e42e-3190-4c80-8977-34604c2510e7"
-    },
-    {
-      "parameters": {
-        "url": "https://movfit-ia.xmov.com.br/api/v1/sales/contracts",
-        "sendQuery": true,
-        "specifyQuery": "json",
-        "jsonQuery": "={{ JSON.stringify($json.query) }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "Bearer COLE_AQUI_A_CHAVE_DE_API_DO_PAINEL"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        260,
-        1260
-      ],
-      "id": "2c16b25e-6540-4f26-8694-776781ac6803",
-      "name": "Ler contratos do painel"
-    },
-    {
-      "parameters": {
-        "respondWith": "firstIncomingItem",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.1,
-      "position": [
-        520,
-        1260
-      ],
-      "id": "c3d63dfc-a0a0-45b4-8fae-545e6b4ada0f",
-      "name": "Responder contratos"
     }
   ],
   "connections": {
@@ -969,28 +912,6 @@
         [
           {
             "node": "Enviar ao painel Novo Progresso",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Webhook vendas contratos": {
-      "main": [
-        [
-          {
-            "node": "Ler contratos do painel",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Ler contratos do painel": {
-      "main": [
-        [
-          {
-            "node": "Responder contratos",
             "type": "main",
             "index": 0
           }
