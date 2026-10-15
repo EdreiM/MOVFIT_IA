@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # Ranking de vendas: responsáveis pelo lançamento cujas vendas contam como
     # "site" (separado da equipe), nomes separados por vírgula.
     sales_site_names: str = "SITE MOVFITBRASIL"
+    # Responsáveis que não são uma pessoa (lançamento feito pelo sistema/admin):
+    # a venda entra no total, mas como "sem responsável", nunca como vendedor.
+    sales_unassigned_names: str = "ADMINISTRADOR"
     # Quantos dias pra trás o ranking mantém (histórico carregado aos poucos).
     sales_backfill_days: int = 62
 

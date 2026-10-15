@@ -13,6 +13,20 @@ type Person = {
   estimated: boolean;
 };
 
+type SellerContract = {
+  cliente: string;
+  matricula: string | null;
+  data: string;
+  tipo: string;
+  plano: string | null;
+  duracao: number | null;
+  unidade: string;
+  conta: boolean;
+  motivo: string | null;
+};
+
+type SellerResponse = { nome: string; total: number; contratos: SellerContract[]; disponivel: boolean };
+
 type RankingResponse = {
   periodo: { de: string; ate: string };
   unidade: string;
@@ -27,6 +41,7 @@ type RankingResponse = {
   aproximado: boolean;
   dias_pendentes: number;
   atualizado_em: string | null;
+  fonte: "n8n" | "mcp" | "misto";
   conexao: string;
   conexao_erro: string | null;
   atualizando: boolean;
@@ -68,6 +83,31 @@ export default function SalesRankingPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [openSeller, setOpenSeller] = useState<string | null>(null);
+  const [sellerData, setSellerData] = useState<Record<string, SellerResponse | "loading" | "error">>({});
+
+  // Mudou o filtro: as listas abertas deixam de valer.
+  useEffect(() => {
+    setOpenSeller(null);
+    setSellerData({});
+  }, [unit, from, to]);
+
+  const toggleSeller = async (name: string) => {
+    if (openSeller === name) {
+      setOpenSeller(null);
+      return;
+    }
+    setOpenSeller(name);
+    if (sellerData[name] && sellerData[name] !== "error") return;
+    setSellerData((d) => ({ ...d, [name]: "loading" }));
+    try {
+      const q = new URLSearchParams({ name, unit, date_from: from, date_to: to });
+      const res = await api<SellerResponse>(`/sales/seller-contracts?${q.toString()}`);
+      setSellerData((d) => ({ ...d, [name]: res }));
+    } catch {
+      setSellerData((d) => ({ ...d, [name]: "error" }));
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -114,8 +154,8 @@ export default function SalesRankingPage() {
       <div>
         <h2 className="font-display text-3xl font-bold">Ranking de vendas</h2>
         <p className="mt-1 text-sand/55">
-          Novas matrículas <strong>anuais</strong> por responsável pelo lançamento. Renovação, rematrícula e
-          planos que não são anuais não contam.
+          Novas matrículas <strong>anuais</strong> (matrícula e rematrícula) por responsável pelo
+          lançamento. Renovação e planos que não são anuais não contam.
         </p>
       </div>
 
@@ -226,31 +266,84 @@ export default function SalesRankingPage() {
             </div>
 
             <ul className="space-y-2">
-              {data.ranking.map((p) => (
-                <li
-                  key={p.nome}
-                  className="relative overflow-hidden border border-white/10 px-4 py-3"
-                  title={p.estimated ? "Valor aproximado: o dia misturou venda anual e não anual" : undefined}
-                >
-                  <div
-                    className="absolute inset-y-0 left-0 bg-leaf/15"
-                    style={{ width: `${max ? (p.novas_anuais / max) * 100 : 0}%` }}
-                  />
-                  <div className="relative flex items-center gap-4">
-                    <span
-                      className={`grid h-9 w-9 shrink-0 place-items-center rounded-full border font-display text-lg font-bold ${
-                        medal[p.posicao - 1] ?? "border-white/15 text-sand/60"
-                      }`}
+              {data.ranking.map((p) => {
+                const detail = sellerData[p.nome];
+                const canOpen = data.fonte !== "mcp";
+                return (
+                  <li
+                    key={p.nome}
+                    className="relative overflow-hidden border border-white/10"
+                    title={p.estimated ? "Valor aproximado: o dia misturou venda anual e não anual" : undefined}
+                  >
+                    <div
+                      className="absolute inset-y-0 left-0 bg-leaf/15"
+                      style={{ width: `${max ? (p.novas_anuais / max) * 100 : 0}%` }}
+                    />
+                    <div
+                      className={`relative flex items-center gap-4 px-4 py-3 ${canOpen ? "cursor-pointer hover:bg-white/5" : ""}`}
+                      role={canOpen ? "button" : undefined}
+                      tabIndex={canOpen ? 0 : undefined}
+                      aria-expanded={canOpen ? openSeller === p.nome : undefined}
+                      onClick={canOpen ? () => toggleSeller(p.nome) : undefined}
+                      onKeyDown={
+                        canOpen
+                          ? (e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                toggleSeller(p.nome);
+                              }
+                            }
+                          : undefined
+                      }
                     >
-                      {p.posicao}º
-                    </span>
-                    <span className="flex-1 font-medium">{p.nome}</span>
-                    {p.estimated && <span className="text-xs text-sand/40">≈</span>}
-                    <span className="font-display text-2xl font-bold">{p.novas_anuais}</span>
-                    <span className="hidden text-xs text-sand/45 sm:inline">matrículas</span>
-                  </div>
-                </li>
-              ))}
+                      <span
+                        className={`grid h-9 w-9 shrink-0 place-items-center rounded-full border font-display text-lg font-bold ${
+                          medal[p.posicao - 1] ?? "border-white/15 text-sand/60"
+                        }`}
+                      >
+                        {p.posicao}º
+                      </span>
+                      <span className="flex-1 font-medium">{p.nome}</span>
+                      {p.estimated && <span className="text-xs text-sand/40">≈</span>}
+                      <span className="font-display text-2xl font-bold">{p.novas_anuais}</span>
+                      <span className="hidden text-xs text-sand/45 sm:inline">matrículas</span>
+                      {canOpen && (
+                        <span className="text-sand/40" aria-hidden>
+                          {openSeller === p.nome ? "▲" : "▼"}
+                        </span>
+                      )}
+                    </div>
+                    {canOpen && openSeller === p.nome && (
+                      <div className="relative border-t border-white/10 bg-black/20 px-4 py-3 text-sm">
+                        {detail === "loading" || detail === undefined ? (
+                          <p className="text-sand/50">Carregando…</p>
+                        ) : detail === "error" ? (
+                          <p className="text-ember">Não consegui carregar a lista. Tente de novo.</p>
+                        ) : detail.contratos.length === 0 ? (
+                          <p className="text-sand/50">Nenhum contrato encontrado nesse período.</p>
+                        ) : (
+                          <ul className="divide-y divide-white/5">
+                            {detail.contratos.map((c, i) => (
+                              <li
+                                key={`${c.matricula}-${c.data}-${i}`}
+                                className={`flex flex-wrap items-baseline gap-x-4 gap-y-1 py-2 ${c.conta ? "" : "opacity-60"}`}
+                              >
+                                <span className="w-24 shrink-0 text-sand/50">{br(c.data)}</span>
+                                <span className="min-w-0 flex-1 font-medium">{c.cliente}</span>
+                                <span className="text-sand/60">{c.tipo}</span>
+                                <span className="text-sand/50">{c.plano}</span>
+                                {!c.conta && (
+                                  <span className="text-xs text-yellow-300">não conta: {c.motivo?.toLowerCase()}</span>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
               {data.ranking.length === 0 && (
                 <li className="border border-white/10 px-4 py-8 text-center text-sand/45">
                   Nenhuma matrícula anual nesse período.
@@ -300,14 +393,18 @@ export default function SalesRankingPage() {
                   <p>≈ Alguns valores são aproximados quando o mesmo dia teve venda anual e não anual.</p>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={refreshNow}
-                disabled={refreshing || data.atualizando || data.conexao !== "connected"}
-                className="rounded-md border border-white/15 px-4 py-2 text-sand/80 hover:bg-white/5 disabled:opacity-50"
-              >
-                {refreshing || data.atualizando ? "Atualizando…" : "Atualizar agora"}
-              </button>
+              {data.fonte === "n8n" ? (
+                <p className="text-xs text-sand/40">Atualiza sozinho a cada poucos minutos.</p>
+              ) : (
+                <button
+                  type="button"
+                  onClick={refreshNow}
+                  disabled={refreshing || data.atualizando || data.conexao !== "connected"}
+                  className="rounded-md border border-white/15 px-4 py-2 text-sand/80 hover:bg-white/5 disabled:opacity-50"
+                >
+                  {refreshing || data.atualizando ? "Atualizando…" : "Atualizar agora"}
+                </button>
+              )}
             </div>
           </>
         )

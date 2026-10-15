@@ -1,0 +1,1004 @@
+{
+  "name": "Vendas - contratos da Pacto para o painel",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0,20,40 * * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "d81901c1-03d5-4eee-8a41-f8ee68ed19e9",
+      "name": "A cada 20 minutos Santarem 24h"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Período: do dia 1 do mês até hoje (horário de Brasília). Nos 3 primeiros dias do mês\n// reconfere também o mês anterior (vendas lançadas ou canceladas depois).\nconst now = new Date(new Date().toLocaleString('en-US', {timeZone: 'America/Sao_Paulo'}));\nconst pad = (n) => String(n).padStart(2, '0');\nconst iso = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());\nconst start = new Date(now.getFullYear(), now.getMonth() - (now.getDate() <= 3 ? 1 : 0), 1);\n\n// Cole SÓ o token da unidade, sem a palavra Bearer.\nconst token = 'COLE_AQUI_TOKEN_24H';\n// Só venda nova. Renovação não entra (o painel recusa).\nreturn [\n  {json: {unidade: '24h', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'MATRÍCULA', codigoProduto: 10}},\n  {json: {unidade: '24h', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'REMATRÍCULA', codigoProduto: 11}},\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "id": "7f96d0af-7149-4a5e-8b9c-6cd19f9ef8be",
+      "name": "Configurar Santarem 24h"
+    },
+    {
+      "parameters": {
+        "url": "https://apigw.pactosolucoes.com.br/faturamento-sintetico/resumo-pessoa",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filters",
+              "value": "={{ JSON.stringify({empresaId: $json.empresaId, dataInicio: $json.de, dataTermino: $json.ate, agrupamento: 'nomeDuracao', matrRenovRemat: true, mesReferenciaPlano: true, produto: $json.produto, tipoProduto: 'Matrícula, Rematrícula, Renovação', indicePeriodo: 0, codigoProduto: $json.codigoProduto}) }}"
+            },
+            {
+              "name": "configs",
+              "value": "{}"
+            },
+            {
+              "name": "page",
+              "value": "0"
+            },
+            {
+              "name": "size",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "empresaId",
+              "value": "={{ $json.empresaId }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.token }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        520,
+        0
+      ],
+      "id": "097857e8-171f-42e3-8033-8b5d6556cdbe",
+      "name": "Pacto vendas Santarem 24h",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Casa cada resposta com a consulta que a gerou e monta o corpo que o painel espera.\nconst base = $('Configurar Santarem 24h').all();\nconst feitos = [];\nconst falhas = [];\n$input.all().forEach((it, i) => {\n  const b = base[i].json;\n  const r = it.json;\n  const status = r.statusCode ?? 0;\n  const body = r.body ?? {};\n  const content = Array.isArray(body.content) ? body.content : null;\n  if (status === 200 && content !== null) {\n    feitos.push({json: {\n      unidade: b.unidade, produto: b.produto, recebidos: content.length,\n      corpo: {\n        unidade: b.unidade, produto: b.produto, data_inicio: b.de, data_fim: b.ate,\n        total: body.totalElements ?? null, contratos: content,\n      },\n    }});\n  } else {\n    falhas.push(b.produto + ': HTTP ' + status + ' ' + JSON.stringify(body).slice(0, 200));\n  }\n});\n// Falhou tudo: deixa a execução vermelha (aparece em Execuções). Falha parcial\n// (ex.: 429 numa das duas) só repete no próximo ciclo.\nif (feitos.length === 0 && falhas.length) throw new Error(falhas.join(' | '));\nreturn feitos;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "id": "fc17a893-b154-42ed-8555-69db536397c2",
+      "name": "Validar e montar Santarem 24h"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://movfit-ia.xmov.com.br/api/v1/sales/contracts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer COLE_AQUI_A_CHAVE_DE_API_DO_PAINEL"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.corpo) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "0793ab05-d288-445b-8bef-e7c32540fc1d",
+      "name": "Enviar ao painel Santarem 24h"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "4,24,44 * * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        240
+      ],
+      "id": "03b9baa0-17f6-4949-888a-ac5a1de1eeec",
+      "name": "A cada 20 minutos Nova Republica"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Período: do dia 1 do mês até hoje (horário de Brasília). Nos 3 primeiros dias do mês\n// reconfere também o mês anterior (vendas lançadas ou canceladas depois).\nconst now = new Date(new Date().toLocaleString('en-US', {timeZone: 'America/Sao_Paulo'}));\nconst pad = (n) => String(n).padStart(2, '0');\nconst iso = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());\nconst start = new Date(now.getFullYear(), now.getMonth() - (now.getDate() <= 3 ? 1 : 0), 1);\n\n// Cole SÓ o token da unidade, sem a palavra Bearer.\nconst token = 'COLE_AQUI_TOKEN_NOVA_REPUBLICA';\n// Só venda nova. Renovação não entra (o painel recusa).\nreturn [\n  {json: {unidade: 'Nova República', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'MATRÍCULA', codigoProduto: 10}},\n  {json: {unidade: 'Nova República', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'REMATRÍCULA', codigoProduto: 11}},\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        240
+      ],
+      "id": "efecda8d-8026-42f3-83d6-d1e661816f2e",
+      "name": "Configurar Nova Republica"
+    },
+    {
+      "parameters": {
+        "url": "https://apigw.pactosolucoes.com.br/faturamento-sintetico/resumo-pessoa",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filters",
+              "value": "={{ JSON.stringify({empresaId: $json.empresaId, dataInicio: $json.de, dataTermino: $json.ate, agrupamento: 'nomeDuracao', matrRenovRemat: true, mesReferenciaPlano: true, produto: $json.produto, tipoProduto: 'Matrícula, Rematrícula, Renovação', indicePeriodo: 0, codigoProduto: $json.codigoProduto}) }}"
+            },
+            {
+              "name": "configs",
+              "value": "{}"
+            },
+            {
+              "name": "page",
+              "value": "0"
+            },
+            {
+              "name": "size",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "empresaId",
+              "value": "={{ $json.empresaId }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.token }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        520,
+        240
+      ],
+      "id": "425eaf33-26af-49f2-8a89-937ebaaeb700",
+      "name": "Pacto vendas Nova Republica",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Casa cada resposta com a consulta que a gerou e monta o corpo que o painel espera.\nconst base = $('Configurar Nova Republica').all();\nconst feitos = [];\nconst falhas = [];\n$input.all().forEach((it, i) => {\n  const b = base[i].json;\n  const r = it.json;\n  const status = r.statusCode ?? 0;\n  const body = r.body ?? {};\n  const content = Array.isArray(body.content) ? body.content : null;\n  if (status === 200 && content !== null) {\n    feitos.push({json: {\n      unidade: b.unidade, produto: b.produto, recebidos: content.length,\n      corpo: {\n        unidade: b.unidade, produto: b.produto, data_inicio: b.de, data_fim: b.ate,\n        total: body.totalElements ?? null, contratos: content,\n      },\n    }});\n  } else {\n    falhas.push(b.produto + ': HTTP ' + status + ' ' + JSON.stringify(body).slice(0, 200));\n  }\n});\n// Falhou tudo: deixa a execução vermelha (aparece em Execuções). Falha parcial\n// (ex.: 429 numa das duas) só repete no próximo ciclo.\nif (feitos.length === 0 && falhas.length) throw new Error(falhas.join(' | '));\nreturn feitos;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        240
+      ],
+      "id": "a5d02dbe-a91a-4ea7-8c93-19af9b4e7f2a",
+      "name": "Validar e montar Nova Republica"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://movfit-ia.xmov.com.br/api/v1/sales/contracts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer COLE_AQUI_A_CHAVE_DE_API_DO_PAINEL"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.corpo) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        240
+      ],
+      "id": "d3572960-9581-410c-8911-a930c64b4c7c",
+      "name": "Enviar ao painel Nova Republica"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "8,28,48 * * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        480
+      ],
+      "id": "7900eac7-966e-4a04-8064-de483fc5a7e1",
+      "name": "A cada 20 minutos Itaituba"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Período: do dia 1 do mês até hoje (horário de Brasília). Nos 3 primeiros dias do mês\n// reconfere também o mês anterior (vendas lançadas ou canceladas depois).\nconst now = new Date(new Date().toLocaleString('en-US', {timeZone: 'America/Sao_Paulo'}));\nconst pad = (n) => String(n).padStart(2, '0');\nconst iso = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());\nconst start = new Date(now.getFullYear(), now.getMonth() - (now.getDate() <= 3 ? 1 : 0), 1);\n\n// Cole SÓ o token da unidade, sem a palavra Bearer.\nconst token = 'COLE_AQUI_TOKEN_ITAITUBA';\n// Só venda nova. Renovação não entra (o painel recusa).\nreturn [\n  {json: {unidade: 'Itaituba', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'MATRÍCULA', codigoProduto: 10}},\n  {json: {unidade: 'Itaituba', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'REMATRÍCULA', codigoProduto: 11}},\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        480
+      ],
+      "id": "282a03cb-6a50-40ee-81cd-a7c519682777",
+      "name": "Configurar Itaituba"
+    },
+    {
+      "parameters": {
+        "url": "https://apigw.pactosolucoes.com.br/faturamento-sintetico/resumo-pessoa",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filters",
+              "value": "={{ JSON.stringify({empresaId: $json.empresaId, dataInicio: $json.de, dataTermino: $json.ate, agrupamento: 'nomeDuracao', matrRenovRemat: true, mesReferenciaPlano: true, produto: $json.produto, tipoProduto: 'Matrícula, Rematrícula, Renovação', indicePeriodo: 0, codigoProduto: $json.codigoProduto}) }}"
+            },
+            {
+              "name": "configs",
+              "value": "{}"
+            },
+            {
+              "name": "page",
+              "value": "0"
+            },
+            {
+              "name": "size",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "empresaId",
+              "value": "={{ $json.empresaId }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.token }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        520,
+        480
+      ],
+      "id": "6319d8aa-00b8-4670-8e4e-f67dbec1cd56",
+      "name": "Pacto vendas Itaituba",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Casa cada resposta com a consulta que a gerou e monta o corpo que o painel espera.\nconst base = $('Configurar Itaituba').all();\nconst feitos = [];\nconst falhas = [];\n$input.all().forEach((it, i) => {\n  const b = base[i].json;\n  const r = it.json;\n  const status = r.statusCode ?? 0;\n  const body = r.body ?? {};\n  const content = Array.isArray(body.content) ? body.content : null;\n  if (status === 200 && content !== null) {\n    feitos.push({json: {\n      unidade: b.unidade, produto: b.produto, recebidos: content.length,\n      corpo: {\n        unidade: b.unidade, produto: b.produto, data_inicio: b.de, data_fim: b.ate,\n        total: body.totalElements ?? null, contratos: content,\n      },\n    }});\n  } else {\n    falhas.push(b.produto + ': HTTP ' + status + ' ' + JSON.stringify(body).slice(0, 200));\n  }\n});\n// Falhou tudo: deixa a execução vermelha (aparece em Execuções). Falha parcial\n// (ex.: 429 numa das duas) só repete no próximo ciclo.\nif (feitos.length === 0 && falhas.length) throw new Error(falhas.join(' | '));\nreturn feitos;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        480
+      ],
+      "id": "6ebec96e-7337-486e-8945-ce37a9d85125",
+      "name": "Validar e montar Itaituba"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://movfit-ia.xmov.com.br/api/v1/sales/contracts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer COLE_AQUI_A_CHAVE_DE_API_DO_PAINEL"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.corpo) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        480
+      ],
+      "id": "b58a93c4-c68a-4b75-89cf-48911f560303",
+      "name": "Enviar ao painel Itaituba"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "12,32,52 * * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        720
+      ],
+      "id": "fdf25b11-27a0-4554-8ecb-8399a5ddf9dc",
+      "name": "A cada 20 minutos Medicilandia"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Período: do dia 1 do mês até hoje (horário de Brasília). Nos 3 primeiros dias do mês\n// reconfere também o mês anterior (vendas lançadas ou canceladas depois).\nconst now = new Date(new Date().toLocaleString('en-US', {timeZone: 'America/Sao_Paulo'}));\nconst pad = (n) => String(n).padStart(2, '0');\nconst iso = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());\nconst start = new Date(now.getFullYear(), now.getMonth() - (now.getDate() <= 3 ? 1 : 0), 1);\n\n// Cole SÓ o token da unidade, sem a palavra Bearer.\nconst token = 'COLE_AQUI_TOKEN_MEDICILANDIA';\n// Só venda nova. Renovação não entra (o painel recusa).\nreturn [\n  {json: {unidade: 'Medicilândia', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'MATRÍCULA', codigoProduto: 10}},\n  {json: {unidade: 'Medicilândia', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'REMATRÍCULA', codigoProduto: 11}},\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        720
+      ],
+      "id": "5b472d74-ce96-42c7-8d58-5271f7047558",
+      "name": "Configurar Medicilandia"
+    },
+    {
+      "parameters": {
+        "url": "https://apigw.pactosolucoes.com.br/faturamento-sintetico/resumo-pessoa",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filters",
+              "value": "={{ JSON.stringify({empresaId: $json.empresaId, dataInicio: $json.de, dataTermino: $json.ate, agrupamento: 'nomeDuracao', matrRenovRemat: true, mesReferenciaPlano: true, produto: $json.produto, tipoProduto: 'Matrícula, Rematrícula, Renovação', indicePeriodo: 0, codigoProduto: $json.codigoProduto}) }}"
+            },
+            {
+              "name": "configs",
+              "value": "{}"
+            },
+            {
+              "name": "page",
+              "value": "0"
+            },
+            {
+              "name": "size",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "empresaId",
+              "value": "={{ $json.empresaId }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.token }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        520,
+        720
+      ],
+      "id": "1d555884-3550-40c9-89f8-eac8f12ab9db",
+      "name": "Pacto vendas Medicilandia",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Casa cada resposta com a consulta que a gerou e monta o corpo que o painel espera.\nconst base = $('Configurar Medicilandia').all();\nconst feitos = [];\nconst falhas = [];\n$input.all().forEach((it, i) => {\n  const b = base[i].json;\n  const r = it.json;\n  const status = r.statusCode ?? 0;\n  const body = r.body ?? {};\n  const content = Array.isArray(body.content) ? body.content : null;\n  if (status === 200 && content !== null) {\n    feitos.push({json: {\n      unidade: b.unidade, produto: b.produto, recebidos: content.length,\n      corpo: {\n        unidade: b.unidade, produto: b.produto, data_inicio: b.de, data_fim: b.ate,\n        total: body.totalElements ?? null, contratos: content,\n      },\n    }});\n  } else {\n    falhas.push(b.produto + ': HTTP ' + status + ' ' + JSON.stringify(body).slice(0, 200));\n  }\n});\n// Falhou tudo: deixa a execução vermelha (aparece em Execuções). Falha parcial\n// (ex.: 429 numa das duas) só repete no próximo ciclo.\nif (feitos.length === 0 && falhas.length) throw new Error(falhas.join(' | '));\nreturn feitos;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        720
+      ],
+      "id": "65c5231e-1f83-4fa4-881d-33bfa5ee2559",
+      "name": "Validar e montar Medicilandia"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://movfit-ia.xmov.com.br/api/v1/sales/contracts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer COLE_AQUI_A_CHAVE_DE_API_DO_PAINEL"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.corpo) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        720
+      ],
+      "id": "12d1146f-886d-4cca-86c9-42f9322ed5a6",
+      "name": "Enviar ao painel Medicilandia"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "16,36,56 * * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        960
+      ],
+      "id": "b1c129bb-3dad-40f4-851b-d41153ee2d52",
+      "name": "A cada 20 minutos Novo Progresso"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Período: do dia 1 do mês até hoje (horário de Brasília). Nos 3 primeiros dias do mês\n// reconfere também o mês anterior (vendas lançadas ou canceladas depois).\nconst now = new Date(new Date().toLocaleString('en-US', {timeZone: 'America/Sao_Paulo'}));\nconst pad = (n) => String(n).padStart(2, '0');\nconst iso = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());\nconst start = new Date(now.getFullYear(), now.getMonth() - (now.getDate() <= 3 ? 1 : 0), 1);\n\n// Cole SÓ o token da unidade, sem a palavra Bearer.\nconst token = 'COLE_AQUI_TOKEN_NOVO_PROGRESSO';\n// Só venda nova. Renovação não entra (o painel recusa).\nreturn [\n  {json: {unidade: 'Novo Progresso', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'MATRÍCULA', codigoProduto: 10}},\n  {json: {unidade: 'Novo Progresso', token, empresaId: 1, de: iso(start), ate: iso(now), produto: 'REMATRÍCULA', codigoProduto: 11}},\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        960
+      ],
+      "id": "7a8c4813-f57c-4a91-8647-013d232b56b8",
+      "name": "Configurar Novo Progresso"
+    },
+    {
+      "parameters": {
+        "url": "https://apigw.pactosolucoes.com.br/faturamento-sintetico/resumo-pessoa",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filters",
+              "value": "={{ JSON.stringify({empresaId: $json.empresaId, dataInicio: $json.de, dataTermino: $json.ate, agrupamento: 'nomeDuracao', matrRenovRemat: true, mesReferenciaPlano: true, produto: $json.produto, tipoProduto: 'Matrícula, Rematrícula, Renovação', indicePeriodo: 0, codigoProduto: $json.codigoProduto}) }}"
+            },
+            {
+              "name": "configs",
+              "value": "{}"
+            },
+            {
+              "name": "page",
+              "value": "0"
+            },
+            {
+              "name": "size",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "empresaId",
+              "value": "={{ $json.empresaId }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.token }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        520,
+        960
+      ],
+      "id": "ab830609-5cd1-4965-8ff2-4b6ea226c05a",
+      "name": "Pacto vendas Novo Progresso",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Casa cada resposta com a consulta que a gerou e monta o corpo que o painel espera.\nconst base = $('Configurar Novo Progresso').all();\nconst feitos = [];\nconst falhas = [];\n$input.all().forEach((it, i) => {\n  const b = base[i].json;\n  const r = it.json;\n  const status = r.statusCode ?? 0;\n  const body = r.body ?? {};\n  const content = Array.isArray(body.content) ? body.content : null;\n  if (status === 200 && content !== null) {\n    feitos.push({json: {\n      unidade: b.unidade, produto: b.produto, recebidos: content.length,\n      corpo: {\n        unidade: b.unidade, produto: b.produto, data_inicio: b.de, data_fim: b.ate,\n        total: body.totalElements ?? null, contratos: content,\n      },\n    }});\n  } else {\n    falhas.push(b.produto + ': HTTP ' + status + ' ' + JSON.stringify(body).slice(0, 200));\n  }\n});\n// Falhou tudo: deixa a execução vermelha (aparece em Execuções). Falha parcial\n// (ex.: 429 numa das duas) só repete no próximo ciclo.\nif (feitos.length === 0 && falhas.length) throw new Error(falhas.join(' | '));\nreturn feitos;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        960
+      ],
+      "id": "d71bd6af-db87-434c-8cc9-618f71a52da8",
+      "name": "Validar e montar Novo Progresso"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://movfit-ia.xmov.com.br/api/v1/sales/contracts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer COLE_AQUI_A_CHAVE_DE_API_DO_PAINEL"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.corpo) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        960
+      ],
+      "id": "e7227150-690e-4afd-8543-aeb9d38ef9c5",
+      "name": "Enviar ao painel Novo Progresso"
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "vendas-contratos",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1260
+      ],
+      "id": "772541ea-4121-43d5-8b9c-7eb391064ee3",
+      "name": "Webhook vendas contratos",
+      "webhookId": "c721e42e-3190-4c80-8977-34604c2510e7"
+    },
+    {
+      "parameters": {
+        "url": "https://movfit-ia.xmov.com.br/api/v1/sales/contracts",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.query) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer COLE_AQUI_A_CHAVE_DE_API_DO_PAINEL"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        260,
+        1260
+      ],
+      "id": "2c16b25e-6540-4f26-8694-776781ac6803",
+      "name": "Ler contratos do painel"
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        520,
+        1260
+      ],
+      "id": "c3d63dfc-a0a0-45b4-8fae-545e6b4ada0f",
+      "name": "Responder contratos"
+    }
+  ],
+  "connections": {
+    "A cada 20 minutos Santarem 24h": {
+      "main": [
+        [
+          {
+            "node": "Configurar Santarem 24h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configurar Santarem 24h": {
+      "main": [
+        [
+          {
+            "node": "Pacto vendas Santarem 24h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pacto vendas Santarem 24h": {
+      "main": [
+        [
+          {
+            "node": "Validar e montar Santarem 24h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar e montar Santarem 24h": {
+      "main": [
+        [
+          {
+            "node": "Enviar ao painel Santarem 24h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A cada 20 minutos Nova Republica": {
+      "main": [
+        [
+          {
+            "node": "Configurar Nova Republica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configurar Nova Republica": {
+      "main": [
+        [
+          {
+            "node": "Pacto vendas Nova Republica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pacto vendas Nova Republica": {
+      "main": [
+        [
+          {
+            "node": "Validar e montar Nova Republica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar e montar Nova Republica": {
+      "main": [
+        [
+          {
+            "node": "Enviar ao painel Nova Republica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A cada 20 minutos Itaituba": {
+      "main": [
+        [
+          {
+            "node": "Configurar Itaituba",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configurar Itaituba": {
+      "main": [
+        [
+          {
+            "node": "Pacto vendas Itaituba",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pacto vendas Itaituba": {
+      "main": [
+        [
+          {
+            "node": "Validar e montar Itaituba",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar e montar Itaituba": {
+      "main": [
+        [
+          {
+            "node": "Enviar ao painel Itaituba",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A cada 20 minutos Medicilandia": {
+      "main": [
+        [
+          {
+            "node": "Configurar Medicilandia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configurar Medicilandia": {
+      "main": [
+        [
+          {
+            "node": "Pacto vendas Medicilandia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pacto vendas Medicilandia": {
+      "main": [
+        [
+          {
+            "node": "Validar e montar Medicilandia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar e montar Medicilandia": {
+      "main": [
+        [
+          {
+            "node": "Enviar ao painel Medicilandia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A cada 20 minutos Novo Progresso": {
+      "main": [
+        [
+          {
+            "node": "Configurar Novo Progresso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configurar Novo Progresso": {
+      "main": [
+        [
+          {
+            "node": "Pacto vendas Novo Progresso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pacto vendas Novo Progresso": {
+      "main": [
+        [
+          {
+            "node": "Validar e montar Novo Progresso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar e montar Novo Progresso": {
+      "main": [
+        [
+          {
+            "node": "Enviar ao painel Novo Progresso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook vendas contratos": {
+      "main": [
+        [
+          {
+            "node": "Ler contratos do painel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler contratos do painel": {
+      "main": [
+        [
+          {
+            "node": "Responder contratos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

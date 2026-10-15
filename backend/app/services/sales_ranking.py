@@ -6,7 +6,8 @@ ver app/services/pacto.py. Regras (validadas contra a planilha da
 supervisora, Santarém 24h, 01–13/10/2026):
 
 * o responsável é quem LANÇOU o contrato (não o "consultor");
-* conta só MATRÍCULA nova — rematrícula e renovação não entram;
+* conta venda NOVA: matrícula e rematrícula (confirmado pela supervisora em
+  14/10/2026) — renovação não entra;
 * conta só plano anual (duração >= 12 meses) — mensal avulso etc. ficam fora.
 
 A Pacto separa "tipo de venda" e "plano" em partes diferentes do relatório,
@@ -20,6 +21,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -28,8 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import AsyncSessionLocal
-from app.models import PactoConnection, PactoUnit, SalesDaily, SalesSyncDay, Unit
-from app.services import pacto
+from app.models import PactoConnection, PactoUnit, SalesContract, SalesDaily, SalesSyncDay, Unit
+from app.services import pacto, sales_contracts
 from app.services.locks import LOCK_NAMESPACE_SALES_SYNC, advisory_lock
 
 logger = logging.getLogger(__name__)
@@ -139,8 +141,9 @@ async def _report(
 async def _non_annual_matriculas(
     session: pacto.PactoSession, budget: _Budget, unit: PactoUnit, day: date, plans: list[tuple[str, int]]
 ) -> int:
-    """Quantas das vendas de plano NÃO anual do dia foram matrícula nova
-    (a lista venda a venda informa o tipo de cada uma)."""
+    """Quantas das vendas de plano NÃO anual do dia foram venda NOVA —
+    matrícula ou rematrícula, não renovação (a lista venda a venda informa o
+    tipo de cada uma)."""
     total = 0
     for description, quantity in plans:
         if quantity <= 0 or is_annual_plan(description):
@@ -159,30 +162,32 @@ async def _non_annual_matriculas(
             },
         )
         for sale in result.get("vendas") or []:
-            if _norm(sale.get("tipo_venda")).startswith("matricula"):
+            if _norm(sale.get("tipo_venda")).startswith(("matricula", "rematricula")):
                 total += 1
     return total
 
 
 def allocate_non_annual(rows: list[_Row], na_unit_matriculas: int) -> None:
-    """Descobre, por responsável, quantas matrículas do dia foram de plano não
-    anual. Exato quando o responsável só teve matrículas no dia; estimado
-    (limitado pelo total da unidade) quando misturou com rematrícula/renovação."""
+    """Descobre, por responsável, quantas vendas NOVAS (matrícula + rematrícula)
+    do dia foram de plano não anual. Exato quando o responsável não teve
+    renovação no dia (toda venda de plano não anual dele é nova); estimado
+    (limitado pelo total da unidade) quando misturou com renovação."""
     budget = na_unit_matriculas
     pending: list[_Row] = []
     for row in rows:
         c = row.counts
+        novas = c.matriculas + c.rematriculas
         na_sales = c.non_annual_total
         if na_sales == 0:
             row.na = 0
-        elif c.rematriculas == 0 and c.renovacoes == 0:
-            row.na = min(na_sales, c.matriculas)
+        elif c.renovacoes == 0:
+            row.na = min(na_sales, novas)
             budget -= row.na
         else:
             pending.append(row)
     for row in pending:
         c = row.counts
-        row.na = max(min(c.non_annual_total, c.matriculas, budget), 0)
+        row.na = max(min(c.non_annual_total, c.matriculas + c.rematriculas, budget), 0)
         row.estimated = True
         budget -= row.na
 
@@ -228,7 +233,9 @@ async def sync_unit_day(
     responsaveis_cache: dict[str, list[tuple[int, str]]],
 ) -> None:
     unit_counts = await _report(session, budget, unit, day)
-    total = unit_counts.matriculas
+    # Venda NOVA = matrícula + rematrícula (a supervisora confirmou que a
+    # rematrícula conta). Renovação continua de fora.
+    total = unit_counts.matriculas + unit_counts.rematriculas
 
     previous = await db.scalar(
         select(SalesSyncDay).where(
@@ -253,7 +260,7 @@ async def sync_unit_day(
             counts = await _report(session, budget, unit, day, responsavel_id)
             if counts.matriculas or counts.rematriculas or counts.renovacoes:
                 rows.append(_Row(responsavel_id, nome, counts))
-                attributed += counts.matriculas
+                attributed += counts.matriculas + counts.rematriculas
                 if (responsavel_id, nome) not in sellers:
                     sellers.append((responsavel_id, nome))
 
@@ -308,7 +315,7 @@ async def sync_unit_day(
                 responsavel_id=row.responsavel_id,
                 responsavel_nome=row.nome[:255],
                 matriculas=row.counts.matriculas,
-                novas_anuais=max(row.counts.matriculas - row.na, 0),
+                novas_anuais=max(row.counts.matriculas + row.counts.rematriculas - row.na, 0),
                 rematriculas=row.counts.rematriculas,
                 renovacoes=row.counts.renovacoes,
                 estimated=row.estimated,
@@ -345,7 +352,6 @@ async def _synced_days(db: AsyncSession, company_id: UUID, unit: PactoUnit, sinc
 async def sync_company(db: AsyncSession, connection: PactoConnection, max_calls: int = MAX_CALLS_PER_RUN) -> bool:
     """Uma rodada de coleta. Devolve True se ainda há histórico a carregar."""
     company_id = connection.company_id
-    token = await pacto._valid_access_token(db, connection)
     units_query = select(PactoUnit).where(PactoUnit.company_id == company_id).order_by(PactoUnit.pacto_name)
     units = (await db.execute(units_query)).scalars().all()
     if not units:
@@ -354,6 +360,12 @@ async def sync_company(db: AsyncSession, connection: PactoConnection, max_calls:
         await pacto.discover_units(db, connection)
         await db.commit()
         units = (await db.execute(units_query)).scalars().all()
+    # Unidade que já recebe os contratos pelo n8n não precisa do MCP.
+    covered = await sales_contracts.covered_unit_names(db, company_id)
+    units = [u for u in units if _norm(u.pacto_name) not in covered]
+    if not units:
+        return False
+    token = await pacto._valid_access_token(db, connection)
     today = datetime.now(_TZ).date()
     horizon = get_settings().sales_backfill_days
     synced = {u.id: await _synced_days(db, company_id, u, today - timedelta(days=horizon)) for u in units}
@@ -494,26 +506,183 @@ def unit_key(unit: PactoUnit) -> str:
     return f"{unit.chave_empresa}:{unit.empresa_id}"
 
 
+@dataclass
+class _UnitView:
+    """Uma unidade do ranking, venha ela do cadastro do MCP, do n8n ou dos dois."""
+
+    key: str
+    pacto_name: str
+    norm_name: str
+    # (chave_empresa, empresa_id) do MCP; None = a unidade só existe pelo n8n.
+    pair: tuple[str, int] | None = None
+    unit_id: UUID | None = None
+    # True = os contratos dela chegam pelo n8n (a coleta pelo MCP é dispensada).
+    from_contracts: bool = False
+
+
+async def _unit_views(db: AsyncSession, company_id: UUID) -> list[_UnitView]:
+    units = (await db.execute(select(PactoUnit).where(PactoUnit.company_id == company_id))).scalars().all()
+    covered = await sales_contracts.covered_unit_names(db, company_id)
+    views: list[_UnitView] = []
+    known: set[str] = set()
+    for u in units:
+        name = _norm(u.pacto_name)
+        known.add(name)
+        views.append(
+            _UnitView(
+                key=unit_key(u),
+                pacto_name=u.pacto_name,
+                norm_name=name,
+                pair=(u.chave_empresa, u.empresa_id),
+                unit_id=u.unit_id,
+                from_contracts=name in covered,
+            )
+        )
+    for name, original in covered.items():
+        if name not in known:
+            views.append(_UnitView(key=f"n8n:{name}", pacto_name=original, norm_name=name, from_contracts=True))
+    views.sort(key=lambda v: v.pacto_name)
+    return views
+
+
+def _unassigned_names() -> set[str]:
+    return {_norm(n) for n in get_settings().sales_unassigned_names.split(",") if n.strip()}
+
+
+async def _display_names(db: AsyncSession, views: list[_UnitView]) -> dict[str, str]:
+    catalog_ids = [v.unit_id for v in views if v.unit_id]
+    catalog_names: dict = {}
+    if catalog_ids:
+        catalog_names = dict((await db.execute(select(Unit.id, Unit.name).where(Unit.id.in_(catalog_ids)))).all())
+    return {v.key: unit_display_name(v.pacto_name, catalog_names.get(v.unit_id)) for v in views}
+
+
+def _select_views(views: list[_UnitView], unit: str | None) -> list[_UnitView]:
+    by_key = {v.key: v for v in views}
+    return [by_key[unit]] if unit and unit != "all" and unit in by_key else list(views)
+
+
+def _contract_rows(contracts: list[SalesContract], views: dict[str, _UnitView]) -> list[SimpleNamespace]:
+    """Contratos → linhas por responsável, no mesmo formato de SalesDaily.
+    Aqui a atribuição é exata (um contrato = uma venda de um responsável)."""
+    unassigned_names = _unassigned_names()
+    agg: dict[str, SimpleNamespace] = {}
+    for c in contracts:
+        if _norm(c.empresa_nome) not in views or sales_contracts.canonical_product(c.produto) is None:
+            continue
+        nobody = not (c.responsavel or "").strip() or _norm(c.responsavel) in unassigned_names
+        ident = "" if nobody else _norm(c.responsavel)
+        entry = agg.get(ident)
+        if entry is None:
+            entry = agg[ident] = SimpleNamespace(
+                responsavel_id=0 if nobody else 1,
+                responsavel_nome=UNASSIGNED_NAME if nobody else c.responsavel,
+                matriculas=0,
+                novas_anuais=0,
+                estimated=False,
+            )
+        entry.matriculas += 1
+        if sales_contracts.is_annual(c.duracao, c.plano):
+            entry.novas_anuais += 1
+    return list(agg.values())
+
+
+async def seller_contracts(
+    db: AsyncSession, company_id: UUID, unit: str | None, date_from: date, date_to: date, name: str
+) -> dict:
+    """Os contratos de um responsável no período — a lista que aparece ao
+    clicar no vendedor. Mostra também os que não contam (ex.: plano mensal),
+    com o motivo, pra supervisora conferir com a Pacto."""
+    views = await _unit_views(db, company_id)
+    selected = [v for v in _select_views(views, unit) if v.from_contracts]
+    by_name = {v.norm_name: v for v in selected}
+    display = await _display_names(db, views)
+    target = _norm(name)
+    contratos = []
+    if by_name and target:
+        rows = (
+            (
+                await db.execute(
+                    select(SalesContract)
+                    .where(
+                        SalesContract.company_id == company_id,
+                        SalesContract.lancamento >= date_from,
+                        SalesContract.lancamento <= date_to,
+                    )
+                    .order_by(SalesContract.lancamento.desc(), SalesContract.contrato.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for c in rows:
+            view = by_name.get(_norm(c.empresa_nome))
+            if view is None or _norm(c.responsavel) != target:
+                continue
+            annual = sales_contracts.is_annual(c.duracao, c.plano)
+            months = c.duracao or 1
+            contratos.append(
+                {
+                    "cliente": display_name(c.cliente_nome or ""),
+                    "matricula": c.matricula,
+                    "data": c.lancamento.isoformat(),
+                    "tipo": c.produto,
+                    "plano": c.plano,
+                    "duracao": c.duracao,
+                    "unidade": display[view.key],
+                    "conta": annual,
+                    "motivo": None if annual else f"Plano não anual ({months} {'mês' if months == 1 else 'meses'})",
+                }
+            )
+    return {
+        "nome": display_name(name),
+        "total": sum(1 for c in contratos if c["conta"]),
+        "contratos": contratos,
+        "disponivel": bool(by_name),
+    }
+
+
 async def build_ranking(
     db: AsyncSession, company_id: UUID, unit: str | None, date_from: date, date_to: date
 ) -> dict:
-    units = (
-        (await db.execute(select(PactoUnit).where(PactoUnit.company_id == company_id).order_by(PactoUnit.pacto_name)))
-        .scalars()
-        .all()
-    )
-    by_key = {unit_key(u): u for u in units}
-    selected = [by_key[unit]] if unit and unit != "all" and unit in by_key else list(units)
-    pairs = [(u.chave_empresa, u.empresa_id) for u in selected]
+    views = await _unit_views(db, company_id)
+    selected = _select_views(views, unit)
+    legacy = [v for v in selected if not v.from_contracts and v.pair]
+    contract_views = {v.norm_name: v for v in selected if v.from_contracts}
+    pairs = [v.pair for v in legacy]
 
-    rows = []
+    rows: list = []
     synced_count = 0
     last_synced: datetime | None = None
-    if selected:
+    if contract_views:
+        contracts = (
+            (
+                await db.execute(
+                    select(SalesContract).where(
+                        SalesContract.company_id == company_id,
+                        SalesContract.lancamento >= date_from,
+                        SalesContract.lancamento <= date_to,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rows.extend(_contract_rows(contracts, contract_views))
+        synced = (
+            await db.execute(
+                select(SalesContract.empresa_nome, func.max(SalesContract.synced_at))
+                .where(SalesContract.company_id == company_id)
+                .group_by(SalesContract.empresa_nome)
+            )
+        ).all()
+        stamps = [ts for name, ts in synced if _norm(name) in contract_views and ts]
+        last_synced = max(stamps) if stamps else None
+    if legacy:
         pair_filter = [
             (SalesDaily.chave_empresa == c) & (SalesDaily.empresa_id == e) for c, e in pairs
         ]
-        rows = (
+        rows.extend(
             (
                 await db.execute(
                     select(SalesDaily).where(
@@ -540,12 +709,14 @@ async def build_ranking(
                 )
             )
         ).one()
-        synced_count, last_synced = int(sync_rows[0] or 0), sync_rows[1]
+        synced_count = int(sync_rows[0] or 0)
+        if sync_rows[1] and (last_synced is None or sync_rows[1] > last_synced):
+            last_synced = sync_rows[1]
 
     today = datetime.now(_TZ).date()
     effective_to = min(date_to, today)
     days_in_range = max((effective_to - date_from).days + 1, 0)
-    expected = days_in_range * len(selected)
+    expected = days_in_range * len(legacy)
 
     site = _site_names()
     people: dict[str, dict] = {}
@@ -584,20 +755,19 @@ async def build_ranking(
         if short_counts[person["nome_curto"]] > 1:
             person["nome_curto"] = person["nome"]
 
-    catalog_ids = [u.unit_id for u in units if u.unit_id]
-    catalog_names: dict = {}
-    if catalog_ids:
-        catalog_names = dict(
-            (await db.execute(select(Unit.id, Unit.name).where(Unit.id.in_(catalog_ids)))).all()
-        )
-    display = {unit_key(u): unit_display_name(u.pacto_name, catalog_names.get(u.unit_id)) for u in units}
-    selected_name = display[unit_key(selected[0])] if len(selected) == 1 else None
+    display = await _display_names(db, views)
+    selected_name = display[selected[0].key] if len(selected) == 1 else None
+    if not selected or not any(v.from_contracts for v in selected):
+        source = "mcp"
+    else:
+        source = "n8n" if all(v.from_contracts for v in selected) else "misto"
 
     return {
         "periodo": {"de": date_from.isoformat(), "ate": date_to.isoformat()},
-        "unidade": unit if unit in by_key else "all",
+        "unidade": unit if unit in {v.key for v in views} else "all",
         "unidade_nome": selected_name,
-        "unidades": [{"key": unit_key(u), "nome": u.pacto_name, "nome_exibicao": display[unit_key(u)]} for u in units],
+        "unidades": [{"key": v.key, "nome": v.pacto_name, "nome_exibicao": display[v.key]} for v in views],
+        "fonte": source,
         "total_novas_anuais": team_total + site_total + unassigned,
         "equipe": team_total,
         "site": site_total,

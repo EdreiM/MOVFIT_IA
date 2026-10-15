@@ -33,7 +33,13 @@ async def create_api_key(
 ):
     company_id = await resolve_company_id(current, db)
     full_key, key_prefix, key_hash = generate_api_key()
-    api_key = ApiKey(company_id=company_id, name=payload.name, key_prefix=key_prefix, key_hash=key_hash)
+    api_key = ApiKey(
+        company_id=company_id,
+        name=payload.name,
+        key_prefix=key_prefix,
+        key_hash=key_hash,
+        can_write_sales=payload.can_write_sales,
+    )
     db.add(api_key)
     await db.flush()
     await db.refresh(api_key)
@@ -42,6 +48,7 @@ async def create_api_key(
         name=api_key.name,
         key_prefix=api_key.key_prefix,
         is_active=api_key.is_active,
+        can_write_sales=api_key.can_write_sales,
         last_used_at=api_key.last_used_at,
         created_at=api_key.created_at,
         key=full_key,

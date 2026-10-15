@@ -43,6 +43,41 @@ class SalesDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SalesContract(Base):
+    """Um contrato de venda nova (matrícula ou rematrícula) como a Pacto
+    devolve em `faturamento-sintetico/resumo-pessoa`. Chega pelo n8n (que
+    guarda os tokens das unidades) — ver app/services/sales_contracts.py. Ter o
+    contrato inteiro, e não só o total do dia, dá atribuição exata por
+    responsável e a lista de matriculados de cada vendedor."""
+
+    __tablename__ = "sales_contracts"
+    __table_args__ = (UniqueConstraint("company_id", "unidade", "contrato", name="uq_sales_contracts_key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), index=True
+    )
+    # Rótulo da unidade no fluxo do n8n ("24h", "Itaituba"…).
+    unidade: Mapped[str] = mapped_column(String(100))
+    # Nome da empresa como a Pacto escreve ("MOVFIT SANTAREM - PA | 0003") —
+    # é por ele que a unidade casa com o cadastro vindo do MCP.
+    empresa_nome: Mapped[str] = mapped_column(String(255))
+    contrato: Mapped[int] = mapped_column(Integer)
+    matricula: Mapped[str | None] = mapped_column(String(32))
+    cliente_nome: Mapped[str | None] = mapped_column(String(255))
+    responsavel: Mapped[str | None] = mapped_column(String(255))
+    consultor: Mapped[str | None] = mapped_column(String(255))
+    plano: Mapped[str | None] = mapped_column(String(255))
+    duracao: Mapped[int | None] = mapped_column(Integer)
+    # "Matrícula" / "Rematrícula" (como veio, com acento).
+    produto: Mapped[str] = mapped_column(String(64))
+    # Dia do lançamento do contrato (o que a Pacto usa pra contar no período).
+    lancamento: Mapped[date] = mapped_column(Date, index=True)
+    vendido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    inicio: Mapped[date | None] = mapped_column(Date)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class SalesSyncDay(Base):
     """Dias já consultados na Pacto por unidade — inclusive os sem nenhuma
     venda (que não geram linha em SalesDaily), pra não reconsultar à toa."""

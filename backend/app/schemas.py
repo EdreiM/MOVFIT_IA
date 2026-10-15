@@ -750,6 +750,7 @@ class AiOperationsReport(BaseModel):
 # API keys (acesso externo, machine-to-machine)
 class ApiKeyCreate(BaseModel):
     name: str
+    can_write_sales: bool = False
 
 
 class ApiKeyOut(BaseModel):
@@ -757,6 +758,7 @@ class ApiKeyOut(BaseModel):
     name: str
     key_prefix: str
     is_active: bool
+    can_write_sales: bool = False
     last_used_at: datetime | None
     created_at: datetime
 

@@ -1,13 +1,14 @@
 from datetime import date, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.deps import get_api_key_company
-from app.models import Lead
+from app.deps import get_api_key_company, get_sales_writer_company
+from app.models import Lead, SalesContract
 from app.routers.metrics import (
     _compute_featured_tools_stats,
     _compute_leads_funnel,
@@ -24,6 +25,7 @@ from app.schemas import (
     StageCount,
     ToolStats,
 )
+from app.services import sales_contracts
 from app.services.metrics_narrative import compute_metrics_narrative
 from app.services.metrics_operations import compute_ai_operations_report
 from app.services.metrics_showcase import compute_metrics_showcase
@@ -121,3 +123,99 @@ async def metrics_operations_report_external(
         date_from=date_from or default_from,
         date_to=date_to or default_to,
     )
+
+
+# --- Vendas (ranking) -----------------------------------------------------
+
+
+class SalesContractsIn(BaseModel):
+    """Um produto (matrícula ou rematrícula) de uma unidade, num período — o
+    corpo cru de `faturamento-sintetico/resumo-pessoa` (campo `content`),
+    como o fluxo do n8n recebe da Pacto."""
+
+    unidade: str = Field(min_length=1, max_length=100)
+    produto: str = Field(min_length=1, max_length=64)
+    data_inicio: date
+    data_fim: date
+    # `totalElements` da Pacto. Com ele o painel sabe se a lista veio inteira
+    # (só então remove o que sumiu do período).
+    total: int | None = Field(default=None, ge=0)
+    contratos: list[dict] = Field(default_factory=list, max_length=sales_contracts.MAX_CONTRACTS_PER_REQUEST)
+
+
+@router.post("/sales/contracts")
+async def ingest_sales_contracts(
+    body: SalesContractsIn,
+    company_id: UUID = Depends(get_sales_writer_company),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recebe do n8n os contratos de venda nova de uma unidade (alimenta o
+    ranking de vendas). Idempotente: reenviar o mesmo período só atualiza."""
+    if body.data_inicio > body.data_fim:
+        raise HTTPException(status_code=400, detail="data_inicio é depois de data_fim.")
+    if (body.data_fim - body.data_inicio).days > 366:
+        raise HTTPException(status_code=400, detail="Período longo demais (máximo de 1 ano).")
+    try:
+        result = await sales_contracts.ingest(
+            db,
+            company_id,
+            unidade=body.unidade,
+            produto=body.produto,
+            data_inicio=body.data_inicio,
+            data_fim=body.data_fim,
+            total=body.total,
+            records=body.contratos,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await db.commit()
+    return {"sucesso": True, "mensagem": "Contratos gravados.", "dados": result}
+
+
+@router.get("/sales/contracts")
+async def list_sales_contracts(
+    date_from: date | None = None,
+    date_to: date | None = None,
+    unidade: str | None = None,
+    responsavel: str | None = None,
+    limit: int = Query(1000, ge=1, le=5000),
+    company_id: UUID = Depends(get_api_key_company),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lista os contratos de venda nova guardados (mesma base do ranking) —
+    pra usar em fluxos do n8n como mais uma fonte, ao lado do MCP."""
+    stmt = select(SalesContract).where(SalesContract.company_id == company_id)
+    if date_from:
+        stmt = stmt.where(SalesContract.lancamento >= date_from)
+    if date_to:
+        stmt = stmt.where(SalesContract.lancamento <= date_to)
+    if unidade:
+        stmt = stmt.where(SalesContract.unidade == unidade)
+    if responsavel:
+        stmt = stmt.where(SalesContract.responsavel.ilike(f"%{responsavel}%"))
+    stmt = stmt.order_by(SalesContract.lancamento.desc(), SalesContract.contrato.desc()).limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "sucesso": True,
+        "mensagem": "",
+        "dados": {
+            "total": len(rows),
+            "contratos": [
+                {
+                    "unidade": r.unidade,
+                    "empresa": r.empresa_nome,
+                    "contrato": r.contrato,
+                    "matricula": r.matricula,
+                    "cliente": r.cliente_nome,
+                    "responsavel": r.responsavel,
+                    "consultor": r.consultor,
+                    "plano": r.plano,
+                    "duracao": r.duracao,
+                    "produto": r.produto,
+                    "anual": sales_contracts.is_annual(r.duracao, r.plano),
+                    "lancamento": r.lancamento.isoformat(),
+                }
+                for r in rows
+            ],
+        },
+    }

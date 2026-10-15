@@ -14,7 +14,7 @@ from app.models.knowledge_gap import KnowledgeGap
 from app.models.llm_usage import LlmUsage
 from app.models.pacto import PactoConnection, PactoUnit
 from app.models.system_event import SystemEvent
-from app.models.sales import SalesDaily, SalesSyncDay
+from app.models.sales import SalesContract, SalesDaily, SalesSyncDay
 
 __all__ = [
     "Company",
@@ -40,6 +40,7 @@ __all__ = [
     "PactoConnection",
     "PactoUnit",
     "SystemEvent",
+    "SalesContract",
     "SalesDaily",
     "SalesSyncDay",
 ]

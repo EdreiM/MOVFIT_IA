@@ -94,10 +94,10 @@ def require_roles(*roles: str):
     return _dep
 
 
-async def get_api_key_company(
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-    db: AsyncSession = Depends(get_db),
-) -> UUID:
+async def _authenticate_api_key(
+    credentials: HTTPAuthorizationCredentials | None,
+    db: AsyncSession,
+) -> ApiKey:
     """Autenticação machine-to-machine pra API externa (/api/v1/*) — chave
     de acesso no header Authorization: Bearer, sem usuário/login por trás.
     Ver app/models/api_key.py."""
@@ -110,6 +110,28 @@ async def get_api_key_company(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Chave de API inválida")
     api_key.last_used_at = datetime.now(timezone.utc)
     await db.flush()
+    return api_key
+
+
+async def get_api_key_company(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> UUID:
+    return (await _authenticate_api_key(credentials, db)).company_id
+
+
+async def get_sales_writer_company(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> UUID:
+    """Como get_api_key_company, mas só aceita chave marcada pra enviar vendas
+    (as chaves de leitura, como a do link de métricas, recebem 403)."""
+    api_key = await _authenticate_api_key(credentials, db)
+    if not api_key.can_write_sales:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Essa chave é só de leitura. Crie uma chave com a permissão de enviar vendas.",
+        )
     return api_key.company_id
 
 

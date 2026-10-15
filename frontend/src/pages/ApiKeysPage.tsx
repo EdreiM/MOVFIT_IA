@@ -6,6 +6,7 @@ type ApiKey = {
   name: string;
   key_prefix: string;
   is_active: boolean;
+  can_write_sales?: boolean;
   last_used_at: string | null;
   created_at: string;
 };
@@ -13,6 +14,7 @@ type ApiKey = {
 export default function ApiKeysPage() {
   const [items, setItems] = useState<ApiKey[]>([]);
   const [name, setName] = useState("");
+  const [canWriteSales, setCanWriteSales] = useState(false);
   const [newKey, setNewKey] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -33,10 +35,11 @@ export default function ApiKeysPage() {
     try {
       const created = await api<ApiKey & { key: string }>("/api-keys", {
         method: "POST",
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({ name: name.trim(), can_write_sales: canWriteSales }),
       });
       setNewKey(created.key);
       setName("");
+      setCanWriteSales(false);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao criar chave");
@@ -109,17 +112,31 @@ export default function ApiKeysPage() {
         </div>
       )}
 
-      <form onSubmit={onCreate} className="flex gap-3 border border-white/10 bg-panel p-5">
-        <input
-          className="flex-1 rounded-md border border-white/15 bg-ink px-3 py-2"
-          placeholder="Nome (ex: n8n - relatório mensal)"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          required
-        />
-        <button type="submit" className="rounded-md bg-leaf px-5 py-2.5 font-semibold text-white hover:bg-lime">
-          Criar chave
-        </button>
+      <form onSubmit={onCreate} className="space-y-3 border border-white/10 bg-panel p-5">
+        <div className="flex gap-3">
+          <input
+            className="flex-1 rounded-md border border-white/15 bg-ink px-3 py-2"
+            placeholder="Nome (ex: n8n - relatório mensal)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+          <button type="submit" className="rounded-md bg-leaf px-5 py-2.5 font-semibold text-white hover:bg-lime">
+            Criar chave
+          </button>
+        </div>
+        <label className="flex items-start gap-2 text-sm text-sand/70">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={canWriteSales}
+            onChange={(e) => setCanWriteSales(e.target.checked)}
+          />
+          <span>
+            Pode <strong>enviar vendas</strong> (para o fluxo do n8n que alimenta o ranking de vendas). Deixe
+            desmarcado nas chaves só de leitura, como a do link de métricas.
+          </span>
+        </label>
       </form>
 
       <ul className="divide-y divide-white/10 border border-white/10">
@@ -128,6 +145,9 @@ export default function ApiKeysPage() {
             <div>
               <p className="font-medium">
                 {k.name} <span className="text-sm text-sand/50">({k.key_prefix}…)</span>
+                {k.can_write_sales && (
+                  <span className="ml-2 rounded border border-leaf/40 px-1.5 py-0.5 text-xs text-lime">envia vendas</span>
+                )}
               </p>
               <p className="text-xs text-sand/40">
                 Criada em {new Date(k.created_at).toLocaleDateString("pt-BR")}
@@ -173,6 +193,15 @@ export default function ApiKeysPage() {
           <li>
             <code className="text-lime">GET /api/v1/metrics/featured-tools</code> — ferramentas
             destacadas
+          </li>
+          <li>
+            <code className="text-lime">GET /api/v1/sales/contracts</code> — contratos de venda nova
+            guardados (filtros: <code>date_from</code>, <code>date_to</code>, <code>unidade</code>,{" "}
+            <code>responsavel</code>)
+          </li>
+          <li>
+            <code className="text-lime">POST /api/v1/sales/contracts</code> — envia contratos de uma
+            unidade (só chave com <em>enviar vendas</em>)
           </li>
         </ul>
 

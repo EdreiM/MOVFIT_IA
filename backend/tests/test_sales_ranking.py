@@ -160,7 +160,35 @@ async def test_only_new_annual_matriculas_count(db_session, company, unit):
 
 
 @pytest.mark.asyncio
-async def test_renewal_in_a_non_annual_plan_is_not_a_new_matricula(db_session, company, unit):
+async def test_annual_rematricula_counts_as_a_new_sale(db_session, company, unit):
+    """Caso real da Luana (24h, 05/10): 1 matrícula + 1 rematrícula, as duas
+    de plano anual → 2 vendas novas. A supervisora confirmou que rematrícula conta."""
+    fake = FakePacto(
+        [sale(278, "Matrícula", ANUAL), sale(278, "Rematrícula", ANUAL)],
+        responsaveis={278: "LUANA CAMILY MOTA GODINHO"},
+    )
+    await _sync_day(db_session, company, unit, fake)
+
+    row = (await _rows(db_session, company))["LUANA CAMILY MOTA GODINHO"]
+    assert row.matriculas == 1 and row.rematriculas == 1
+    assert row.novas_anuais == 2
+    assert row.estimated is False
+
+
+@pytest.mark.asyncio
+async def test_renewal_never_counts_even_in_an_annual_plan(db_session, company, unit):
+    fake = FakePacto(
+        [sale(135, "Matrícula", ANUAL), sale(135, "Renovação", ANUAL), sale(135, "Renovação", ANUAL)],
+        responsaveis={135: "PABLO SILVA BRITO"},
+    )
+    await _sync_day(db_session, company, unit, fake)
+
+    row = (await _rows(db_session, company))["PABLO SILVA BRITO"]
+    assert row.novas_anuais == 1 and row.renovacoes == 2
+
+
+@pytest.mark.asyncio
+async def test_rematricula_in_a_non_annual_plan_is_still_excluded(db_session, company, unit):
     fake = FakePacto(
         [sale(278, "Matrícula", ANUAL), sale(278, "Rematrícula", AVULSO)],
         responsaveis={278: "LUANA CAMILY MOTA GODINHO"},
@@ -168,14 +196,12 @@ async def test_renewal_in_a_non_annual_plan_is_not_a_new_matricula(db_session, c
     await _sync_day(db_session, company, unit, fake)
 
     row = (await _rows(db_session, company))["LUANA CAMILY MOTA GODINHO"]
-    # o avulso era a REMATRÍCULA (a lista venda a venda diz isso): a matrícula é anual
-    assert row.matriculas == 1 and row.novas_anuais == 1
-    assert row.rematriculas == 1
-    assert row.estimated is True  # separação feita pela lista da unidade, não só pelo responsável
+    assert row.novas_anuais == 1  # a rematrícula era de plano avulso: só vale anual
+    assert row.estimated is False
 
 
 @pytest.mark.asyncio
-async def test_non_annual_matricula_mixed_with_rematricula_is_subtracted(db_session, company, unit):
+async def test_non_annual_matricula_next_to_an_annual_rematricula(db_session, company, unit):
     fake = FakePacto(
         [sale(7, "Matrícula", AVULSO), sale(7, "Rematrícula", ANUAL)],
         responsaveis={7: "FULANO"},
@@ -183,7 +209,8 @@ async def test_non_annual_matricula_mixed_with_rematricula_is_subtracted(db_sess
     await _sync_day(db_session, company, unit, fake)
 
     row = (await _rows(db_session, company))["FULANO"]
-    assert row.matriculas == 1 and row.novas_anuais == 0
+    assert row.matriculas == 1 and row.rematriculas == 1
+    assert row.novas_anuais == 1  # a matrícula avulsa fica de fora, a rematrícula anual conta
 
 
 @pytest.mark.asyncio
@@ -222,9 +249,11 @@ def test_allocation_never_exceeds_the_unit_budget():
             {"descricao": "MATRÍCULA", "quantidade": 1}, {"descricao": "REMATRÍCULA", "quantidade": 1}]},
         {"tipo_produto": "Mês de Referência Plano", "produtos": [{"descricao": AVULSO, "quantidade": 1}]},
     ]}))
-    allocate_non_annual([a, b], na_unit_matriculas=1)  # só 1 das 2 avulsas foi matrícula
+    allocate_non_annual([a, b], na_unit_matriculas=1)  # só 1 das 2 avulsas foi venda nova
     assert a.na + b.na == 1
-    assert a.estimated and b.estimated
+    # B não teve renovação: o avulso dele é venda nova (exato). A misturou com renovação: estimado.
+    assert b.na == 1 and not b.estimated
+    assert a.na == 0 and a.estimated
 
 
 # ----------------------------------------------------------- agregação

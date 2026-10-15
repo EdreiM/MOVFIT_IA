@@ -47,7 +47,18 @@ Toda ferramenta/RAG customizada em n8n deve responder no formato `{"sucesso": bo
 
 ## Ranking de vendas — regras de negócio
 
-Responsável = quem **lançou** o contrato (não o "consultor": o Pablo dá 18 como consultor e 12 como responsável, que é o que a supervisora usa). Conta só **MATRÍCULA** nova, e só de plano **anual** (duração ≥ 12 no nome do plano). "Site" = responsáveis em `SALES_SITE_NAMES`. O cruzamento matrícula × plano anual só é exato no nível do dia, por isso a coleta é diária (`sales_daily`) e a tela soma qualquer período.
+Responsável = quem **lançou** o contrato (não o "consultor": o Pablo dá 18 como consultor e 12 como responsável, que é o que a supervisora usa). Conta venda **nova** — **MATRÍCULA e REMATRÍCULA** (confirmado pela supervisora em 14/10/2026; renovação não conta) — e só de plano **anual** (duração ≥ 12 no nome do plano). "Site" = responsáveis em `SALES_SITE_NAMES`. O cruzamento matrícula × plano anual só é exato no nível do dia, por isso a coleta é diária (`sales_daily`) e a tela soma qualquer período.
+
+### Fonte preferida: contratos vindos do n8n (`sales_contracts`)
+
+O MCP não cruza tipo de venda × plano, então o caminho exato é o endpoint `faturamento-sintetico/resumo-pessoa` do gateway da Pacto (uma linha por contrato, com `responsavelVenda`, `duracao`, `situacaoContrato`, `lancamento`). **Os tokens das unidades ficam só no n8n** — o painel não guarda nenhum. O fluxo `n8n/vendas-contratos-workflow.json` tem uma cadeia por unidade (como o fluxo de avaliações), a cada 20min com gatilhos escalonados em 4min pra nunca somarem no limite da Pacto; cada uma consulta matrícula (`codigoProduto` 10) e rematrícula (11) e faz `POST /v1/sales/contracts` com uma chave de API da empresa (menu "API externa"); `app/services/sales_contracts.py` normaliza e grava, `GET /v1/sales/contracts` devolve a lista pra outros fluxos.
+
+- Limites do gateway: 1 requisição/segundo e 50/minuto (compartilhados) — o fluxo espaça 1,5s entre chamadas; um 429 só adia aquela unidade pro próximo ciclo.
+- Cada POST é um produto de uma unidade no período; se `total` ≤ itens recebidos, o que sumiu da janela é removido (contrato cancelado). Resposta truncada nunca apaga nada. Renovação é recusada (400).
+- Dia do contrato = `lancamento` (meia-noite de Brasília em UTC). Anual = `duracao` ≥ 12.
+- `build_ranking` decide por unidade: se a empresa tem contratos do n8n (casando pelo nome da Pacto, `empresa`), lê de `sales_contracts` (exato, sem "≈"); senão cai no `sales_daily` do MCP. Unidade coberta pelo n8n é pulada na coleta do MCP. O campo `fonte` da API diz `n8n`, `mcp` ou `misto`.
+- Responsáveis em `SALES_UNASSIGNED_NAMES` (padrão `ADMINISTRADOR`) entram no total como "sem responsável", nunca como vendedor.
+- Ao clicar no vendedor, `GET /sales/seller-contracts` lista os contratos dele (inclusive os que não contam, com o motivo).
 
 ## Testando mudanças no backend
 
