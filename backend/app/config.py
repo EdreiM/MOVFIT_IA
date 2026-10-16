@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     eval_reminder_hour: int = 18
     # Ranking de vendas: responsáveis pelo lançamento cujas vendas contam como
     # "site" (separado da equipe), nomes separados por vírgula.
+    # Claude (provedor Anthropic): quanto o modelo "pensa" antes de responder.
+    # low = respostas rápidas e baratas (atendimento por WhatsApp); medium/high
+    # pensam mais (e custam mais). Vazio = padrão do modelo.
+    anthropic_effort: str = "low"
     sales_site_names: str = "SITE MOVFITBRASIL"
     # Responsáveis que não são uma pessoa (lançamento feito pelo sistema/admin):
     # a venda entra no total, mas como "sem responsável", nunca como vendedor.

@@ -50,6 +50,11 @@ type Rag = {
 };
 
 const OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"];
+const ANTHROPIC_MODELS = [
+  { value: "claude-haiku-5-5", label: "Claude Haiku 5.5 (rápido e barato)" },
+  { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (mais capaz, ~20x mais caro)" },
+];
+const PROVIDER_NAMES: Record<string, string> = { openai: "OpenAI", anthropic: "Anthropic" };
 
 export default function AiConfigPage() {
   const { companyId } = useAuth();
@@ -58,6 +63,8 @@ export default function AiConfigPage() {
   const [config, setConfig] = useState<AiConfig | null>(null);
   const [rags, setRags] = useState<Rag[]>([]);
   const [apiKey, setApiKey] = useState("");
+  // Provedor que está salvo — trocar de provedor exige colar a chave do novo.
+  const [savedProvider, setSavedProvider] = useState("openai");
   const [transcriptionApiKey, setTranscriptionApiKey] = useState("");
   const [ragName, setRagName] = useState("");
   const [ragUrl, setRagUrl] = useState("");
@@ -69,6 +76,7 @@ export default function AiConfigPage() {
     const qs = targetIntegrationId ? `?integration_id=${targetIntegrationId}` : "";
     const cfg = await api<AiConfig>(`/ai-configs/${companyId}${qs}`);
     setConfig({ ...cfg, custom_links: cfg.custom_links ?? [] });
+    setSavedProvider(cfg.llm_provider);
     setApiKey("");
   };
 
@@ -88,6 +96,12 @@ export default function AiConfigPage() {
     if (!companyId || !config) return;
     setError("");
     setMsg("");
+    if (config.llm_provider !== savedProvider && !apiKey.trim()) {
+      setError(
+        `Ao trocar para ${PROVIDER_NAMES[config.llm_provider] ?? config.llm_provider}, cole também a API Key desse provedor.`
+      );
+      return;
+    }
     try {
       const qs = integrationId ? `?integration_id=${integrationId}` : "";
       const body: Record<string, unknown> = {
@@ -119,6 +133,7 @@ export default function AiConfigPage() {
         body: JSON.stringify(body),
       });
       setConfig(updated);
+      setSavedProvider(updated.llm_provider);
       setApiKey("");
       setTranscriptionApiKey("");
       setMsg("Configuração salva.");
@@ -285,12 +300,15 @@ export default function AiConfigPage() {
             <select
               className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
               value={config.llm_provider}
-              onChange={(e) => setConfig({ ...config, llm_provider: e.target.value })}
+              onChange={(e) => {
+                const provider = e.target.value;
+                // Cada provedor tem os seus modelos: já seleciona o primeiro.
+                const model = provider === "anthropic" ? ANTHROPIC_MODELS[0].value : OPENAI_MODELS[0];
+                setConfig({ ...config, llm_provider: provider, llm_model: model });
+              }}
             >
               <option value="openai">OpenAI</option>
-              <option value="anthropic" disabled>
-                Anthropic (em breve)
-              </option>
+              <option value="anthropic">Anthropic (Claude)</option>
             </select>
           </label>
           <label className="block space-y-1">
@@ -300,11 +318,17 @@ export default function AiConfigPage() {
               value={config.llm_model}
               onChange={(e) => setConfig({ ...config, llm_model: e.target.value })}
             >
-              {OPENAI_MODELS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
+              {config.llm_provider === "anthropic"
+                ? ANTHROPIC_MODELS.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))
+                : OPENAI_MODELS.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
             </select>
           </label>
           <label className="block space-y-1">
@@ -314,19 +338,23 @@ export default function AiConfigPage() {
               step="0.1"
               min="0"
               max="2"
-              className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
+              className="w-full rounded-md border border-white/15 bg-ink px-3 py-2 disabled:opacity-40"
               value={config.temperature}
+              disabled={config.llm_provider === "anthropic"}
               onChange={(e) =>
                 setConfig({ ...config, temperature: Number(e.target.value) })
               }
             />
+            {config.llm_provider === "anthropic" && (
+              <span className="block text-xs text-sand/40">Os modelos Claude não usam temperatura.</span>
+            )}
           </label>
         </div>
 
         <label className="block space-y-1">
           <span className="text-sm text-sand/60">
-            API Key OpenAI{" "}
-            {config.has_api_key && (
+            API Key {PROVIDER_NAMES[config.llm_provider] ?? config.llm_provider}{" "}
+            {config.has_api_key && config.llm_provider === savedProvider && (
               <span className="text-lime">
                 (atual: {config.llm_api_key_masked})
               </span>
@@ -335,10 +363,24 @@ export default function AiConfigPage() {
           <input
             type="password"
             className="w-full rounded-md border border-white/15 bg-ink px-3 py-2"
-            placeholder={config.has_api_key ? "•••• cole nova key para rotacionar" : "sk-..."}
+            placeholder={
+              config.llm_provider !== savedProvider
+                ? `Cole a API Key da ${PROVIDER_NAMES[config.llm_provider] ?? config.llm_provider} para ativar`
+                : config.has_api_key
+                  ? "•••• cole nova key para rotacionar"
+                  : config.llm_provider === "anthropic"
+                    ? "sk-ant-..."
+                    : "sk-..."
+            }
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
+          {config.llm_provider !== savedProvider && (
+            <span className="block text-xs text-yellow-300">
+              Você trocou o provedor: a chave atual não serve nele. Cole a nova e salve — as respostas passam a
+              usar {PROVIDER_NAMES[config.llm_provider]} assim que salvar.
+            </span>
+          )}
         </label>
 
         <label className="block space-y-1">

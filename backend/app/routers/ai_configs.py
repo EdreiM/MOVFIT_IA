@@ -31,6 +31,30 @@ from app.services.message_flow import resolve_ai_config, save_message
 
 router = APIRouter(tags=["ai-configs"])
 
+_LLM_PROVIDERS = {"openai": "OpenAI", "anthropic": "Anthropic"}
+
+
+def _check_llm_choice(config: AiConfig, data: dict, *, has_new_key: bool) -> None:
+    """Provedor, modelo e chave precisam combinar: uma combinação errada
+    (ex.: modelo da OpenAI com chave da Anthropic) faria TODA resposta da IA
+    falhar, então é recusada na hora de salvar."""
+    if "llm_provider" not in data and "llm_model" not in data:
+        return
+    provider = (data.get("llm_provider") or config.llm_provider or "openai").lower()
+    model = (data.get("llm_model") or config.llm_model or "").strip()
+    if provider not in _LLM_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Provedor de IA desconhecido.")
+    if data.get("llm_provider") and provider != (config.llm_provider or "openai").lower() and not has_new_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ao trocar de provedor, cole também a API Key da {_LLM_PROVIDERS[provider]} — a chave atual não serve nele.",
+        )
+    if (provider == "anthropic") != model.lower().startswith("claude"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"O modelo \"{model}\" não é do provedor {_LLM_PROVIDERS[provider]}.",
+        )
+
 TEST_CHAT_PHONE = "__test_console__"
 
 
@@ -187,6 +211,7 @@ async def update_ai_config(
     api_key = data.pop("llm_api_key", None)
     transcription_key = data.pop("transcription_api_key", None)
     custom_links = data.pop("custom_links", None)
+    _check_llm_choice(config, data, has_new_key=bool(api_key))
     if custom_links is not None:
         default_config.custom_links = custom_links
     for k, v in data.items():

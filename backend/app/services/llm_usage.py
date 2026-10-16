@@ -32,6 +32,10 @@ PRICES_USD_PER_MTOK: dict[str, tuple[Decimal, Decimal, Decimal]] = {
     "gpt-4.1-mini": (Decimal("0.40"), Decimal("0.10"), Decimal("1.60")),
     "gpt-4.1": (Decimal("2.00"), Decimal("0.50"), Decimal("8.00")),
     "o4-mini": (Decimal("1.10"), Decimal("0.275"), Decimal("4.40")),
+    # Anthropic, conferido em platform.claude.com/docs/en/about-claude/pricing em
+    # 16/10/2026 (prompts de até 100 mil tokens; acima disso a Haiku cobra mais).
+    "claude-haiku-5-5": (Decimal("0.10"), Decimal("0.01"), Decimal("0.50")),
+    "claude-sonnet-5-5": (Decimal("2.00"), Decimal("0.10"), Decimal("10.00")),
 }
 _MTOK = Decimal(1_000_000)
 _BRAZIL_TZ = "America/Sao_Paulo"
