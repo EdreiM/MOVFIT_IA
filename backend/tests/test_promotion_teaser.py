@@ -81,3 +81,12 @@ def test_the_banner_goes_with_the_explanation_not_with_the_teaser():
 
     assert _pick_sales_media_for_bubble(TEASER, context, set()) == []
     assert _pick_sales_media_for_bubble(DETAILS, context, set()) == [promotion]
+
+
+def test_restricted_audience_is_named_in_the_teaser_and_still_a_teaser():
+    from app.services.promotions import promotion_restricted_audience
+
+    assert promotion_restricted_audience(_promotion(audience="women")) == "mulheres"
+    assert promotion_restricted_audience(_promotion(audience="all")) is None
+    assert promotion_restricted_audience(_promotion(audience=None)) is None
+    assert is_promotion_teaser("Tenho também uma condição especial de Outubro Rosa, pensada pras mulheres — quer que eu te conte?")

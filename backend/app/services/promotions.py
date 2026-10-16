@@ -163,6 +163,12 @@ def _audience_label(audience: str) -> str:
     }.get(audience, audience)
 
 
+def promotion_restricted_audience(promotion: Promotion) -> str | None:
+    """Pra quem a promoção vale, quando não é pra todo mundo ("mulheres")."""
+    audience = promotion.audience or "all"
+    return None if audience == "all" else _audience_label(audience)
+
+
 def format_promotions_prompt_block(promotions: list[Promotion]) -> str:
     if not promotions:
         return ""

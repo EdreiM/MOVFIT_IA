@@ -55,6 +55,7 @@ from app.services.promotions import (
     is_promotion_teaser,
     present_promotions,
     promotion_mentioned_in_text,
+    promotion_restricted_audience,
     promotion_transfer_active,
     promotions_mentioned_in_reply,
     run_promotion_transfer_pipeline,
@@ -5461,7 +5462,11 @@ async def generate_ai_reply(
             and not promotion_mentioned_in_text(user_text, p, only_promotion=only_promotion)
         ]
         if not_offered_yet:
-            titles = "; ".join(p.title for p in not_offered_yet)
+            titles = "; ".join(
+                p.title
+                + (f" (vale só pra: {audience})" if (audience := promotion_restricted_audience(p)) else "")
+                for p in not_offered_yet
+            )
             messages.append(
                 {
                     "role": "system",
@@ -5471,8 +5476,11 @@ async def generate_ai_reply(
                         "(unidade já definida), NÃO explique a promoção: termine a mensagem com UMA "
                         "frase curta só perguntando se o cliente quer saber de uma condição especial, "
                         "citando o NOME dela — ex.: \"Tenho também uma condição especial de [nome da "
-                        "promoção] — quer que eu te conte?\". Nessa mensagem NÃO diga desconto, brinde, "
-                        "prazo, público nem regra nenhuma dela. Só explique (em 1 ou 2 frases, do seu "
+                        "promoção] — quer que eu te conte?\". Se a promoção vale só pra um público "
+                        "(indicado acima), diga isso na própria pergunta, sem presumir o gênero do "
+                        "cliente — ex.: \"...de [nome da promoção], pensada pras mulheres — quer que eu "
+                        "te conte?\". Nessa mensagem NÃO diga desconto, brinde, prazo nem regra "
+                        "nenhuma dela, só o nome e, se houver, pra quem é. Só explique (em 1 ou 2 frases, do seu "
                         "jeito, sem copiar o texto oficial) se o cliente disser que quer saber; se ele "
                         "disser que não, não insista. Se ainda estiver perguntando a unidade, deixe "
                         "isso pra quando apresentar os planos. Só não pergunte se as condições dela "
