@@ -449,6 +449,22 @@ def confirms_promotion_interest(text: str) -> bool:
     return len(tokens) <= 8 and bool(tokens & _SALES_CONFIRM_TOKENS)
 
 
+_TEASER_WORDS = {
+    "conte", "contar", "conto", "contei", "explico", "explicar", "detalhes", "saber", "ouvir", "conhecer",
+}
+_TEASER_MAX_CHARS = 260
+
+
+def is_promotion_teaser(text: str | None) -> bool:
+    """Bolha que só PERGUNTA se o cliente quer saber da promoção ("tenho uma
+    condição especial de outubro — quer que eu te conte?"), sem apresentá-la.
+    Nela o banner não acompanha e um "sim" do cliente não é aceite da promoção
+    (é "pode contar"): a IA ainda vai explicar antes."""
+    if not text or "?" not in text or len(text) > _TEASER_MAX_CHARS:
+        return False
+    return bool(_normalize_tokens(text) & _TEASER_WORDS)
+
+
 def _last_ai_turn(history: list[Message]) -> list[Message]:
     """Bolhas da última resposta da IA, em ordem (ignora as mensagens do
     cliente que vieram depois dela)."""
@@ -476,6 +492,13 @@ def sales_promotion_to_transfer(
     last_turn = _last_ai_turn(history)
     closing = next((m.text for m in reversed(last_turn) if m.actor == "ai" and m.text), "")
     closing_tokens = _normalize_tokens(closing)
+    if is_promotion_teaser(closing) and not any(
+        promotion_mentioned_in_text(user_text, p, only_promotion=only) for p in promotions
+    ):
+        # A IA só perguntou se o cliente quer ouvir da promoção: o "sim" é um
+        # "pode contar", não o aceite — ela explica primeiro, e só a próxima
+        # confirmação (depois da explicação) transfere.
+        return None
     for promotion in promotions:
         if not promotion.requires_transfer:
             continue

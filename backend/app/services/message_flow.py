@@ -52,6 +52,7 @@ from app.services.promotions import (
     find_recent_offered_promotion,
     format_promotions_prompt_block,
     get_active_promotions,
+    is_promotion_teaser,
     present_promotions,
     promotion_mentioned_in_text,
     promotion_transfer_active,
@@ -4226,7 +4227,12 @@ def _pick_sales_media_for_bubble(
     if plan and plan.image_url and f"plan:{plan.id}" not in already_picked:
         already_picked.add(f"plan:{plan.id}")
         picked.append(plan)
-    for promotion in promotions_mentioned_in_reply(bubble_text, context.promotions, context.unit_id):
+    # Bolha que só pergunta "quer que eu te conte da promoção?" não leva o banner:
+    # a arte vai junto da explicação, depois que o cliente disser que quer.
+    promos_in_bubble = [] if is_promotion_teaser(bubble_text) else promotions_mentioned_in_reply(
+        bubble_text, context.promotions, context.unit_id
+    )
+    for promotion in promos_in_bubble:
         if promotion.image_url and f"promo:{promotion.id}" not in already_picked:
             already_picked.add(f"promo:{promotion.id}")
             picked.append(promotion)
@@ -4534,7 +4540,12 @@ def _llm_whatsapp_and_tone_instructions(sales_mode: bool = False) -> str:
         "4) NUNCA invente valor ou condição fora do catálogo/RAG. Se não souber, diga e "
         "ofereça transferir — mas não se contradiga ao que você mesma disse há pouco no histórico.\n"
         "5) Se prometer transferir ou encaminhar pra atendente, chame transferir_atendimento "
-        "nessa mesma resposta quando a ferramenta existir."
+        "nessa mesma resposta quando a ferramenta existir.\n"
+        "6) RESPOSTAS CURTAS, como no WhatsApp de verdade: no máximo 2 ou 3 frases curtas por "
+        "resposta, uma ideia de cada vez (ao citar planos, cada plano em uma frase com o valor). "
+        "NÃO despeje tudo o que você sabe: responda só o que o cliente perguntou, faça no máximo "
+        "UMA pergunta pra seguir a conversa e deixe detalhes, benefícios extras e outras ofertas "
+        "pra quando ele pedir ou demonstrar interesse. Nunca ofereça duas coisas na mesma mensagem."
     )
 
 
@@ -4655,7 +4666,7 @@ def _sales_plans_system_block(catalog_context: str, wants_no_fidelity: bool) -> 
         "asterisco*, e no máximo no nome do plano ou no valor.\n"
         "- Compare de verdade: diga a diferença em reais entre os planos. Se os benefícios são "
         "os mesmos, diga isso em vez de repetir a lista em cada plano, e use como argumento o "
-        "que realmente muda (preço, forma de pagamento, fidelidade). Cite só os 2 ou 3 "
+        "que realmente muda (preço, forma de pagamento, fidelidade). Cite só 1 ou 2 "
         "benefícios que mais importam pra esse cliente — e SOMENTE benefícios listados naquele "
         "plano no catálogo abaixo; nunca atribua a uma unidade algo de outra (ex: funcionamento "
         "24 horas).\n"
@@ -5446,6 +5457,8 @@ async def generate_ai_reply(
             for p in active_promotions
             if p.mention_on_plan_request
             and not any(promotion_mentioned_in_text(t, p, only_promotion=only_promotion) for t in ai_texts)
+            # Se foi o cliente que perguntou da promoção, a resposta normal explica.
+            and not promotion_mentioned_in_text(user_text, p, only_promotion=only_promotion)
         ]
         if not_offered_yet:
             titles = "; ".join(p.title for p in not_offered_yet)
@@ -5453,14 +5466,17 @@ async def generate_ai_reply(
                 {
                     "role": "system",
                     "content": (
-                        f"LEMBRETE DESTE TURNO: há promoção ativa que você ainda NÃO ofereceu nesta "
+                        f"LEMBRETE DESTE TURNO: há promoção ativa que você ainda NÃO mencionou nesta "
                         f"conversa: {titles}. Se nesta resposta você apresentar planos ou valores "
-                        "(unidade já definida), ofereça essa promoção num parágrafo só dela, depois "
-                        "dos planos e antes da pergunta final, do seu jeito: pra quem vale e o que a "
-                        "pessoa ganha, em 1 ou 2 frases, sem copiar o texto oficial. "
-                        "Se ainda estiver perguntando a unidade, deixe a promoção pra quando "
-                        "apresentar os planos. Só não ofereça se as condições dela claramente não "
-                        "servirem pra esse cliente."
+                        "(unidade já definida), NÃO explique a promoção: termine a mensagem com UMA "
+                        "frase curta só perguntando se o cliente quer saber de uma condição especial, "
+                        "citando o NOME dela — ex.: \"Tenho também uma condição especial de [nome da "
+                        "promoção] — quer que eu te conte?\". Nessa mensagem NÃO diga desconto, brinde, "
+                        "prazo, público nem regra nenhuma dela. Só explique (em 1 ou 2 frases, do seu "
+                        "jeito, sem copiar o texto oficial) se o cliente disser que quer saber; se ele "
+                        "disser que não, não insista. Se ainda estiver perguntando a unidade, deixe "
+                        "isso pra quando apresentar os planos. Só não pergunte se as condições dela "
+                        "claramente não servirem pra esse cliente."
                     ),
                 }
             )
